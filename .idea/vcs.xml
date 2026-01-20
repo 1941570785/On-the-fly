@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/gaussian-splatting" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/gaussian-splatting/SIBR_viewers" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/gaussian-splatting/submodules/diff-gaussian-rasterization" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/gaussian-splatting/submodules/diff-gaussian-rasterization/third_party/glm" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/gaussian-splatting/submodules/fused-ssim" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/gaussian-splatting/submodules/simple-knn" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/on-the-fly-nvs" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/on-the-fly-nvs/submodules/Depth-Anything-V2" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/on-the-fly-nvs/submodules/fused-ssim" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/on-the-fly-nvs/submodules/graphdecoviewer" vcs="Git" />
+  </component>
+</project>
