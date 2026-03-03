@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2025, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -8,6 +7,9 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
+
+# 参考：https://github.com/graphdeco-inria/gaussian-splatting/blob/main/webviewer/webviewer.py
+
 
 import cv2
 import json
@@ -30,6 +32,7 @@ class WebViewer:
         self.trainer_state = "disconnected"
     
     def run(self):
+        # 启动 WebSocket 服务端
         with serve(self.main, self.ip, self.port, max_size=None, compression=None) as server:
             server_thread = Thread(target=server.serve_forever)
             server_thread.start()
@@ -41,6 +44,7 @@ class WebViewer:
                 pass
 
     def main(self, websocket: ServerConnection):
+        # 仅支持单客户端
         if self.num_clients >= 1:
             print("Only one client supported at a time.")
             while self.num_clients >= 1:
@@ -52,6 +56,7 @@ class WebViewer:
         while True:
             try:
                 try:
+                    # 计算场景边界与平均相机位姿（坐标系对齐到 Web 端）
                     cam_centers = self.scene_model.approx_cam_centres
                     cam_centers[:, 1] *= -1  # Flip Y
                     cam_centers[:, 2] *= -1  # Flip Z
@@ -63,6 +68,7 @@ class WebViewer:
                     mean_pose[:3, 2] *= -1  # Flip Z
                     mean_pose = mean_pose.cpu().numpy().flatten().tolist()
                 except (AttributeError,TypeError):
+                    # 无关键帧时回退到单位位姿/零范围
                     max_pos = [0.0, 0.0, 0.0]
                     min_pos = [0.0, 0.0, 0.0]
                     mean_pose = [1.0, 0.0, 0.0, 0.0,
@@ -77,6 +83,7 @@ class WebViewer:
                 }))
                 
                 # Receive state from client
+                # 读取客户端相机参数
                 data = json.loads(websocket.recv())
                 self.state = data["state"]
                 res_x = data["res_x"] // 2
@@ -86,11 +93,13 @@ class WebViewer:
                 fov_x = focal2fov(focal, res_x)
                 
                 if data["snapToLast"]:
+                    # 直接使用最后一帧位姿
                     if len(self.scene_model.keyframes) == 0:
                         pose = torch.eye(4).cuda()
                     else:
                         pose = self.scene_model.keyframes[-1].get_Rt()
                 else:
+                    # 客户端 C2W -> W2C，并做坐标系翻转
                     pose = torch.tensor(data["pose"], dtype=torch.float32).cuda().reshape(4, 4) # CM,C2W
                     pose = pose.transpose(0, 1) # RM,C2W
                     pose[:3,1] *= -1 # Flip Y
@@ -99,6 +108,7 @@ class WebViewer:
                 pose = pose.transpose(0, 1) # CM,W2C
 
                 # Render image and send it to client
+                # 渲染并编码为 JPEG 发送
                 render_pkg = self.scene_model.render(res_x, res_y, pose, 1, fov_x=fov_x, fov_y=fov_y)
                 image = render_pkg["render"]
                 image = image.clamp(0, 1.0).mul(255).permute(1, 2, 0).byte().detach().cpu().numpy()

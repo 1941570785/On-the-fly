@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2025, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -7,7 +6,6 @@
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
-#
 
 # 特征匹配器，用于匹配两个图像中的关键点
 # 参考自：https://github.com/verlab/accelerated_features
@@ -35,12 +33,15 @@ def match(feats1, feats2, min_cossim=0.82):
     # 余弦相似度双向最近邻匹配，返回索引与互为最近邻掩码
     cossim = feats1 @ feats2.t()
 
+    # 计算 1->2 与 2->1 的最近邻索引
     bestcossim, match12 = cossim.max(dim=1)
     _, match21 = cossim.max(dim=0)
 
+    # 互为最近邻的一致性筛选
     idx0 = torch.arange(match12.shape[0], device=match12.device)
     mask = match21[match12] == idx0
 
+    # 可选阈值过滤低相似度匹配
     if min_cossim > 0:
         mask *= bestcossim > min_cossim
 
@@ -67,6 +68,7 @@ class Matcher:
         """
         Get the number of matches between two sets of described keypoints.
         """
+        # 仅统计匹配数量，用于粗评估
         _, _, mask = match(desc_kpts.feats.cuda(), desc_kpts_other.feats.cuda())
         return mask.sum()
 
@@ -95,6 +97,7 @@ class Matcher:
         idx, idx_other, mask = match(
             desc_kpts.feats.cuda(), desc_kpts_other.feats.cuda()
         )
+        # 根据互为最近邻与相似度阈值筛选匹配
         idx = idx[mask]
         idx_other = idx_other[mask]
         kpts = desc_kpts.kpts[idx]
@@ -105,6 +108,7 @@ class Matcher:
         kpts_other_all = kpts_other
 
         if remove_outliers:
+            # 使用基础矩阵 RANSAC 进一步剔除外点
             F, mask = self.fundmat_estimator(kpts, kpts_other)
             idx = idx[mask]
             idx_other = idx_other[mask]
@@ -112,6 +116,7 @@ class Matcher:
             kpts_other = kpts_other[mask]
 
         if update_kpts_flag == "all":
+            # 更新所有匹配结果（含外点）
             assert kID >= 0 and kID_other >= 0
             desc_kpts.update_matches(
                 kID_other, Matches(kpts_all, kpts_other_all, idx_all, idx_other_all)
@@ -120,6 +125,7 @@ class Matcher:
                 kID, Matches(kpts_other_all, kpts_all, idx_other_all, idx_all)
             )
         elif update_kpts_flag == "inliers":
+            # 仅更新 RANSAC 内点匹配
             assert kID >= 0 and kID_other >= 0
             desc_kpts.update_matches(
                 kID_other, Matches(kpts, kpts_other, idx, idx_other)

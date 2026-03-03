@@ -1,3 +1,7 @@
+# 数据集变换实现
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 import cv2
 import math
 import numpy as np
@@ -17,6 +21,7 @@ def apply_min_size(sample, size, image_interpolation_method=cv2.INTER_AREA):
     """
     shape = list(sample["disparity"].shape)
 
+    # 若已满足最小尺寸，直接返回
     if shape[0] >= size[0] and shape[1] >= size[1]:
         return sample
 
@@ -30,6 +35,7 @@ def apply_min_size(sample, size, image_interpolation_method=cv2.INTER_AREA):
     shape[1] = math.ceil(scale * shape[1])
 
     # resize
+    # 按同一缩放比例调整 image/disp/mask
     sample["image"] = cv2.resize(
         sample["image"], tuple(shape[::-1]), interpolation=image_interpolation_method
     )
@@ -94,6 +100,7 @@ class Resize(object):
         self.__image_interpolation_method = image_interpolation_method
 
     def constrain_to_multiple_of(self, x, min_val=0, max_val=None):
+        # 将尺寸约束为 multiple_of 的倍数
         y = (np.round(x / self.__multiple_of) * self.__multiple_of).astype(int)
 
         if max_val is not None and y > max_val:
@@ -110,6 +117,7 @@ class Resize(object):
         scale_width = self.__width / width
 
         if self.__keep_aspect_ratio:
+            # 按策略调整缩放比例
             if self.__resize_method == "lower_bound":
                 # scale such that output size is lower bound
                 if scale_width > scale_height:
@@ -167,6 +175,7 @@ class Resize(object):
         )
 
         # resize sample
+        # 图像使用设定插值方式
         sample["image"] = cv2.resize(
             sample["image"],
             (width, height),
@@ -174,6 +183,7 @@ class Resize(object):
         )
 
         if self.__resize_target:
+            # 同步缩放深度/掩码等目标
             if "disparity" in sample:
                 sample["disparity"] = cv2.resize(
                     sample["disparity"],
@@ -213,6 +223,7 @@ class NormalizeImage(object):
         self.__std = std
 
     def __call__(self, sample):
+        # 按给定均值/方差归一化
         sample["image"] = (sample["image"] - self.__mean) / self.__std
 
         return sample
@@ -226,18 +237,22 @@ class PrepareForNet(object):
         pass
 
     def __call__(self, sample):
+        # HWC -> CHW，并保证连续内存
         image = np.transpose(sample["image"], (2, 0, 1))
         sample["image"] = np.ascontiguousarray(image).astype(np.float32)
 
         if "mask" in sample:
+            # mask 转 float32
             sample["mask"] = sample["mask"].astype(np.float32)
             sample["mask"] = np.ascontiguousarray(sample["mask"])
         
         if "depth" in sample:
+            # depth 转 float32
             depth = sample["depth"].astype(np.float32)
             sample["depth"] = np.ascontiguousarray(depth)
             
         if "semseg_mask" in sample:
+            # 语义分割 mask 转 float32
             sample["semseg_mask"] = sample["semseg_mask"].astype(np.float32)
             sample["semseg_mask"] = np.ascontiguousarray(sample["semseg_mask"])
 
@@ -255,6 +270,7 @@ class Crop(object):
             self.size = size
 
     def __call__(self, sample):
+        # 随机裁剪到指定尺寸
         h, w = sample['image'].shape[-2:]
         assert h >= self.size[0] and w >= self.size[1], 'Wrong size'
         

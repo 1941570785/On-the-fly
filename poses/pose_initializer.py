@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2025, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -7,9 +6,8 @@
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
-#
 
-# 姿态初始化器，用于初始化关键帧的位姿
+# 位姿初始化器，用于初始化关键帧的位姿
 # 参考自：https://github.com/verlab/accelerated_features
 
 
@@ -24,7 +22,7 @@ from poses.ransac import RANSACEstimator, EstimatorType
 
 class PoseInitializer():
     """
-    【姿态估计模块】姿态初始化器
+    【位姿估计模块】位姿初始化器
     
     负责两种姿态初始化模式：
     1. Bootstrap模式：同时估计多个关键帧的初始位姿和焦距
@@ -34,7 +32,7 @@ class PoseInitializer():
     """
     def __init__(self, width, height, triangulator, matcher, max_pnp_error, args):
         """
-        【姿态估计模块】初始化姿态初始化器
+        【位姿估计模块】初始化位姿初始化器
         
         Args:
             width: 图像宽度
@@ -90,6 +88,7 @@ class PoseInitializer():
                       kfId_list: list[int],
     ):
         """Build the problem for mini ba by organizing the matches between the keypoints of the cameras."""
+        # 将多视角匹配组织成 miniBA 所需的 uvs / xyz_indices
         npts_per_primary_cam = npts // n_primary_cam
         uvs = torch.zeros(npts, n_cams, 2, device='cuda') - 1
         xyz_indices = torch.zeros(npts, n_cams, dtype=torch.int64, device='cuda') - 1
@@ -116,6 +115,7 @@ class PoseInitializer():
             xyz_indices_k = xyz_indices[k*npts_per_primary_cam:(k+1)*npts_per_primary_cam]
             for l in range(n_cams):
                 if l == k:
+                    # 主视角自身的关键点坐标直接填充
                     uvs_k[:, l, :] = desc_kpts_list[l].kpts[selected_indices]
                     xyz_indices_k[:, l] = selected_indices
                 else:
@@ -128,6 +128,7 @@ class PoseInitializer():
                         idxk = idxk[mask]
                         idxl = idxl[mask]
 
+                        # 将主视角关键点与其他视角对齐到同一 3D 点槽位
                         set_idx = all_aligned_ids[idxk]
                         unused_kpts_mask[l, idxl] = False
                         uvs_k[set_idx, l, :] = desc_kpts_list[l].kpts[idxl]
@@ -151,10 +152,12 @@ class PoseInitializer():
 
                                 set_idx = all_aligned_ids_l[idxl]
                                 set_mask = uvs_k[set_idx, m, 0] == -1
+                                # 仅填充未被占用的槽位
                                 uvs_k[set_idx[set_mask], m, :] = desc_kpts_list[m].kpts[idxm[set_mask]]
 
         n_valid = (uvs >= 0).all(dim=-1).sum(dim=-1)
         mask = n_valid < min_n_matches
+        # 若某个 3D 点有效匹配过少则剔除
         uvs[mask, :, :] = -1
         xyz_indices[mask, :] = -1
         return uvs, xyz_indices
@@ -162,7 +165,7 @@ class PoseInitializer():
     @torch.no_grad()
     def initialize_bootstrap(self, desc_kpts_list: list[DescribedKeypoints], rebooting=False):
         """
-        【姿态估计模块】Bootstrap姿态初始化
+        【位姿估计模块】Bootstrap位姿初始化
         
         同时估计多个关键帧的初始位姿和焦距。
         使用Mini-BA进行联合优化，确保所有位姿和焦距的一致性。
@@ -180,6 +183,7 @@ class PoseInitializer():
         npts = self.num_pts_miniba_bootstrap
 
         ## Exhaustive matching
+        # 全连接匹配，以获得稳定的多视角约束
         for i in range(n_cams):
             for j in range(i + 1, n_cams):
                 _ = self.matcher(desc_kpts_list[i], desc_kpts_list[j], remove_outliers=True, update_kpts_flag="inliers", kID=i, kID_other=j)
@@ -188,6 +192,7 @@ class PoseInitializer():
         uvs, xyz_indices = self.build_problem(desc_kpts_list, npts, n_cams, n_cams, 2, list(range(n_cams)))
 
         ## Initialize for miniBA (poses at identity, 3D points with rand depth)
+        # 3D 点用单位深度回投影初始化，带随机缩放
         f_init = (torch.tensor([self.f_init], device="cuda"))
         Rs6D_init = torch.eye(3, 2, device="cuda")[None].repeat(n_cams, 1, 1)
         ts_init = torch.zeros(n_cams, 3, device="cuda")
@@ -201,6 +206,7 @@ class PoseInitializer():
         xyz_init *= 1 + torch.randn_like(xyz_init[:, :1]).abs()
 
         ## Run miniBA, estimating 3D points, camera focal and poses
+        # rebooting 时不再优化焦距
         if rebooting:
             Rs6D, ts, f, xyz, r, r_init, mask = self.miniba_rebooting(Rs6D_init, ts_init, self.f, xyz_init, self.centre, uvs.view(-1))
         else:
@@ -211,6 +217,7 @@ class PoseInitializer():
         self.intrinsics = torch.cat([f, self.centre], dim=0)
 
         ## Scale to 0.1 average translation
+        # 归一化尺度，避免尺度漂移
         rel_ts = ts[:-1] - ts[1:]
         scale = 0.1 / rel_ts.norm(dim=-1).mean()
         ts *= scale
@@ -224,7 +231,7 @@ class PoseInitializer():
     @torch.no_grad()
     def initialize_incremental(self, keyframes: list[Keyframe], curr_desc_kpts: DescribedKeypoints, index: int, is_test: bool, curr_img):
         """
-        【姿态估计模块】增量姿态初始化
+        【位姿估计模块】增量位姿初始化
         
         使用历史关键帧估计新关键帧的位姿。
         流程：
@@ -244,6 +251,7 @@ class PoseInitializer():
         """
         
         # Match the current frame with previous keyframes
+        # 收集可用于 PnP 的 2D-3D 对应
         xyz = []
         uvs = []
         confs = []
@@ -264,6 +272,7 @@ class PoseInitializer():
         match_indices = torch.cat(match_indices, dim=0)
 
         # Subsample the points if there are too many
+        # 先按置信度采样控制 PnP 输入规模
         if len(xyz) > self.num_pts_pnpransac:
             # 按置信度随机下采样，避免单帧点过多
             selected_indices = torch.multinomial(confs, self.num_pts_miniba_incr, replacement=False)
@@ -273,6 +282,7 @@ class PoseInitializer():
             match_indices = match_indices[selected_indices]
 
         # Estimate an initial camera pose and inliers using PnP RANSAC
+        # 使用上一关键帧作为初始位姿
         Rs6D_init = keyframes[0].rW2C
         ts_init = keyframes[0].tW2C
         Rt, inliers = self.PnPRANSAC(uvs, xyz, self.f, self.centre, Rs6D_init, ts_init, confs)
@@ -283,6 +293,7 @@ class PoseInitializer():
         match_indices = match_indices[inliers]
 
         # Subsample the points if there are too many
+        # 为 miniBA 填充固定数量的点
         if len(xyz) >= self.num_pts_miniba_incr:
             selected_indices = torch.topk(torch.rand_like(xyz[..., 0]), self.num_pts_miniba_incr, dim=0, largest=False)[1]
             xyz_ba = xyz[selected_indices]
@@ -292,6 +303,7 @@ class PoseInitializer():
             uvs_ba = torch.cat([uvs, -torch.ones(self.num_pts_miniba_incr - len(uvs), 2, device="cuda")], dim=0)
 
         # Run the initialization
+        # 以 PnP 结果为初始化，执行小规模 BA 微调
         Rs6D, ts = Rt[:3, :2][None], Rt[:3, 3][None]
         Rs6D, ts, _, _, r, r_init, mask = self.miniBA_incr(Rs6D, ts, self.f, xyz_ba, self.centre, uvs_ba.view(-1))
         Rt = torch.eye(4, device="cuda")
@@ -299,6 +311,7 @@ class PoseInitializer():
         Rt[:3, 3] = ts[0]
 
         # Check if we have sufficiently many inliers
+        # 训练阶段要求足够内点以避免错误注册
         if is_test or mask.sum() > self.min_num_inliers:
             # Return the pose of the current frame
             return Rt

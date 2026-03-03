@@ -1,3 +1,6 @@
+# 参考：https://github.com/graphdeco-inria/gaussian-splatting/blob/main/graphdecoviewer/__init__.py
+
+
 import glfw
 import json
 import time
@@ -41,6 +44,7 @@ class Viewer(ABC):
 
     def _setup(self):
         """ Go over all of the widgets and initialize them """
+        # 遍历成员变量，初始化 Widget
         for _, widget in vars(self).items():
             if isinstance(widget, Widget):
                 widget.setup()
@@ -48,6 +52,7 @@ class Viewer(ABC):
 
     def _destroy(self):
         """ Go over all of the widgets and free any manually allocated objects """
+        # 释放 Widget 资源
         for _, widget in vars(self).items():
             if isinstance(widget, Widget):
                 widget.destroy()
@@ -59,6 +64,7 @@ class Viewer(ABC):
         backend computation and then creates the UI.
         """
         if self.mode is CLIENT and self.websocket is not None:
+            # 客户端发送状态到服务端
             try:
                 self._client_send(self.websocket)
             except ConnectionClosed:
@@ -67,15 +73,19 @@ class Viewer(ABC):
                 self.websocket = None
 
         if self.mode is SERVER:
+            # 服务端接收客户端状态
             self._server_recv(websocket)
 
         if self.mode and LOCAL_SERVER:
+            # 本地服务端逻辑
             self.step()
 
         if self.mode is SERVER:
+            # 服务端广播状态
             self._server_send(websocket)
 
         if self.mode is CLIENT and self.websocket is not None:
+            # 客户端接收服务端状态
             try:
                 self._client_recv(self.websocket)
             except ConnectionClosed:
@@ -84,6 +94,7 @@ class Viewer(ABC):
                 self.websocket = None
 
         if self.mode and LOCAL_CLIENT:
+            # 本地客户端渲染 GUI
             self.show_gui()
     
     def _server_loop(self, websocket: ServerConnection):
@@ -95,6 +106,7 @@ class Viewer(ABC):
             return
         self.num_connections += 1
 
+        # 将 GLFW 上下文绑定到当前线程
         glfw.make_context_current(self.window)
         self.onconnect(websocket)
 
@@ -116,6 +128,7 @@ class Viewer(ABC):
         Internal method which goes over all of the registered widgets to compile 
         and send the server state to the client.
         """
+        # 汇总 widget 的文本与二进制数据
         metadata = {}   # Metadata for each widget (Should be JSON serializable)
         all_binaries = []   # List of all binaries to be sent
         binary_to_widget = []   # Mapping of which binary is for which widget
@@ -137,12 +150,15 @@ class Viewer(ABC):
             binary_to_widget.append("viewer")
         
         # Send metadata
+        # 先发送元数据
         websocket.send(json.dumps(metadata), text=True)
 
         # Send binary mapping
+        # 再发送二进制到 widget 的映射
         websocket.send(json.dumps(binary_to_widget), text=True)
 
         # Send binaries
+        # 最后发送二进制 payload
         for binary in all_binaries:
             websocket.send(binary, text=False)
 
@@ -152,12 +168,15 @@ class Viewer(ABC):
         the widgets.
         """
         # Receive metadata
+        # 接收元数据
         metadata = json.loads(websocket.recv())
 
         # Receive binary mapping
+        # 接收二进制映射
         binary_to_widget = json.loads(websocket.recv())
 
         # Receive binaries
+        # 接收二进制 payload
         all_binaries = []
         for _ in binary_to_widget:
             binary = websocket.recv()
@@ -174,6 +193,7 @@ class Viewer(ABC):
             all_data[widget_id]["binary"] = binary
 
         # Update the widgets
+        # 更新各个 widget 状态
         for widget_id, data in all_data.items():
             if widget_id == "viewer":
                 self.server_recv(data.get("binary", None), data.get("metadata", None))
@@ -187,6 +207,7 @@ class Viewer(ABC):
         connecting to the server and handling reconnections. The '_main' method
         is run by the 'immapp.run' function.
         """
+        # 维持连接与重连
         while True:
             # Try to connect to the server
             if self.websocket is None:
@@ -206,6 +227,7 @@ class Viewer(ABC):
         Internal method which goes over all of the registered widgets to compile
         and send the client state to the server.
         """
+        # 汇总 widget 的文本与二进制数据
         metadata = {}   # Metadata for each widget (Should be JSON serializable)
         all_binaries = []   # List of all binaries to be sent
         binary_to_widget = []   # Mapping of which binary is for which widget
@@ -227,12 +249,15 @@ class Viewer(ABC):
             binary_to_widget.append("viewer")
         
         # Send metadata
+        # 先发送元数据
         websocket.send(json.dumps(metadata), text=True)
 
         # Send binary mapping
+        # 再发送二进制到 widget 的映射
         websocket.send(json.dumps(binary_to_widget), text=True)
 
         # Send binaries
+        # 最后发送二进制 payload
         for binary in all_binaries:
             websocket.send(binary, text=False)
 
@@ -242,12 +267,15 @@ class Viewer(ABC):
         the widgets.
         """
         # Receive metadata
+        # 接收元数据
         metadata = json.loads(websocket.recv())
 
         # Receive binary mapping
+        # 接收二进制映射
         binary_to_widget = json.loads(websocket.recv())
 
         # Receive binaries
+        # 接收二进制 payload
         all_binaries = []
         for _ in binary_to_widget:
             binary = websocket.recv()
@@ -264,6 +292,7 @@ class Viewer(ABC):
             all_data[widget_id]["binary"] = binary
 
         # Update the widgets
+        # 更新各个 widget 状态
         for widget_id, data in all_data.items():
             if widget_id == "viewer":
                 self.client_recv(data.get("binary", None), data.get("metadata", None))
@@ -281,11 +310,13 @@ class Viewer(ABC):
 
         # Run the client connection in a different thread, the main thread runs the GUI.
         if self.mode is CLIENT:
+            # 客户端连接线程
             connect_thread = threading.Thread(target=self._client_loop, args=(ip, port))
             # Make the thread a daemon so that it exits when the main thread exits.
             connect_thread.daemon = True
             connect_thread.start()
         if self.mode and LOCAL_CLIENT:
+            # 本地 GUI 运行参数
             self._runner_params = hello_imgui.RunnerParams()
             self._runner_params.fps_idling.enable_idling = False
             self._runner_params.app_window_params.window_geometry.window_size_state = hello_imgui.WindowSizeState.maximized
@@ -307,6 +338,7 @@ class Viewer(ABC):
             immapp.run(self._runner_params, self._addon_params)
         if self.mode is SERVER:
             # Initialize OpenGL and setup widgets
+            # 后台初始化 OpenGL 上下文
             glfw.init()
             glfw.window_hint(glfw.VISIBLE, glfw.FALSE)
             self.window = glfw.create_window(1920, 1080, "", None, None)

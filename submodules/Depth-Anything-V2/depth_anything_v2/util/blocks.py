@@ -1,7 +1,14 @@
+# 块实现
+# 残差卷积单元实现
+# 特征融合块实现
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 import torch.nn as nn
 
 
 def _make_scratch(in_shape, out_shape, groups=1, expand=False):
+    # 构建多尺度通道对齐的卷积层
     scratch = nn.Module()
 
     out_shape1 = out_shape
@@ -11,6 +18,7 @@ def _make_scratch(in_shape, out_shape, groups=1, expand=False):
         out_shape4 = out_shape
 
     if expand:
+        # 逐层扩展通道数
         out_shape1 = out_shape
         out_shape2 = out_shape * 2
         out_shape3 = out_shape * 4
@@ -64,6 +72,7 @@ class ResidualConvUnit(nn.Module):
             tensor: output
         """
         
+        # 两层卷积 + 残差连接
         out = self.activation(x)
         out = self.conv1(out)
         if self.bn == True:
@@ -111,6 +120,7 @@ class FeatureFusionBlock(nn.Module):
         if self.expand == True:
             out_features = features // 2
         
+        # 输出通道压缩
         self.out_conv = nn.Conv2d(features, out_features, kernel_size=1, stride=1, padding=0, bias=True, groups=1)
 
         self.resConfUnit1 = ResidualConvUnit(features, activation, bn)
@@ -126,12 +136,15 @@ class FeatureFusionBlock(nn.Module):
         Returns:
             tensor: output
         """
+        # 主分支输入
         output = xs[0]
 
         if len(xs) == 2:
+            # 融合来自上一级的特征
             res = self.resConfUnit1(xs[1])
             output = self.skip_add.add(output, res)
 
+        # 再次残差卷积
         output = self.resConfUnit2(output)
 
         if (size is None) and (self.size is None):
@@ -141,8 +154,10 @@ class FeatureFusionBlock(nn.Module):
         else:
             modifier = {"size": size}
 
+        # 上采样到目标尺度
         output = nn.functional.interpolate(output, **modifier, mode="bilinear", align_corners=self.align_corners)
         
+        # 输出通道调整
         output = self.out_conv(output)
 
         return output

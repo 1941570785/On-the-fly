@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2025, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -7,15 +6,16 @@
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
-#
 
 # 特征检测器，用于检测图像中的关键点及其描述子
 # 参考自：https://github.com/verlab/accelerated_features
+
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import os
+from pathlib import Path
 
 from poses.matcher import Matches
 
@@ -78,6 +78,7 @@ class InterpolateSparse2d(nn.Module):
 
     def normgrid(self, x, H, W):
         """ Normalize coords to [-1,1]. """
+        # 以原图尺寸归一化，便于 grid_sample 采样
         return 2. * (x/(torch.tensor([W-1, H-1], device = x.device, dtype = x.dtype))) - 1.
 
     def forward(self, x, pos, H, W):
@@ -90,6 +91,7 @@ class InterpolateSparse2d(nn.Module):
         Returns
             [B, N, C] sampled channels at 2d positions
         """
+        # grid_sample 期望 shape=[B, N, 1, 2] 的采样网格
         grid = self.normgrid(pos, H, W).unsqueeze(-2).to(x.dtype)
         x = F.grid_sample(x, grid, mode = self.mode , align_corners = False)
         return x.permute(0,2,3,1).squeeze(-2)
@@ -101,10 +103,12 @@ class Detector():
         cache_path = f"models/cache/xfeat_{width}_{height}_{top_k}.pt"
         dummy_img = torch.randn(1, 3, height, width).cuda().to(torch.half)
         if os.path.exists(cache_path):
+            # 直接加载缓存的 JIT 模型，避免重复编译
             extractor = torch.jit.load(cache_path)
         else:
             print(f"Compiling feature extractor")
-            extractor = torch.hub.load('verlab/accelerated_features', 'XFeat', pretrained=True, top_k=top_k)
+            repo_dir = Path(__file__).resolve().parents[1] / "third_party" / "accelerated_features"
+            extractor = torch.hub.load(str(repo_dir), "XFeat", source="local", pretrained=True, top_k=top_k)
             extractor = extractor.cuda().eval().to(torch.half)
 
             ## Overriding the functions to run at fixed size
@@ -112,6 +116,7 @@ class Detector():
             # Adapted from https://github.com/verlab/accelerated_features to enable jit tracing
             # XFeat: Accelerated Features for Lightweight Image Matching, Under Apache-2.0 license
             def preprocess_tensor(x):
+                # 对齐到 32 的整数倍，保持与原实现一致
                 H, W = x.shape[-2:]
                 _H, _W = (H//32) * 32, (W//32) * 32
                 rh, rw = H/_H, W/_W
@@ -122,6 +127,7 @@ class Detector():
             # Adapted from https://github.com/verlab/accelerated_features to enable jit tracing
             # XFeat: Accelerated Features for Lightweight Image Matching, Under Apache-2.0 license
             def NMS(x, threshold = 0.05, kernel_size = 5, nvalid = int(1.5 * top_k)):
+                # 使用局部极大值抑制，返回 top-k 关键点候选
                 B, _, H, W = x.shape
                 pad=kernel_size//2
                 local_max = nn.MaxPool2d(kernel_size=kernel_size, stride=1, padding=pad)(x)
@@ -135,6 +141,7 @@ class Detector():
             # Adapted from https://github.com/verlab/accelerated_features to enable jit tracing
             # XFeat: Accelerated Features for Lightweight Image Matching, Under Apache-2.0 license
             def detectAndCompute(x):
+                # 前向：检测关键点 + 计算描述子（固定尺寸的 JIT 版本）
                 top_k = extractor.top_k
                 detection_threshold = extractor.detection_threshold
                 x, rh1, rw1 = extractor.preprocess_tensor(x)
@@ -148,13 +155,13 @@ class Detector():
                 K1h = extractor.get_kpts_heatmap(K1)
                 xOut, mkpts = extractor.NMS(K1h, threshold=detection_threshold, kernel_size=5)
 
-                #Compute reliability scores
+                # 计算可靠度分数（热力图 + 描述子响应）
                 _nearest = InterpolateSparse2d('nearest')
                 _bilinear = InterpolateSparse2d('bilinear')
                 scores = (_nearest(K1h, mkpts, _H1, _W1) * _bilinear(H1, mkpts, _H1, _W1)).squeeze(-1)
                 scores[torch.all(mkpts == 0, dim=-1)] = -1
 
-                #Select top-k features
+                # 选择 top-k 关键点并过滤无效分数
                 # idxs = torch.argsort(-scores)
                 idxs = torch.topk(scores, top_k)[1]
                 mkpts_x  = torch.gather(mkpts[...,0], -1, idxs)
@@ -164,13 +171,13 @@ class Detector():
                 scores = torch.gather(scores, -1, idxs)
                 scores *= xOut > 0
 
-                #Interpolate descriptors at kpts positions
+                # 在关键点位置插值描述子
                 feats = extractor.interpolator(M1, mkpts, H = _H1, W = _W1)
 
-                #L2-Normalize
+                # L2 归一化，便于后续匹配
                 feats = F.normalize(feats, dim=-1)
 
-                #Correct kpt scale
+                # 恢复到原始图像尺度
                 mkpts = mkpts.float() * torch.tensor([rw1,rh1], device=mkpts.device, dtype=torch.float).view(1, 1, -1)
 
                 return mkpts[0], feats[0] * (scores[0][..., None] > 0)
@@ -190,4 +197,3 @@ class Detector():
     def __call__(self, image):
         # 返回带描述子的关键点对象
         return DescribedKeypoints(*(self.extractor(image[None].half())))
-    

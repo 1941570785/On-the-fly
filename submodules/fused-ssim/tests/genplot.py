@@ -10,6 +10,7 @@ plt.style.use('ggplot')
 gpu = torch.cuda.get_device_name()
 
 if __name__ == "__main__":
+    # 固定随机种子，便于复现
     torch.manual_seed(0)
 
     B, CH = 5, 1
@@ -21,10 +22,12 @@ if __name__ == "__main__":
         "fused-ssim": []
     }
 
+    # 使用 pytorch_msssim 的实现作为对比
     pm_ssim = SSIM(data_range=1.0, channel=CH)
 
     for d in dimensions:
         with torch.no_grad():
+            # 生成随机输入图像
             img1_og = torch.rand([B, CH, d, d], device="cuda")
             img2_og = torch.rand([B, CH, d, d], device="cuda")
 
@@ -34,6 +37,7 @@ if __name__ == "__main__":
             img1_pm = torch.nn.Parameter(img1_og.clone())
             img2_pm = img2_og.clone()
 
+        # 训练阶段时间（含反向）
         begin = time.time()
         for _ in range(iterations):
             pm_ssim_val = pm_ssim(img1_pm, img2_pm)
@@ -50,6 +54,7 @@ if __name__ == "__main__":
         end = time.time()
         data["fused-ssim"].append((end - begin) / iterations * 1000)
 
+    # 训练耗时曲线
     num_pixels = (B * np.array(dimensions) ** 2) / 1e6
     plt.plot(num_pixels, data["pytorch_mssim"], label="pytorch_mssim")
     plt.plot(num_pixels, data["fused-ssim"], label="fused-ssim")
@@ -67,6 +72,7 @@ if __name__ == "__main__":
     plt.clf()
     for d in dimensions:
         with torch.no_grad():
+            # 生成随机输入图像
             img1_og = torch.rand([B, CH, d, d], device="cuda")
             img2_og = torch.rand([B, CH, d, d], device="cuda")
 
@@ -76,6 +82,7 @@ if __name__ == "__main__":
             img1_pm = torch.nn.Parameter(img1_og.clone())
             img2_pm = img2_og.clone()
 
+            # 推理阶段时间（仅前向）
             begin = time.time()
             for _ in range(iterations):
                 pm_ssim_val = pm_ssim(img1_pm, img2_pm)
@@ -90,6 +97,7 @@ if __name__ == "__main__":
             end = time.time()
             data["fused-ssim"].append((end - begin) / iterations * 1000)
 
+    # 推理耗时曲线
     num_pixels = (B * np.array(dimensions) ** 2) / 1e6
     plt.plot(num_pixels, data["pytorch_mssim"], label="pytorch_mssim")
     plt.plot(num_pixels, data["fused-ssim"], label="fused-ssim")

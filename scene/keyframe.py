@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2025, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -7,7 +6,6 @@
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
-#
 
 # 关键帧类，用于管理关键帧的图像、深度、特征等信息
 # 参考自：https://github.com/verlab/accelerated_features

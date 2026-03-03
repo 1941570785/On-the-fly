@@ -1,3 +1,7 @@
+# KITTI数据集实现
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 import cv2
 import torch
 from torch.utils.data import Dataset
@@ -8,16 +12,19 @@ from dataset.transform import Resize, NormalizeImage, PrepareForNet
 
 class KITTI(Dataset):
     def __init__(self, filelist_path, mode, size=(518, 518)):
+        # 当前仅实现验证集
         if mode != 'val':
             raise NotImplementedError
         
         self.mode = mode
         self.size = size
         
+        # 读取样本列表（image_path depth_path）
         with open(filelist_path, 'r') as f:
             self.filelist = f.read().splitlines()
         
         net_w, net_h = size
+        # 预处理：缩放、归一化、转张量格式
         self.transform = Compose([
             Resize(
                 width=net_w,
@@ -33,22 +40,29 @@ class KITTI(Dataset):
         ])
     
     def __getitem__(self, item):
+        # 解析图像与深度路径
         img_path = self.filelist[item].split(' ')[0]
         depth_path = self.filelist[item].split(' ')[1]
         
+        # 读取 RGB 图像
         image = cv2.imread(img_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) / 255.0
         
+        # 读取深度（单位为 1/256 米）
         depth = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype('float32')
         
+        # 应用预处理
         sample = self.transform({'image': image, 'depth': depth})
         
         sample['image'] = torch.from_numpy(sample['image'])
         sample['depth'] = torch.from_numpy(sample['depth'])
+        # 将深度缩放到米
         sample['depth'] = sample['depth'] / 256.0  # convert in meters
         
+        # 有效深度掩码
         sample['valid_mask'] = sample['depth'] > 0
         
+        # 保留图像路径
         sample['image_path'] = self.filelist[item].split(' ')[0]
         
         return sample

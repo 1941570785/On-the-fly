@@ -19,6 +19,10 @@ Arguments:
     --focal-length-y: Focal length along the y-axis.
 """
 
+# 深度图转换为点云
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 import argparse
 import cv2
 import glob
@@ -88,7 +92,7 @@ def main():
         color_image = Image.open(filename).convert('RGB')
         width, height = color_image.size
 
-        # Read the image using OpenCV
+        # Read the image using OpenCV and推理深度
         image = cv2.imread(filename)
         pred = depth_anything.infer_image(image, height)
 

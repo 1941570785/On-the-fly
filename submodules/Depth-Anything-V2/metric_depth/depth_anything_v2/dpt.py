@@ -1,3 +1,7 @@
+# DPT实现
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 import cv2
 import torch
 import torch.nn as nn
@@ -10,6 +14,7 @@ from .util.transform import Resize, NormalizeImage, PrepareForNet
 
 
 def _make_fusion_block(features, use_bn, size=None):
+    # 构造特征融合模块（RefineNet）
     return FeatureFusionBlock(
         features,
         nn.ReLU(False),
@@ -24,7 +29,7 @@ def _make_fusion_block(features, use_bn, size=None):
 class ConvBlock(nn.Module):
     def __init__(self, in_feature, out_feature):
         super().__init__()
-        
+        # 3x3 卷积 + BN + ReLU
         self.conv_block = nn.Sequential(
             nn.Conv2d(in_feature, out_feature, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(out_feature),
@@ -48,6 +53,7 @@ class DPTHead(nn.Module):
         
         self.use_clstoken = use_clstoken
         
+        # 将 transformer 特征投影到不同尺度通道
         self.projects = nn.ModuleList([
             nn.Conv2d(
                 in_channels=in_channels,
@@ -58,6 +64,7 @@ class DPTHead(nn.Module):
             ) for out_channel in out_channels
         ])
         
+        # 对齐各尺度的空间分辨率
         self.resize_layers = nn.ModuleList([
             nn.ConvTranspose2d(
                 in_channels=out_channels[0],
@@ -88,6 +95,7 @@ class DPTHead(nn.Module):
                         nn.Linear(2 * in_channels, in_channels),
                         nn.GELU()))
         
+        # 构建 DPT 的 scratch 分支（融合与输出）
         self.scratch = _make_scratch(
             out_channels,
             features,
@@ -105,6 +113,7 @@ class DPTHead(nn.Module):
         head_features_1 = features
         head_features_2 = 32
         
+        # 输出头：逐步降维并生成深度图
         self.scratch.output_conv1 = nn.Conv2d(head_features_1, head_features_1 // 2, kernel_size=3, stride=1, padding=1)
         self.scratch.output_conv2 = nn.Sequential(
             nn.Conv2d(head_features_1 // 2, head_features_2, kernel_size=3, stride=1, padding=1),
@@ -117,12 +126,14 @@ class DPTHead(nn.Module):
         out = []
         for i, x in enumerate(out_features):
             if self.use_clstoken:
+                # 拼接 cls token 读出
                 x, cls_token = x[0], x[1]
                 readout = cls_token.unsqueeze(1).expand_as(x)
                 x = self.readout_projects[i](torch.cat((x, readout), -1))
             else:
                 x = x[0]
             
+            # token -> feature map
             x = x.permute(0, 2, 1).reshape((x.shape[0], x.shape[-1], patch_h, patch_w))
             
             x = self.projects[i](x)
@@ -132,6 +143,7 @@ class DPTHead(nn.Module):
         
         layer_1, layer_2, layer_3, layer_4 = out
         
+        # RefineNet 融合路径
         layer_1_rn = self.scratch.layer1_rn(layer_1)
         layer_2_rn = self.scratch.layer2_rn(layer_2)
         layer_3_rn = self.scratch.layer3_rn(layer_3)
@@ -143,6 +155,7 @@ class DPTHead(nn.Module):
         path_1 = self.scratch.refinenet1(path_2, layer_1_rn)
         
         out = self.scratch.output_conv1(path_1)
+        # 上采样回输入尺度（DINO patch=14）
         out = F.interpolate(out, (int(patch_h * 14), int(patch_w * 14)), mode="bilinear", align_corners=True)
         out = self.scratch.output_conv2(out)
         
@@ -171,13 +184,16 @@ class DepthAnythingV2(nn.Module):
         self.max_depth = max_depth
         
         self.encoder = encoder
+        # 使用 DINOv2 作为特征提取 backbone
         self.pretrained = DINOv2(model_name=encoder)
         
         self.depth_head = DPTHead(self.pretrained.embed_dim, features, use_bn, out_channels=out_channels, use_clstoken=use_clstoken)
     
     def forward(self, x):
+        # 计算 patch 网格尺寸
         patch_h, patch_w = x.shape[-2] // 14, x.shape[-1] // 14
         
+        # 提取中间层特征并回归深度
         features = self.pretrained.get_intermediate_layers(x, self.intermediate_layer_idx[self.encoder], return_class_token=True)
         
         depth = self.depth_head(features, patch_h, patch_w) * self.max_depth
@@ -186,15 +202,18 @@ class DepthAnythingV2(nn.Module):
     
     @torch.no_grad()
     def infer_image(self, raw_image, input_size=518):
+        # 预处理并推理
         image, (h, w) = self.image2tensor(raw_image, input_size)
         
         depth = self.forward(image)
         
+        # 还原到原图尺寸
         depth = F.interpolate(depth[:, None], (h, w), mode="bilinear", align_corners=True)[0, 0]
         
         return depth.cpu().numpy()
     
     def image2tensor(self, raw_image, input_size=518):        
+        # 图像预处理：缩放、归一化、转张量
         transform = Compose([
             Resize(
                 width=input_size,
@@ -216,6 +235,7 @@ class DepthAnythingV2(nn.Module):
         image = transform({'image': image})['image']
         image = torch.from_numpy(image).unsqueeze(0)
         
+        # 选择推理设备
         DEVICE = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
         image = image.to(DEVICE)
         

@@ -6,6 +6,10 @@
 
 # Modified from: https://github.com/huggingface/pytorch-image-models/blob/main/timm/models/vision_transformer.py#L103-L110
 
+# DINOv2 层缩放实现
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 from typing import Union
 
 import torch
@@ -22,7 +26,9 @@ class LayerScale(nn.Module):
     ) -> None:
         super().__init__()
         self.inplace = inplace
+        # 每通道可学习缩放因子，稳定训练
         self.gamma = nn.Parameter(init_values * torch.ones(dim))
 
     def forward(self, x: Tensor) -> Tensor:
+        # 可选就地缩放，减少额外开销
         return x.mul_(self.gamma) if self.inplace else x * self.gamma

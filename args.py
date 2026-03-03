@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2025, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -7,7 +6,10 @@
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
-#
+
+# 参数配置文件
+# 参考：https://github.com/graphdeco-inria/gaussian-splatting/blob/main/args.py
+
 
 import argparse
 import os
@@ -34,6 +36,7 @@ def get_args():
     parser.add_argument('--start_at', type=int, default=0,
                         help="Number of frames to skip from the dataset.")
     
+    # 球谐阶数（颜色表达）
     parser.add_argument('--sh_degree', default=3)
 
     ## COLMAP options

@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2025, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -7,7 +6,6 @@
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
-#
 
 # 三角化器，用于将匹配的2D关键点对三角化为3D点
 # 参考自：https://github.com/verlab/accelerated_features
@@ -28,23 +26,28 @@ def matches_to_points(uv, uv_matched, R, t, f, centre):
     d2 = torch.matmul(d2, R.T)  # Transform d2 by the rotation matrix
 
     # Normalize directions
+    # 方向向量单位化，便于后续几何计算
     d1 = d1 / torch.linalg.vector_norm(d1, dim=-1, keepdim=True)
     d2 = d2 / torch.linalg.vector_norm(d2, dim=-1, keepdim=True)
 
     # Compute the normal vector and its secondary vector
+    # 法向量用于估计两条光线的交会
     n = torch.cross(d1, d2, dim=-1)  # [N, 3]
     n2 = torch.cross(d2, n, dim=-1)  # [N, 3]
 
     # Compute distances
+    # 以最小二乘的方式估计沿 d1 的距离
     dist = torch.matmul(n2, p2.T) / torch.bmm(n2.unsqueeze(1), d1.unsqueeze(-1)).squeeze(-1)
 
-    # # Compute pose direction and angles
+    # Compute pose direction and angles
+    # 光线夹角用于判断几何稳定性
     angles = torch.acos(torch.sum(d1 * d2, dim=1))  # Angle between d1 and d2
 
     # Compute 3D points
     xyz = d1 * dist
 
     # Compute the views' disambiguation capability
+    # 视差越大，三角化越可靠
     xyz1 = torch.matmul(d1 - p2, R)
     uv1 = pts2px(xyz1, f, centre)
     xyz2 = torch.matmul(d1 * 10 - p2, R)
@@ -52,6 +55,7 @@ def matches_to_points(uv, uv_matched, R, t, f, centre):
     disambiguation = torch.linalg.vector_norm(uv1 - uv2, dim=-1)
 
     # Transform xyz to matched coordinates
+    # 将三角化点变换到匹配视角坐标系
     xyz_matched = torch.matmul(xyz - p2, R)
     expected_uv_matched = pts2px(xyz_matched, f, centre)
 
@@ -59,6 +63,7 @@ def matches_to_points(uv, uv_matched, R, t, f, centre):
     error = torch.linalg.vector_norm(expected_uv_matched - uv_matched, dim=-1)
 
     # Mark invalid points
+    # 过滤数值异常与无效角度
     invalid = (xyz.isnan() | xyz.isinf()).any(dim=-1) | angles.isnan()
     angles = torch.where(invalid, 0, angles)
 
@@ -82,6 +87,7 @@ class TriangulatorInternal(nn.Module):
             Rt_other_inv = Rts_others_inv[cam_idx]
             rel_Rt = Rt @ Rt_other_inv
             kpts3dTmp, disTmp, error = matches_to_points(uv, uv_other, rel_Rt[:3, :3], rel_Rt[:3, 3], f, centre)
+            # 仅保留前方点、误差小且视差更好的结果
             validMask = (kpts3dTmp[:, 2] > 1e-6) * (disTmp > best_disambiguation) * (error < max_error)
             validMask *= uv_other.min(dim=-1).values > 0
 
@@ -89,6 +95,7 @@ class TriangulatorInternal(nn.Module):
             best_disambiguation = torch.where(validMask, disTmp, best_disambiguation)
 
 
+        # 输出深度与世界坐标
         depth = kpts3d[:, 2].clone()
         kpts3d = (kpts3d - Rt[None, :3, 3]) @ Rt[:3, :3]
         return kpts3d, depth, best_disambiguation, best_disambiguation > min_dis
@@ -149,6 +156,7 @@ class Triangulator():
         """
         uv = desc_kpts.kpts
         uvs_others = -torch.ones(self.n_cams, uv.shape[0], 2, device="cuda")
+        # 选择匹配数量最多的关键帧以提高三角化稳定性
         n_matches = torch.tensor([matches.idx.shape[0] for matches in desc_kpts.matches.values()])
         kf_indices = torch.tensor(list(desc_kpts.matches.keys()))
         chosen_ids = torch.topk(n_matches, min(self.n_cams, n_matches.shape[0])).indices

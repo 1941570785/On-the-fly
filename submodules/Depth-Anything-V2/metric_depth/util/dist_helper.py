@@ -1,3 +1,7 @@
+# 分布式帮助函数
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 import os
 import subprocess
 
@@ -10,9 +14,11 @@ def setup_distributed(backend="nccl", port=None):
     Lifted from https://github.com/BIGBALLON/distribuuuu/blob/master/distribuuuu/utils.py
     Originally licensed MIT, Copyright (c) 2020 Wei Li
     """
+    # 获取可用 GPU 数量
     num_gpus = torch.cuda.device_count()
 
     if "SLURM_JOB_ID" in os.environ:
+        # 在 SLURM 环境中解析 rank / world_size / master 地址
         rank = int(os.environ["SLURM_PROCID"])
         world_size = int(os.environ["SLURM_NTASKS"])
         node_list = os.environ["SLURM_NODELIST"]
@@ -28,11 +34,14 @@ def setup_distributed(backend="nccl", port=None):
         os.environ["LOCAL_RANK"] = str(rank % num_gpus)
         os.environ["RANK"] = str(rank)
     else:
+        # 非 SLURM 环境，直接读取环境变量
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
 
+    # 为当前进程绑定 GPU
     torch.cuda.set_device(rank % num_gpus)
 
+    # 初始化进程组
     dist.init_process_group(
         backend=backend,
         world_size=world_size,

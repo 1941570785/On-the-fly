@@ -4,6 +4,10 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+# DINOv2 SwiGLU FFN实现
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 from typing import Callable, Optional
 
 from torch import Tensor, nn
@@ -21,12 +25,15 @@ class SwiGLUFFN(nn.Module):
         bias: bool = True,
     ) -> None:
         super().__init__()
+        # 默认保持输入/输出维度一致
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
+        # 一次线性映射生成两路特征（用于门控）
         self.w12 = nn.Linear(in_features, 2 * hidden_features, bias=bias)
         self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
 
     def forward(self, x: Tensor) -> Tensor:
+        # SwiGLU: silu(x1) * x2
         x12 = self.w12(x)
         x1, x2 = x12.chunk(2, dim=-1)
         hidden = F.silu(x1) * x2
@@ -38,6 +45,7 @@ try:
 
     XFORMERS_AVAILABLE = True
 except ImportError:
+    # 回退到纯 PyTorch 实现
     SwiGLU = SwiGLUFFN
     XFORMERS_AVAILABLE = False
 
@@ -52,6 +60,7 @@ class SwiGLUFFNFused(SwiGLU):
         drop: float = 0.0,
         bias: bool = True,
     ) -> None:
+        # 对 hidden 维度做对齐，便于 fused 实现
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
         hidden_features = (int(hidden_features * 2 / 3) + 7) // 8 * 8

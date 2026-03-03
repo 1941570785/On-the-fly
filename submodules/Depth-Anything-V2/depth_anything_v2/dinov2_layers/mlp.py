@@ -8,6 +8,12 @@
 #   https://github.com/facebookresearch/dino/blob/master/vision_transformer.py
 #   https://github.com/rwightman/pytorch-image-models/tree/master/timm/layers/mlp.py
 
+# 参考：https://github.com/facebookresearch/dino/blob/master/vision_transformer.py
+# 参考：https://github.com/rwightman/pytorch-image-models/tree/master/timm/layers/mlp.py
+
+# DINOv2 MLP实现
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
 
 from typing import Callable, Optional
 
@@ -25,14 +31,17 @@ class Mlp(nn.Module):
         bias: bool = True,
     ) -> None:
         super().__init__()
+        # 默认保持输入/输出维度一致
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
+        # 两层全连接 + 激活 + dropout
         self.fc1 = nn.Linear(in_features, hidden_features, bias=bias)
         self.act = act_layer()
         self.fc2 = nn.Linear(hidden_features, out_features, bias=bias)
         self.drop = nn.Dropout(drop)
 
     def forward(self, x: Tensor) -> Tensor:
+        # 标准 MLP 前向
         x = self.fc1(x)
         x = self.act(x)
         x = self.drop(x)

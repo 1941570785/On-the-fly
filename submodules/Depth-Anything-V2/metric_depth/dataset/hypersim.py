@@ -1,3 +1,7 @@
+# Hypersim数据集实现
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 import cv2
 import h5py
 import numpy as np
@@ -9,6 +13,7 @@ from dataset.transform import Resize, NormalizeImage, PrepareForNet, Crop
 
 
 def hypersim_distance_to_depth(npyDistance):
+    # 将 Hypersim 的 distance 转换为 depth
     intWidth, intHeight, fltFocal = 1024, 768, 886.81
 
     npyImageplaneX = np.linspace((-0.5 * intWidth) + 0.5, (0.5 * intWidth) - 0.5, intWidth).reshape(
@@ -19,6 +24,7 @@ def hypersim_distance_to_depth(npyDistance):
     npyImageplane = np.concatenate(
         [npyImageplaneX, npyImageplaneY, npyImageplaneZ], 2)
 
+    # 根据相机内参将距离映射为深度
     npyDepth = npyDistance / np.linalg.norm(npyImageplane, 2, 2) * fltFocal
     return npyDepth
 
@@ -29,10 +35,12 @@ class Hypersim(Dataset):
         self.mode = mode
         self.size = size
         
+        # 读取样本列表（image_path depth_path）
         with open(filelist_path, 'r') as f:
             self.filelist = f.read().splitlines()
         
         net_w, net_h = size
+        # 预处理：缩放、归一化、转张量格式（训练时裁剪）
         self.transform = Compose([
             Resize(
                 width=net_w,
@@ -48,24 +56,30 @@ class Hypersim(Dataset):
         ] + ([Crop(size[0])] if self.mode == 'train' else []))
         
     def __getitem__(self, item):
+        # 解析图像与深度路径
         img_path = self.filelist[item].split(' ')[0]
         depth_path = self.filelist[item].split(' ')[1]
         
+        # 读取 RGB 图像
         image = cv2.imread(img_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) / 255.0
         
+        # 读取距离并转换为深度
         depth_fd = h5py.File(depth_path, "r")
         distance_meters = np.array(depth_fd['dataset'])
         depth = hypersim_distance_to_depth(distance_meters)
         
+        # 应用预处理
         sample = self.transform({'image': image, 'depth': depth})
 
         sample['image'] = torch.from_numpy(sample['image'])
         sample['depth'] = torch.from_numpy(sample['depth'])
         
+        # 有效深度掩码（NaN 置零）
         sample['valid_mask'] = (torch.isnan(sample['depth']) == 0)
         sample['depth'][sample['valid_mask'] == 0] = 0
         
+        # 保留图像路径
         sample['image_path'] = self.filelist[item].split(' ')[0]
         
         return sample

@@ -1,3 +1,7 @@
+# 去畸变与掩码生成，用于将原始图像转换为无畸变、中心化且方形像素的图像
+# 参考自：https://github.com/verlab/accelerated_features
+
+
 import argparse
 import cv2 
 import numpy as np
@@ -16,19 +20,24 @@ cam_params_dict = {
 }
 
 def get_K_in_K_out(cam_params, h, w):
+    # 构建原始内参与去畸变后的目标内参
     K_in = np.array([[cam_params[0], 0, cam_params[2]], [0, cam_params[1], cam_params[3]], [0, 0, 1]])
     K_out = cv2.getOptimalNewCameraMatrix(K_in, np.array(cam_params[4:]), (w, h), 1, (w, h), True)[0]
+    # 强制 fx=fy，保证方形像素
     K_out[0, 0] = K_out[1, 1] = (K_out[0, 0] + K_out[1, 1]) / 2
     return K_in, K_out
 
 def rectify_and_mask(image, rectify_map, initial_mask, threshold=250, zero_invalid=True, add_alpha=True):
+    # 去畸变并生成有效区域 mask
     dst = cv2.remap(image, rectify_map, None, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
     mask = cv2.remap(initial_mask, rectify_map, None, cv2.INTER_LINEAR)
     mask[mask <= threshold] = 0
     mask[mask != 0] = 255
     if zero_invalid:
+        # 无效区域置零以便可视化
         dst[mask == 0] = 0
     if add_alpha:
+        # 添加 alpha 通道用于显示有效区域
         dst = np.concatenate([dst, mask[..., None]], axis=-1)
     return dst, mask
 
@@ -38,12 +47,14 @@ if __name__ == '__main__':
     Will read from rgb/ and put fully rectify images is images/ with masks in masks/.
     """
 
+    # 解析输入参数
     parser = argparse.ArgumentParser()
     parser.add_argument('--base_dir', default="../data")
     args = parser.parse_args()
 
 
     for scene, cam_params in cam_params_dict.items():
+        # 针对每个场景执行去畸变与掩码生成
         scene_folder = os.path.join(args.base_dir, scene) 
 
         in_folder = f"{scene_folder}/rgb"
@@ -56,11 +67,13 @@ if __name__ == '__main__':
         h, w = cv2.imread(f"{in_folder}/{image_names[0]}").shape[:2]
         K_in, K_out = get_K_in_K_out(cam_params, h, w)
 
+        # 预计算像素映射表
         rectify_map = cv2.initUndistortRectifyMap(
             K_in, np.array(cam_params[4:]), None, K_out, (w, h), cv2.CV_32FC2)[0]
         initial_mask = np.ones((h, w), dtype=np.uint8) * 255
 
         def process_image(image_name):
+            # 单张图像处理：去畸变 + mask 输出
             image = cv2.imread(f"{in_folder}/{image_name}")
 
             dst, mask = rectify_and_mask(image, rectify_map, initial_mask, threshold=0)
@@ -68,4 +81,5 @@ if __name__ == '__main__':
             cv2.imwrite(f"{mask_folder}/{os.path.splitext(image_name)[0]}.png", mask)
 
         with ThreadPoolExecutor() as executor:
+            # 多线程批处理加速
             executor.map(process_image, image_names)

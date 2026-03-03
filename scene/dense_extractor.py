@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2025, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -7,15 +6,16 @@
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
-#
 
 # 密集特征提取器，用于提取图像的密集特征图
 # 参考自：https://github.com/verlab/accelerated_features
+
 
 import torch
 import torch.nn.functional as F
 import os
 import copy
+from pathlib import Path
 
 from scene.extractor_model import *
 
@@ -43,7 +43,8 @@ class DenseExtractor():
         if os.path.exists(cache_path):
             self.extractor = torch.jit.load(cache_path)
         else:
-            self.extractor = torch.hub.load('verlab/accelerated_features', 'XFeat', pretrained = True, top_k = 4096)
+            repo_dir = Path(__file__).resolve().parents[1] / "third_party" / "accelerated_features"
+            self.extractor = torch.hub.load(str(repo_dir), "XFeat", source="local", pretrained=True, top_k=4096)
             self.extractor = self.extractor.half().cuda().eval()
 
             state_dict = copy.deepcopy(self.extractor.state_dict())
@@ -80,4 +81,3 @@ class DenseExtractor():
     @torch.no_grad()
     def __call__(self, image):
         return self.extractor(image[None].half())
-    

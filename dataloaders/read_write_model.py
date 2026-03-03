@@ -27,9 +27,9 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-
 # 读写模型类，用于读写COLMAP模型文件
 # 参考自：https://github.com/verlab/accelerated_features
+
 
 import argparse
 import collections

@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2025, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -7,7 +6,10 @@
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
-#
+
+# 参考：https://github.com/graphdeco-inria/gaussian-splatting/blob/main/utils.py
+# 工具函数集合
+
 
 import numpy as np
 import torch
@@ -50,6 +52,7 @@ def get_lapla_norm(img, kernel):
     laplacian_kernel = laplacian_kernel.repeat(1, img.shape[0], 1, 1)
     laplacian = F.conv2d(img[None], laplacian_kernel, padding="same")
     laplacian_norm = torch.linalg.vector_norm(laplacian, ord=1, dim=1, keepdim=True)
+    # 边界置零，避免卷积伪影
     laplacian_norm[..., :, 0] = 0
     laplacian_norm[..., :, -1] = 0
     laplacian_norm[..., 0, :] = 0
@@ -137,6 +140,7 @@ def make_torch_sampler(uv, width, height):
     """
     # UV 标准化到 [-1,1] 便于 grid_sample
     sampler = uv.clone()  # + 0.5
+    # align_corners=True 时的标准化方式
     sampler[..., 0] = sampler[..., 0] * (2.0 / (width - 1)) - 1.0
     sampler[..., 1] = sampler[..., 1] * (2.0 / (height - 1)) - 1.0
     return sampler
@@ -211,6 +215,7 @@ def draw_poses(image, view_matrix, view_fovx, scale, cam_width, cam_height, Rts,
        image (np.ndarray): The image with the frustums drawn on
     """
     if len(Rts) > 0:
+        # 仅在有相机时绘制
         # Rendering options
         width, height = image.shape[1], image.shape[0]
         f = fov2focal(view_fovx, width)
@@ -249,6 +254,7 @@ def draw_poses(image, view_matrix, view_fovx, scale, cam_width, cam_height, Rts,
 
 @torch.no_grad()
 def draw_anchors(image, view_matrix, view_fovx, scale, anchors, anchor_weights=[]):
+    # 绘制锚点的立方体线框
     coords = [
         [ 1,  1,  1],
         [ 1,  1, -1],
@@ -348,6 +354,7 @@ def align_mean_up_fwd(input, target, w_scale=False):
       A set of [N,4,4] transforms, which are the aligned poses of 'input'.
     """
 
+    # 计算相似变换并应用到输入位姿
     R, t, s = get_transform_mean_up_fwd(input, target, w_scale)
     inv_input = torch.linalg.inv(input)
     inv_input[:, :3, :3] = R @ inv_input[:, :3, :3]
@@ -406,5 +413,3 @@ def procrustes_analysis(X0, X1, w_scale=True):  # [N,3]
         R[2] *= -1
     # align X1 to X0: X1to0 = (X1-t1)/s1@R.t()*s0+t0
     return t0[0], t1[0], s0, s1, R
-
-

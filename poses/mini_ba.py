@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2025, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -7,7 +6,6 @@
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
-#
 
 # 最小二乘优化器，用于优化相机位姿和3D点
 # 参考自：https://github.com/verlab/accelerated_features
@@ -21,6 +19,7 @@ from torch.func import vmap, jacfwd
 
 
 def project(xyz, R6D_t, f, centre):
+    # 6D 旋转参数 + 平移，投影到像素坐标
     R6D = R6D_t[:6].reshape(3, 2)
     t = R6D_t[6:9]
     R = sixD2mtx(R6D)
@@ -29,6 +28,7 @@ def project(xyz, R6D_t, f, centre):
 
 
 def get_residual(xyz, R6D_t, f, centre, uv):
+    # 重投影误差（像素平面）
     projected = project(xyz, R6D_t, f, centre)
     return projected - uv
 
@@ -70,7 +70,7 @@ class MiniBAInternal(nn.Module):
         self.iters = iters
         self.n_cam_params = n_opt_cams * 9 + optimize_focal
 
-        # Optimized parameters and their index in get_residual2 args (for autodiff)
+        # 记录参与优化的参数及其在自动求导中的位置
         argnums = (1,)
         self.param2id_dict = {"poses": len(argnums) - 1}
         if optimize_focal:
@@ -80,7 +80,7 @@ class MiniBAInternal(nn.Module):
             argnums += (0,)
             self.param2id_dict["xyz"] = len(argnums) - 1
 
-        # Prepare projection and jacobian estimation function with autodiff
+        # 构建残差与雅可比的批量自动求导函数
         self.get_residual_jacobian = vmap(
             vmap(jacfwd(get_residual2, has_aux=True, argnums=argnums))
         )
@@ -90,6 +90,7 @@ class MiniBAInternal(nn.Module):
         """
         Expand and organize for jacobian computation
         """
+        # 扩展维度到 [npts, n_cams, ...] 以便并行求导
         xyz_e = xyz.unsqueeze(1).expand(-1, self.n_cams, *xyz.shape[1:])
         Rs6D_ts = torch.cat([Rs6D.view(-1, 6), ts], dim=-1)
         Rs6D_ts_e = Rs6D_ts[None].expand(self.npts, *Rs6D_ts.shape)
@@ -100,7 +101,7 @@ class MiniBAInternal(nn.Module):
 
     def get_mask(self, r_in, original_mask2):
         if self.outlier_mad_scale > 0:
-            # Get threshold based on the error
+            # 基于 MAD 的自适应阈值，剔除大误差外点
             err = torch.linalg.vector_norm(
                 r_in.view(-1, 2) * original_mask2.view(-1)[:, None],
                 dim=-1,
@@ -121,6 +122,7 @@ class MiniBAInternal(nn.Module):
 
     def get_huber_weights(self, r):
         if self.huber_delta > 0:
+            # Huber 权重，降低大残差影响
             r_abs = r.abs()
             weights = torch.where(
                 r_abs <= self.huber_delta, 1, self.huber_delta / r_abs.sqrt()
@@ -135,12 +137,12 @@ class MiniBAInternal(nn.Module):
         lm = self.lm
 
         for iteration in range(self.iters):
-            # Compute Jacobian and residuals
+            # 计算残差与雅可比
             jacobian_elements, r_in = self.get_residual_jacobian(
                 *self.prepare_for_proj(xyz, Rs6D, ts, f, centre), uv
             )
             r_in = r_in.view(-1)
-            # Jacobian w.r.t the camera poses
+            # 相机位姿参数的雅可比（仅优化前 n_opt_cams）
             duv_dcam = jacobian_elements[self.param2id_dict["poses"]]
             duv_dcam = duv_dcam.unsqueeze(-2).repeat(1, 1, 1, self.n_opt_cams, 1)
             j = torch.arange(duv_dcam.shape[1], device=f.device).view(1, -1, 1, 1, 1)
@@ -148,19 +150,19 @@ class MiniBAInternal(nn.Module):
             mask = (j != l).expand_as(duv_dcam)
             duv_dcam = torch.where(mask, 0, duv_dcam)
             duv_dcam = duv_dcam.reshape(*duv_dcam.shape[:-2], -1)
-            # Jacobian w.r.t the focal length
+            # 焦距参数的雅可比（可选）
             if self.optimize_focal:
                 duv_dcam = torch.cat(
                     [duv_dcam, jacobian_elements[self.param2id_dict["focal"]]], dim=-1
                 )
-            # Jacobian w.r.t the 3D points
+            # 3D 点参数的雅可比（可选）
             if self.optimize_3Dpts:
                 duv_dxyz = jacobian_elements[self.param2id_dict["xyz"]]
 
             if iteration == 0:
                 initial_r = r_in.clone()
 
-            # Robustification
+            # 鲁棒化：Huber 权重 + MAD 外点掩码
             weights = self.get_huber_weights(r_in)
             mask = self.get_mask(r_in, original_mask2)
             weights = mask * weights
@@ -174,7 +176,7 @@ class MiniBAInternal(nn.Module):
                 self.npts, self.n_cams * 2, self.n_cam_params
             )
 
-            # Precompute each block of Jacobian^T @ Jacobian
+            # 预计算 J^T J 的各块
             jtj_cam = duv_dcam_flat.T @ duv_dcam_flat
             if self.optimize_3Dpts:
                 duv_dxyz = duv_dxyz.reshape(self.npts, self.n_cams * 2, -1)
@@ -185,14 +187,14 @@ class MiniBAInternal(nn.Module):
                     .reshape(-1, self.n_cam_params)
                 )
 
-            # Damping
+            # LM 阻尼，避免奇异
             jtj_cam.diagonal().mul_(1 + lm)
             jtj_cam.diagonal().clamp_min_(self.ep)
             if self.optimize_3Dpts:
                 jtj_xyz.diagonal(dim1=-2, dim2=-1).mul_(1 + lm)
                 jtj_xyz.diagonal(dim1=-2, dim2=-1).clamp_min_(self.ep)
 
-            # Residual Terms
+            # 右端项 J^T r
             jacxr_cam = duv_dcam_flat.T @ r
             if self.optimize_3Dpts:
                 jacxr_xyz = torch.bmm(
@@ -200,11 +202,11 @@ class MiniBAInternal(nn.Module):
                     r.view(self.npts, self.n_cams * 2).unsqueeze(-1),
                 ).view(-1)
 
-                # Solve with Schur Complement
+                # Schur Complement：先消去 3D 点更新
                 jtj_xyz_inv = torch.linalg.inv_ex(jtj_xyz)[0]
                 jtj_xyz_inv.nan_to_num_()
 
-                # Camera Parameters Update
+                # 相机参数更新
                 BD = (
                     torch.bmm(jtj_xyz_inv, jtj_cam_xyz.view(self.npts, 3, -1))
                     .view(-1, self.n_cam_params)
@@ -218,12 +220,12 @@ class MiniBAInternal(nn.Module):
                 dcam = BmECm1Et_inv @ vmECm1w
                 dcam.nan_to_num_()
 
-                # 3D Points Update
+                # 3D 点更新
                 b = jacxr_xyz - jtj_cam_xyz @ dcam
                 dxyz = torch.bmm(b.view(self.npts, 1, 3), jtj_xyz_inv).view(xyz.shape)
                 dxyz.nan_to_num_()
             else:
-                # Schur Complement not used when 3D points are not optimized
+                # 不优化 3D 点时直接求解相机参数
                 dcam = torch.linalg.inv_ex(jtj_cam)[0] @ jacxr_cam
                 dcam.nan_to_num_()
                 dxyz = 0
@@ -233,7 +235,7 @@ class MiniBAInternal(nn.Module):
             dt = dpose[..., 6:]
             df = dcam[-1] if self.optimize_focal else 0
 
-            # Check if the update improves residuals
+            # 评估更新是否降低残差（同时保持焦距为正）
             Rs6D_tmp = Rs6D.clone() - dR
             ts_tmp = ts.clone() - dt
             f_tmp = f.clone() - df
@@ -246,17 +248,17 @@ class MiniBAInternal(nn.Module):
             new_r = new_r * weights
             success_mask = ((new_r**2).mean() < (r**2).mean()) * (f_tmp > 0)
 
-            # Apply Updates Conditionally
+            # 条件应用更新
             Rs6D = Rs6D - success_mask * dR
             ts = ts - success_mask * dt
             f = f - success_mask * df
             xyz = xyz - success_mask * dxyz
 
-            # Adjust Damping
+            # 自适应调整阻尼系数
             lm *= (1 / self.k) * success_mask + self.k * (1 - success_mask.to(ts))
             Rs6D = mtx2sixD(sixD2mtx(Rs6D))
 
-        # Final Residual
+        # 计算最终残差与掩码
         r = self.get_residual(
             *self.prepare_for_proj(xyz_tmp, Rs6D_tmp, ts_tmp, f_tmp, centre), uv
         ).view(-1)
@@ -327,7 +329,7 @@ class MiniBA:
         )
         self.optimizer = self.optimizer.eval().cuda()
 
-        # Initialize dummy inputs for compilation
+        # 构造虚拟输入用于 CUDA 图编译
         n_cams = n_opt_cams + n_fixed_cams
         Rs6D_init = torch.randn(batch, n_cams, 3, 2, device="cuda")
         ts_init = torch.randn(batch, n_cams, 3, device="cuda")

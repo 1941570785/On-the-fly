@@ -7,6 +7,10 @@
 #   https://github.com/facebookresearch/dino/blob/main/vision_transformer.py
 #   https://github.com/rwightman/pytorch-image-models/tree/master/timm/models/vision_transformer.py
 
+# DINOv2 Vision Transformer实现
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 from functools import partial
 import math
 import logging
@@ -24,6 +28,7 @@ logger = logging.getLogger("dinov2")
 
 
 def named_apply(fn: Callable, module: nn.Module, name="", depth_first=True, include_root=False) -> nn.Module:
+    # 递归对模块及其子模块应用函数（带模块名）
     if not depth_first and include_root:
         fn(module=module, name=name)
     for child_name, child_module in module.named_children():
@@ -36,6 +41,7 @@ def named_apply(fn: Callable, module: nn.Module, name="", depth_first=True, incl
 
 class BlockChunk(nn.ModuleList):
     def forward(self, x):
+        # 顺序执行 chunk 内的 blocks
         for b in self:
             x = b(x)
         return x
@@ -103,9 +109,11 @@ class DinoVisionTransformer(nn.Module):
         self.interpolate_antialias = interpolate_antialias
         self.interpolate_offset = interpolate_offset
 
+        # Patch embedding
         self.patch_embed = embed_layer(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
 
+        # 位置/分类/注册 token
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + self.num_tokens, embed_dim))
         assert num_register_tokens >= 0
@@ -113,6 +121,7 @@ class DinoVisionTransformer(nn.Module):
             nn.Parameter(torch.zeros(1, num_register_tokens, embed_dim)) if num_register_tokens else None
         )
 
+        # 随机深度策略
         if drop_path_uniform is True:
             dpr = [drop_path_rate] * depth
         else:
@@ -134,6 +143,7 @@ class DinoVisionTransformer(nn.Module):
         else:
             raise NotImplementedError
 
+        # 构建 Transformer blocks
         blocks_list = [
             block_fn(
                 dim=embed_dim,
@@ -150,6 +160,7 @@ class DinoVisionTransformer(nn.Module):
             )
             for i in range(depth)
         ]
+        # 可选 chunk 化以适配 FSDP
         if block_chunks > 0:
             self.chunked_blocks = True
             chunked_blocks = []
@@ -170,6 +181,7 @@ class DinoVisionTransformer(nn.Module):
         self.init_weights()
 
     def init_weights(self):
+        # 初始化位置编码与 token
         trunc_normal_(self.pos_embed, std=0.02)
         nn.init.normal_(self.cls_token, std=1e-6)
         if self.register_tokens is not None:
@@ -180,6 +192,7 @@ class DinoVisionTransformer(nn.Module):
         previous_dtype = x.dtype
         npatch = x.shape[1] - 1
         N = self.pos_embed.shape[1] - 1
+        # 尺寸一致时直接返回
         if npatch == N and w == h:
             return self.pos_embed
         pos_embed = self.pos_embed.float()
@@ -196,6 +209,7 @@ class DinoVisionTransformer(nn.Module):
         
         sqrt_N = math.sqrt(N)
         sx, sy = float(w0) / sqrt_N, float(h0) / sqrt_N
+        # 双三次插值到目标 patch 网格
         patch_pos_embed = nn.functional.interpolate(
             patch_pos_embed.reshape(1, int(sqrt_N), int(sqrt_N), dim).permute(0, 3, 1, 2),
             scale_factor=(sx, sy),
@@ -211,14 +225,18 @@ class DinoVisionTransformer(nn.Module):
 
     def prepare_tokens_with_masks(self, x, masks=None):
         B, nc, w, h = x.shape
+        # Patch embedding
         x = self.patch_embed(x)
         if masks is not None:
+            # 将 mask 区域替换为 mask token
             x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
 
+        # 添加 class token + 位置编码
         x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
         x = x + self.interpolate_pos_encoding(x, w, h)
 
         if self.register_tokens is not None:
+            # 插入 register tokens
             x = torch.cat(
                 (
                     x[:, :1],
@@ -231,6 +249,7 @@ class DinoVisionTransformer(nn.Module):
         return x
 
     def forward_features_list(self, x_list, masks_list):
+        # 多输入列表的特征提取
         x = [self.prepare_tokens_with_masks(x, masks) for x, masks in zip(x_list, masks_list)]
         for blk in self.blocks:
             x = blk(x)
@@ -254,6 +273,7 @@ class DinoVisionTransformer(nn.Module):
         if isinstance(x, list):
             return self.forward_features_list(x, masks)
 
+        # 单输入特征提取
         x = self.prepare_tokens_with_masks(x, masks)
 
         for blk in self.blocks:
@@ -302,6 +322,7 @@ class DinoVisionTransformer(nn.Module):
         return_class_token: bool = False,
         norm=True
     ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor]]]:
+        # 根据是否 chunked 选择路径
         if self.chunked_blocks:
             outputs = self._get_intermediate_layers_chunked(x, n)
         else:
@@ -321,6 +342,7 @@ class DinoVisionTransformer(nn.Module):
         return tuple(outputs)
 
     def forward(self, *args, is_training=False, **kwargs):
+        # 推理返回 class token 头；训练返回完整特征
         ret = self.forward_features(*args, **kwargs)
         if is_training:
             return ret

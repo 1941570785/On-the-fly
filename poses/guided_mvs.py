@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2025, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -7,7 +6,6 @@
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
-#
 
 # 引导多视图立体匹配，用于估计图像的深度
 # 参考自：https://github.com/verlab/accelerated_features
@@ -27,6 +25,7 @@ class GuidedMVS():
         # Read the CUDA source code and set the include directory to poses/
         with open('poses/guided_mvs.cu', 'r') as f:
             cuda_source = f.read()
+        # 根据当前配置替换 CUDA 模板中的常量
         cuda_source = cuda_source.replace("NUM_CAMS", str(self.n_cams))
         cuda_source = cuda_source.replace("NUM_DEPTH_CANDIDATES", str(num_depth_candidates))
         self.module = cupy.RawModule(
@@ -38,18 +37,21 @@ class GuidedMVS():
     @torch.no_grad()
     def __call__(self, uv, refKeyframe, keyframes: list):
         uv = uv.contiguous()
-        # Get relative poses
+        # 计算邻接帧到参考帧的相对位姿
         other2ref = [keyframe.get_Rt() @ torch.linalg.inv(refKeyframe.get_Rt()) for keyframe in keyframes]
         other2ref = torch.stack(other2ref, dim=0)[..., :3, :4].contiguous()
-        # Get feature maps for all neighbour keyframes
+        # 准备参考帧与邻接帧的特征图
         refFeatMap = refKeyframe.feat_map.contiguous()
         featMaps = torch.stack([keyframe.feat_map.cuda().contiguous() for keyframe in keyframes], dim=0)
+        # 相机内参（fx, fy, cx, cy）传入 CUDA
         intrinsics = torch.cat([refKeyframe.f, refKeyframe.centre], dim=0).contiguous()
         mono_idepth = refKeyframe.mono_idepth.contiguous()
 
+        # 初始化输出（depth 与匹配置信）
         depth = -torch.ones_like(uv[..., 0]).contiguous()
         idist = -torch.ones_like(uv[..., 0]).contiguous()
 
+        # CUDA kernel 配置：每个点使用 num_depth_candidates 线程
         block_size = self.num_depth_candidates
         grid_size = math.ceil(uv.shape[0])
         self.uvToDepth(

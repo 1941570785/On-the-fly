@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2025, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -7,7 +6,10 @@
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
-#
+
+# 训练与评估，用于训练与评估场景重建模型
+# 参考自：https://github.com/verlab/accelerated_features
+
 
 import argparse
 import subprocess
@@ -24,6 +26,7 @@ sys.path.append(".")
 from utils import get_image_names, parse_time, psnr
 
 if __name__ == "__main__":
+    # 解析命令行参数
     parser = argparse.ArgumentParser(
         description="Run reconstruction and compute metrics for all scenes"
     )
@@ -39,6 +42,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Set the test parameters for each scene
+    # 各数据集的测试抽帧间隔
     all_test_params = {
         "TUM/rgbd_dataset_freiburg1_desk": {"test_hold": 30},
         "TUM/rgbd_dataset_freiburg2_xyz": {"test_hold": 30},
@@ -56,6 +60,7 @@ if __name__ == "__main__":
         "--downsampling",
         str(args.downsampling),
     ]
+    # 追加额外训练参数
     if args.extra_args != "":
         common_extra_args += args.extra_args.split(" ")
     if len(args.save_at_finetune_epoch) > 0:
@@ -65,6 +70,7 @@ if __name__ == "__main__":
         print("Reconstructing all scenes")
         for index, (scene, test_params) in enumerate(all_test_params.items()):
             print(f"Optimizing scene {index + 1}/{len(all_test_params)}: {scene}")
+            # 调用训练脚本执行重建
             subprocess.run(
                 args=[
                     "python",
@@ -80,6 +86,7 @@ if __name__ == "__main__":
             )
 
     print("Computing metrics")
+    # 初始化 LPIPS 网络（GPU）
     lpips = lpips.LPIPS(net="vgg").cuda()
     metrics_list = []
     finetuning_epochs = [""] + args.save_at_finetune_epoch
@@ -97,10 +104,12 @@ if __name__ == "__main__":
             recons_time = json_dict["time"]
 
             if args.skip_rerun_metrics:
+                # 直接读取已有指标
                 PSNR = json_dict["PSNR"]
                 SSIM = json_dict["SSIM"]
                 LPIPS = json_dict["LPIPS"]
             else:
+                # 重新读取渲染结果与 GT 计算指标
                 gt_dir = os.path.join(args.base_dir, scene, "images")
                 render_dir = os.path.join(model_path, "test_images")
 
@@ -111,6 +120,7 @@ if __name__ == "__main__":
                 PSNR, SSIM, LPIPS = 0, 0, 0
 
                 for image_name in tqdm(image_names):
+                    # 读取渲染图与 GT
                     image = cv2.cvtColor(
                         cv2.imread(f"{render_dir}/{image_name}"), cv2.COLOR_BGR2RGB
                     )
@@ -118,6 +128,7 @@ if __name__ == "__main__":
                         cv2.imread(f"{gt_dir}/{image_name}"), cv2.COLOR_BGR2RGB
                     )
                     if image.shape != gt_image.shape:
+                        # 对齐尺寸以便度量
                         image = cv2.resize(
                             image,
                             (gt_image.shape[1], gt_image.shape[0]),
@@ -138,6 +149,7 @@ if __name__ == "__main__":
                     mask = mask.expand_as(image)
                     image *= mask
 
+                    # 累积指标
                     PSNR += psnr(image[mask], gt_image[mask])
                     SSIM += fused_ssim(image[None], gt_image[None], train=False).item()
                     LPIPS += lpips(image, gt_image).item()
@@ -158,5 +170,6 @@ if __name__ == "__main__":
     print("Each line corresponds to a number of epochs (starting from 0)")
     print("".join(metrics_list))
 
+    # 写出 CSV 汇总
     with open(f"{args.base_out_dir}/metrics.csv", "w") as f:
         f.write("".join(metrics_list))

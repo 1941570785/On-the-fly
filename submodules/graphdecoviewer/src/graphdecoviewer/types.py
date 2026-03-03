@@ -1,7 +1,11 @@
+# 参考：https://github.com/graphdeco-inria/gaussian-splatting/blob/main/graphdecoviewer/types.py
+
+
 from OpenGL import *
 from enum import IntFlag, auto
 from imgui_bundle import imgui, __version__ as imgui_version
 
+# 检测 ImGui 版本是否 >= 1.92.0（纹理接口变更）
 IMGUI_192 = tuple(map(int, imgui_version.split("."))) >= (1,92,0)
 
 class ViewerMode(IntFlag):
@@ -30,8 +34,10 @@ class Texture2D:
         # There was an API change in ImGui v1.92.0 where all texture related functions expect
         # ImTextureRef instead of ImTextureID.
         if IMGUI_192:
+            # 新版 ImGui 使用 ImTextureRef 包装
             self._id = imgui.ImTextureRef(-1)
         else:
+            # 旧版直接使用整数纹理 ID
             self._id = -1
     
     @property

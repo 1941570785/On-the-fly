@@ -1,3 +1,6 @@
+# 参考：https://github.com/graphdeco-inria/gaussian-splatting/blob/main/graphdecoviewer/widgets/monitor.py
+
+
 import numpy as np
 from . import Widget
 from ..types import ViewerMode
@@ -18,6 +21,7 @@ class PerformanceMonitor(Widget):
             history: Length of history to be kept.
         """
         super().__init__(mode)
+        # 初始化字段与历史长度
         self.add_other = add_other
         if add_other:
             self.fields= fields[:-1] + ["Other"]
@@ -30,6 +34,7 @@ class PerformanceMonitor(Widget):
             self.times[field] = np.zeros(history)
 
         self.offset = 0
+        # 参考 FPS 线（对应毫秒）
         self.fps = np.array([1000/60, 1000/30, 1000/16])
 
         # We need this because there is a bug in ImPlot which doesn't consider
@@ -40,12 +45,14 @@ class PerformanceMonitor(Widget):
             self._x.append(np.roll(x, i))
 
     def step(self, times: List[float]):
+        # 追加一帧的分段耗时
         if self.add_other:
             times[-1] = times[-1] - sum(times[:-1])
 
         for i in range(len(times)):
             self.times[self.fields[i]][self.offset] = times[i]
             # Cumsum
+            # 累积用于堆叠绘制
             if i:
                 self.times[self.fields[i]][self.offset] += self.times[self.fields[i-1]][self.offset]
 
@@ -54,6 +61,7 @@ class PerformanceMonitor(Widget):
 
     def show_gui(self):
         if implot.begin_plot("Frame Time", imgui.ImVec2(-1, -1)):
+            # 配置坐标轴与图例
             implot.setup_legend(implot.Location_.north_west, flags=implot.LegendFlags_.horizontal | implot.LegendFlags_.no_buttons)
             implot.setup_axis_limits(implot.ImAxis_.x1, 0, self.history)
             implot.setup_axis_limits(implot.ImAxis_.y1, 0, 1000 / 14)   # Anything above 16 FPS is bad
@@ -63,15 +71,19 @@ class PerformanceMonitor(Widget):
                 if i == 0:
                     implot.plot_shaded(self.fields[i], values=self.times[self.fields[i]], offset=self.offset)
                 else:
+                    # 叠加填充以展示各阶段耗时
                     implot.plot_shaded(self.fields[i], self._x[self.offset], ys2=self.times[self.fields[i]], ys1=self.times[self.fields[i-1]], offset=self.offset)
                 implot.plot_line(self.fields[i], self.times[self.fields[i]], offset=self.offset)
+            # 画出 FPS 参考线
             implot.plot_inf_lines("FPS", self.fps, flags=implot.InfLinesFlags_.horizontal)
             implot.end_plot()
     
     def server_send(self):
+        # 发送当前 offset 与本帧数据
         return None, { "offset": self.offset, "times": { field: times[self.offset] for field, times in self.times.items() } }
     
     def client_recv(self, _, text):
+        # 接收并写回本帧数据
         self.offset = text["offset"]
         for field, times in self.times.items():
             times[self.offset] = text["times"][field]

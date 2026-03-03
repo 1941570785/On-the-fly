@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2025, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -7,7 +6,10 @@
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
-#
+
+# 场景重建主训练脚本
+# 参考：https://github.com/graphdeco-inria/gaussian-splatting/blob/main/train.py
+
 
 import os
 import time

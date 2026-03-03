@@ -8,6 +8,10 @@
 #   https://github.com/facebookresearch/dino/blob/master/vision_transformer.py
 #   https://github.com/rwightman/pytorch-image-models/tree/master/timm/models/vision_transformer.py
 
+# DINOv2 注意力层实现
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 import logging
 
 from torch import Tensor
@@ -22,6 +26,7 @@ try:
 
     XFORMERS_AVAILABLE = True
 except ImportError:
+    # 回退到标准注意力实现
     logger.warning("xFormers not available")
     XFORMERS_AVAILABLE = False
 
@@ -48,14 +53,17 @@ class Attention(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         B, N, C = x.shape
+        # 线性映射得到 q/k/v 并按多头拆分
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
 
+        # 缩放点积注意力
         q, k, v = qkv[0] * self.scale, qkv[1], qkv[2]
         attn = q @ k.transpose(-2, -1)
 
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
+        # 汇聚并投影回原通道
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -71,6 +79,7 @@ class MemEffAttention(Attention):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads)
 
+        # xFormers memory-efficient attention 路径
         q, k, v = unbind(qkv, 2)
 
         x = memory_efficient_attention(q, k, v, attn_bias=attn_bias)
@@ -79,5 +88,3 @@ class MemEffAttention(Attention):
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
-
-        

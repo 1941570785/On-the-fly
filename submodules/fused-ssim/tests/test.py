@@ -12,16 +12,19 @@ import time
 # https://github.com/graphdeco-inria/gaussian-splatting/blob/main/utils/loss_utils.py
 
 def gaussian(window_size, sigma):
+    # 生成一维高斯核
     gauss = torch.Tensor([exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
     return gauss / gauss.sum()
 
 def create_window(window_size, channel):
+    # 构造二维高斯窗并扩展到通道数
     _1D_window = gaussian(window_size, 1.5).unsqueeze(1)
     _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
     window = Variable(_2D_window.expand(channel, 1, window_size, window_size).contiguous())
     return window
 
 def ssim(img1, img2, window_size=11, size_average=True):
+    # 参考实现：基于卷积计算 SSIM
     channel = img1.size(-3)
     window = create_window(window_size, channel)
 
@@ -32,6 +35,7 @@ def ssim(img1, img2, window_size=11, size_average=True):
     return _ssim(img1, img2, window, window_size, channel, size_average)
 
 def _ssim(img1, img2, window, window_size, channel, size_average=True):
+    # 均值/方差/协方差
     mu1 = F.conv2d(img1, window, padding=window_size // 2, groups=channel)
     mu2 = F.conv2d(img2, window, padding=window_size // 2, groups=channel)
 
@@ -43,6 +47,7 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
     sigma2_sq = F.conv2d(img2 * img2, window, padding=window_size // 2, groups=channel) - mu2_sq
     sigma12 = F.conv2d(img1 * img2, window, padding=window_size // 2, groups=channel) - mu1_mu2
 
+    # SSIM 稳定项
     C1 = 0.01 ** 2
     C2 = 0.03 ** 2
 
@@ -55,6 +60,7 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
 
 
 if __name__ == "__main__":
+    # 基本正确性与性能对比测试
     torch.manual_seed(0)
     B, CH, H, W = 5, 5, 1080, 1920
     pm_ssim = SSIM(data_range=1.0, channel=CH)
@@ -62,6 +68,7 @@ if __name__ == "__main__":
 
     for _ in range(iterations):
         with torch.no_grad():
+            # 随机生成测试样本
             img1_og = nn.Parameter(torch.rand([B, CH, H, W], device="cuda"))
             img2_og = torch.rand([B, CH, H, W], device="cuda")
 
@@ -74,6 +81,7 @@ if __name__ == "__main__":
             img1_pm = nn.Parameter(img1_og.clone())
             img2_pm = img2_og.clone()
 
+        # 正确性对比（same/valid）
         og_ssim_val = ssim(img1_og, img2_og)
         mine_ssim_val_same = fused_ssim(img1_mine_same, img2_mine_same)
         mine_ssim_val_valid = fused_ssim(img1_mine_valid, img2_mine_valid, "valid")
@@ -82,6 +90,7 @@ if __name__ == "__main__":
         assert torch.isclose(og_ssim_val, mine_ssim_val_same)
         assert torch.isclose(mine_ssim_val_valid, pm_ssim_val)
 
+        # 梯度一致性验证
         og_ssim_val.backward()
         mine_ssim_val_same.backward()
         mine_ssim_val_valid.backward()
@@ -94,6 +103,7 @@ if __name__ == "__main__":
     img2 = torch.rand([B, CH, H, W], device="cuda")
 
     # benchmark og
+    # 参考实现性能
     begin = time.time()
     for _ in range(iterations):
         og_ssim_val = ssim(img1, img2)
@@ -112,6 +122,7 @@ if __name__ == "__main__":
     print("Reference Time (Backward):", og_time_backward, "ms")
 
     # benchmark pytorch_mssim (pm)
+    # 第三方实现性能
     begin = time.time()
     for _ in range(iterations):
         pm_ssim_val = pm_ssim(img1, img2)
@@ -131,6 +142,7 @@ if __name__ == "__main__":
 
 
     # benchmark mine
+    # fused-ssim 性能
     begin = time.time()
     for _ in range(iterations):
         mine_ssim_val = fused_ssim(img1, img2)

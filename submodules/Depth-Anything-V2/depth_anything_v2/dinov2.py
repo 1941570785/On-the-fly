@@ -19,6 +19,10 @@ Copyright (c) Meta Platforms, Inc. and affiliates.
 Licensed under the Apache License, Version 2.0
 """
 
+# DINOv2 Vision Transformer实现
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 from functools import partial
 import math
 import logging
@@ -389,6 +393,7 @@ class DinoVisionTransformer(nn.Module):
         # ========== Patch Embedding ==========
         # 【图像嵌入】将图像分割成patches并转换为嵌入向量
         # [B, C, H, W] -> [B, num_patches, embed_dim]
+        # PatchEmbedding 输出 token 序列
         x = self.patch_embed(x)
         
         # ========== Mask处理 ==========
@@ -489,6 +494,7 @@ class DinoVisionTransformer(nn.Module):
 
         # ========== Transformer编码 ==========
         # 【特征提取】通过所有Transformer块提取特征
+        # 顺序通过 Transformer blocks
         for blk in self.blocks:
             x = blk(x)
 
@@ -522,6 +528,7 @@ class DinoVisionTransformer(nn.Module):
         blocks_to_take = range(total_block_len - n, total_block_len) if isinstance(n, int) else n
         
         # 逐层前向传播，收集指定层的输出
+        # 遍历 blocks 并收集中间层
         for i, blk in enumerate(self.blocks):
             x = blk(x)
             if i in blocks_to_take:

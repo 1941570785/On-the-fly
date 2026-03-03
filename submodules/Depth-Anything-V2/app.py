@@ -1,3 +1,7 @@
+# 深度预测应用
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 import glob
 import gradio as gr
 import matplotlib
@@ -23,14 +27,18 @@ css = """
     height: 62px;
 }
 """
+ # 自动选择推理设备
 DEVICE = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+ # 模型配置（不同 encoder 的通道设置）
 model_configs = {
     'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
     'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
     'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
     'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
 }
+ # 默认使用 ViT-Large
 encoder = 'vitl'
+ # 加载模型与权重
 model = DepthAnythingV2(**model_configs[encoder])
 state_dict = torch.load(f'checkpoints/depth_anything_v2_{encoder}.pth', map_location="cpu")
 model.load_state_dict(state_dict)
@@ -41,6 +49,7 @@ description = """Official demo for **Depth Anything V2**.
 Please refer to our [paper](https://arxiv.org/abs/2406.09414), [project page](https://depth-anything-v2.github.io), or [github](https://github.com/DepthAnything/Depth-Anything-V2) for more details."""
 
 def predict_depth(image):
+    # 预测深度图（numpy 输入）
     return model.infer_image(image)
 
 with gr.Blocks(css=css) as demo:
@@ -58,20 +67,25 @@ with gr.Blocks(css=css) as demo:
     cmap = matplotlib.colormaps.get_cmap('Spectral_r')
 
     def on_submit(image):
+        # 提交回调：预测深度并生成可视化/文件
         original_image = image.copy()
 
         h, w = image.shape[:2]
 
+        # OpenCV BGR -> RGB
         depth = predict_depth(image[:, :, ::-1])
 
+        # 保存 16-bit 原始深度（可视为视差）
         raw_depth = Image.fromarray(depth.astype('uint16'))
         tmp_raw_depth = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
         raw_depth.save(tmp_raw_depth.name)
 
+        # 归一化到 8-bit 用于可视化
         depth = (depth - depth.min()) / (depth.max() - depth.min()) * 255.0
         depth = depth.astype(np.uint8)
         colored_depth = (cmap(depth)[:, :, :3] * 255).astype(np.uint8)
 
+        # 保存灰度深度图
         gray_depth = Image.fromarray(depth)
         tmp_gray_depth = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
         gray_depth.save(tmp_gray_depth.name)

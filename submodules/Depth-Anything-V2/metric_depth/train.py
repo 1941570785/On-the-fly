@@ -1,3 +1,7 @@
+# 深度预测训练脚本
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 import argparse
 import logging
 import os
@@ -43,14 +47,17 @@ parser.add_argument('--port', default=None, type=int)
 def main():
     args = parser.parse_args()
     
+    # 抑制 numpy 多项式拟合告警
     warnings.simplefilter('ignore', np.RankWarning)
     
     logger = init_log('global', logging.INFO)
     logger.propagate = 0
     
+    # 初始化分布式训练
     rank, world_size = setup_distributed(port=args.port)
     
     if rank == 0:
+        # 仅主进程记录日志与 TensorBoard
         all_args = {**vars(args), 'ngpus': world_size}
         logger.info('{}\n'.format(pprint.pformat(all_args)))
         writer = SummaryWriter(args.save_path)
@@ -58,6 +65,7 @@ def main():
     cudnn.enabled = True
     cudnn.benchmark = True
     
+    # 构造数据集与 DataLoader
     size = (args.img_size, args.img_size)
     if args.dataset == 'hypersim':
         trainset = Hypersim('dataset/splits/hypersim/train.txt', 'train', size=size)
@@ -77,6 +85,7 @@ def main():
     valsampler = torch.utils.data.distributed.DistributedSampler(valset)
     valloader = DataLoader(valset, batch_size=1, pin_memory=True, num_workers=4, drop_last=True, sampler=valsampler)
     
+    # 当前进程绑定到对应 GPU
     local_rank = int(os.environ["LOCAL_RANK"])
     
     model_configs = {
@@ -85,18 +94,23 @@ def main():
         'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
         'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
     }
+    # 构建模型
     model = DepthAnythingV2(**{**model_configs[args.encoder], 'max_depth': args.max_depth})
     
+    # 可选加载预训练权重
     if args.pretrained_from:
         model.load_state_dict({k: v for k, v in torch.load(args.pretrained_from, map_location='cpu').items() if 'pretrained' in k}, strict=False)
     
+    # SyncBN + DDP
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     model.cuda(local_rank)
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], broadcast_buffers=False,
                                                       output_device=local_rank, find_unused_parameters=True)
     
+    # 损失函数
     criterion = SiLogLoss().cuda(local_rank)
     
+    # 分组学习率：backbone 与头部
     optimizer = AdamW([{'params': [param for name, param in model.named_parameters() if 'pretrained' in name], 'lr': args.lr},
                        {'params': [param for name, param in model.named_parameters() if 'pretrained' not in name], 'lr': args.lr * 10.0}],
                       lr=args.lr, betas=(0.9, 0.999), weight_decay=0.01)
@@ -113,6 +127,7 @@ def main():
                             epoch, args.epochs, previous_best['abs_rel'], previous_best['sq_rel'], previous_best['rmse'], 
                             previous_best['rmse_log'], previous_best['log10'], previous_best['silog']))
         
+        # 让 DistributedSampler 在每个 epoch 打乱
         trainloader.sampler.set_epoch(epoch + 1)
         
         model.train()
@@ -123,6 +138,7 @@ def main():
             
             img, depth, valid_mask = sample['image'].cuda(), sample['depth'].cuda(), sample['valid_mask'].cuda()
             
+            # 数据增强：随机左右翻转
             if random.random() < 0.5:
                 img = img.flip(-1)
                 depth = depth.flip(-1)
@@ -130,6 +146,7 @@ def main():
             
             pred = model(img)
             
+            # 有效像素范围内计算损失
             loss = criterion(pred, depth, (valid_mask == 1) & (depth >= args.min_depth) & (depth <= args.max_depth))
             
             loss.backward()
@@ -139,6 +156,7 @@ def main():
             
             iters = epoch * len(trainloader) + i
             
+            # 多项式衰减学习率
             lr = args.lr * (1 - iters / total_iters) ** 0.9
             
             optimizer.param_groups[0]["lr"] = lr
@@ -150,6 +168,7 @@ def main():
             if rank == 0 and i % 100 == 0:
                 logger.info('Iter: {}/{}, LR: {:.7f}, Loss: {:.3f}'.format(i, len(trainloader), optimizer.param_groups[0]['lr'], loss.item()))
         
+        # 验证阶段
         model.eval()
         
         results = {'d1': torch.tensor([0.0]).cuda(), 'd2': torch.tensor([0.0]).cuda(), 'd3': torch.tensor([0.0]).cuda(), 
@@ -163,6 +182,7 @@ def main():
             
             with torch.no_grad():
                 pred = model(img)
+                # 上采样到 GT 尺寸
                 pred = F.interpolate(pred[:, None], depth.shape[-2:], mode='bilinear', align_corners=True)[0, 0]
             
             valid_mask = (valid_mask == 1) & (depth >= args.min_depth) & (depth <= args.max_depth)
@@ -176,6 +196,7 @@ def main():
                 results[k] += cur_results[k]
             nsamples += 1
         
+        # 等待所有进程完成
         torch.distributed.barrier()
         
         for k in results.keys():
@@ -192,6 +213,7 @@ def main():
             for name, metric in results.items():
                 writer.add_scalar(f'eval/{name}', (metric / nsamples).item(), epoch)
         
+        # 更新最优指标
         for k in results.keys():
             if k in ['d1', 'd2', 'd3']:
                 previous_best[k] = max(previous_best[k], (results[k] / nsamples).item())
@@ -199,6 +221,7 @@ def main():
                 previous_best[k] = min(previous_best[k], (results[k] / nsamples).item())
         
         if rank == 0:
+            # 保存 checkpoint
             checkpoint = {
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),

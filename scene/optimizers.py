@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2025, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -7,7 +6,6 @@
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
-#
 
 # Adam优化器，用于优化场景模型中的参数
 # 参考自：https://github.com/verlab/accelerated_features
@@ -25,7 +23,7 @@ class BaseAdam:
         self.params = params
         self.betas = betas
         self.eps = eps
-        # Initialize moments if not already done
+        # 初始化一阶/二阶动量缓存
         for param in self.params.values():
             if "exp_avg" not in param:
                 param["exp_avg"] = torch.zeros_like(
@@ -36,6 +34,7 @@ class BaseAdam:
                 )
 
     def zero_grad(self):
+        # 释放梯度以节省显存
         for param in self.params.values():
             param["val"].grad = None
 
@@ -49,6 +48,7 @@ class BaseAdam:
 
             exp_avg = param_dict["exp_avg"]
             exp_avg_sq = param_dict["exp_avg_sq"]
+            # 调用 CUDA Adam 更新（基础版）
             adamUpdateBasic(
                 param,
                 param.grad,
@@ -67,7 +67,7 @@ class SparseGaussianAdam(BaseAdam):
         super().__init__(params=params, betas=betas, eps=eps)
 
         self.lr_dict = lr_dict
-        # Convert learning rates to tensors
+        # 将学习率转为张量，便于逐元素更新
         for key, param in self.params.items():
             if "lr" not in param or type(param["lr"]) is not torch.Tensor:
                 if key not in self.lr_dict:
@@ -89,6 +89,7 @@ class SparseGaussianAdam(BaseAdam):
             exp_avg = param_dict["exp_avg"]
             exp_avg_sq = param_dict["exp_avg_sq"]
             M = param.numel() // N
+            # 稀疏可见性掩码驱动的 Adam 更新
             adamUpdate(
                 param,
                 param.grad,
@@ -104,12 +105,14 @@ class SparseGaussianAdam(BaseAdam):
             )
 
             # Update the learning rate
+            # 对可见元素衰减学习率
             if key in self.lr_dict:
                 param_dict["lr"][visibility] *= self.lr_dict[key]["lr_decay"]
                 param_dict["lr"].clamp_min_(self.lr_dict[key]["lr_init"] * 0.1)
 
     def add_and_prune(self, extension_tensors, valid_mask):
         for key, param in self.params.items():
+            # 先裁剪无效元素，再拼接新增元素
             extension_tensor = extension_tensors[key]
             param["val"] = torch.cat(
                 [param["val"].detach()[valid_mask], extension_tensor], dim=0
@@ -125,6 +128,7 @@ class SparseGaussianAdam(BaseAdam):
             ).contiguous()
 
             if key in self.lr_dict:
+                # 为新增元素分配初始学习率
                 param["lr"] = torch.cat(
                     [
                         param["lr"][valid_mask],

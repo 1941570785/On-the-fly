@@ -1,3 +1,6 @@
+# 参考：https://github.com/graphdeco-inria/gaussian-splatting/blob/main/graphdecoviewer/widgets/cameras/__init__.py
+
+
 import numpy as np
 from .. import Widget
 from imgui_bundle import imgui
@@ -17,6 +20,7 @@ class Camera(Widget):
         super().__init__(mode)
 
         # Extrinsics
+        # 相机坐标轴（OpenCV 约定）
         self.origin = np.asarray([0.0, 0.0, 0.0])
         self.forward = np.asarray([0.0, 0.0, 1.0])
         self.up = np.asarray([0.0, -1.0, 0.0])
@@ -29,6 +33,7 @@ class Camera(Widget):
             self.update_pose(to_world)
 
         # Intrinsics
+        # 分辨率与视场角
         self.res_x = res_x
         self.res_y = res_y
         self.fov_y = np.deg2rad(fov_y)
@@ -37,6 +42,7 @@ class Camera(Widget):
         self.z_far = z_far
 
     def server_recv(self, _, text):
+        # 从客户端状态更新相机参数
         self.res_x = text["res_x"]
         self.res_y = text["res_y"]
         self.fov_x = text["fov_x"]
@@ -46,6 +52,7 @@ class Camera(Widget):
         self.update_pose(np.array(text["to_world"]))
 
     def client_send(self):
+        # 客户端发送相机状态
         return None, self.to_json()
 
     @classmethod
@@ -55,6 +62,7 @@ class Camera(Widget):
         return cls(mode, to_world=to_world, **json)
 
     def to_json(self):
+        # 序列化相机参数
         return {
             "res_x": self.res_x,
             "res_y": self.res_y,
@@ -75,6 +83,7 @@ class Camera(Widget):
 
     @property
     def to_world(self) -> np.ndarray:
+        # 生成世界坐标系下的外参矩阵
         mat = np.identity(4, dtype=np.float32)
         mat[:3, 3] = self.origin
         mat[:3, 0] = self.right
@@ -84,10 +93,12 @@ class Camera(Widget):
 
     @property
     def to_camera(self) -> np.ndarray:
+        # 世界到相机的变换
         return np.linalg.inv(self.to_world)
     
     @property
     def projection(self) -> np.ndarray:
+        # 构造透视投影矩阵
         tan_half_fov_y = np.tan(self.fov_y / 2)
         tan_half_fov_x = np.tan(self.fov_x / 2)
 
@@ -115,6 +126,7 @@ class Camera(Widget):
         return self.projection @ self.to_camera
 
     def show_gui(self) -> bool:
+        # GUI 控件：调整 FoV 与分辨率
         updated, self.fov_y = imgui.slider_angle("FoV Y", self.fov_y, 5, 120)
         if updated:
             self.compute_fov_x()
@@ -129,6 +141,7 @@ class Camera(Widget):
         return False
     
     def compute_fov_x(self):
+        # 根据分辨率更新水平视场角
         self.fov_x = 2 * np.arctan(np.tan(self.fov_y / 2) * (self.res_x / self.res_y))
     
     def draw_camera(self, camera: 'Camera', texture: Texture2D, thickness: float=1.0, color: tuple=(1.0, 1.0, 1.0)):
@@ -160,16 +173,20 @@ class Camera(Widget):
             return c * vec + s * cross + (1 - c) * dot * axis
 
         if abs(angle_forward) > 1e-7:
+            # 绕 forward 轴旋转
             self.up = rotate_vec(self.up, self.forward, angle_forward)
             self.right = rotate_vec(self.right, self.forward, angle_forward)
         if abs(angle_right) > 1e-7:
+            # 绕 right 轴旋转
             self.forward = rotate_vec(self.forward, self.right, angle_right)
             self.up = rotate_vec(self.up, self.right, angle_right)
         if abs(angle_up) > 1e-7:
+            # 绕 up 轴旋转
             self.forward = rotate_vec(self.forward, self.up, angle_up)
             self.right = rotate_vec(self.right, self.up, angle_up)
 
         # Re-orthonormalize (to handle floating-point drift)
+        # 重新正交化，抑制数值漂移
         self.forward /= np.linalg.norm(self.forward)
         # Recompute right as cross of forward with global -Y or some logic:
         # But typically you'd just do cross of (forward, up)
@@ -180,6 +197,7 @@ class Camera(Widget):
         self.up /= np.linalg.norm(self.up)
 
     def update_pose(self, mat: np.ndarray):
+        # 用外参矩阵更新位置与朝向
         self.origin = mat[:3, 3]
         self.forward = mat[:3, 2]
         self.forward = self.forward / np.linalg.norm(self.forward)

@@ -1,3 +1,6 @@
+# 参考：https://github.com/graphdeco-inria/gaussian-splatting/blob/main/graphdecoviewer/widgets/ellipsoid_viewer.py
+
+
 import numpy as np
 from . import Widget
 from OpenGL.GL import *
@@ -224,6 +227,7 @@ void main(void) {
 class EllipsoidViewer(Widget):
     def __init__(self, mode):
         super().__init__(mode)
+        # 渲染参数与状态
         self.limit = 0.2
         self.scaling_modifier = 1
         self.render_floaters = False
@@ -233,6 +237,7 @@ class EllipsoidViewer(Widget):
 
     def setup(self):
         """ Create the buffers for storing the gaussian parameters and the framebuffers to render to. """
+        # 初始化纹理与 FBO 资源
         self._color_texture = Texture2D()
         self._color_texture.id = glGenTextures(1)
         self._depth_texture = Texture2D() # Technically its a RBO
@@ -240,6 +245,7 @@ class EllipsoidViewer(Widget):
         self._fbo = None
 
         # Create buffers for Gaussian Attributes
+        # SSBO: positions / rotations / scales / alpha / colors
         self._means = glGenBuffers(1)
         self._rotations = glGenBuffers(1)
         self._scales = glGenBuffers(1)
@@ -288,6 +294,7 @@ class EllipsoidViewer(Widget):
         glBindFramebuffer(GL_FRAMEBUFFER, self._fbo)
 
         # Create texture to render to
+        # 颜色附件纹理
         self._color_texture.res_x = res_x
         self._color_texture.res_y = res_y
         glBindTexture(GL_TEXTURE_2D, self._color_texture.id)
@@ -306,6 +313,7 @@ class EllipsoidViewer(Widget):
         )
 
         # Create depth RBO
+        # 深度附件用于遮挡
         self._depth_texture.res_x = res_x
         self._depth_texture.res_y = res_y
         glBindRenderbuffer(GL_RENDERBUFFER, self._depth_texture.id)
@@ -328,6 +336,7 @@ class EllipsoidViewer(Widget):
     
     def upload(self, means: np.ndarray, rotations: np.ndarray, scales: np.ndarray, alphas: np.ndarray, colors: np.ndarray):
         """ Upload gaussian parameters to OpenGL buffers. """
+        # 将高斯参数上传到 GPU 缓冲区
         self.num_gaussians = means.shape[0]
         glBindBuffer(GL_ARRAY_BUFFER, self._means)
         glBufferData(GL_ARRAY_BUFFER, means.nbytes, means, GL_STATIC_DRAW)
@@ -345,6 +354,7 @@ class EllipsoidViewer(Widget):
         if not self.enabled:
             return
         
+        # 记录渲染耗时
         glBeginQuery(GL_TIME_ELAPSED, self.query)
         if self._color_texture.res_x != camera.res_x or \
             self._color_texture.res_y != camera.res_y:
@@ -353,6 +363,7 @@ class EllipsoidViewer(Widget):
         glBindFramebuffer(GL_FRAMEBUFFER, self._fbo)
         glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT)
 
+        # 绑定 SSBO 到着色器
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, self._means)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, self._rotations)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, self._scales)
@@ -377,9 +388,11 @@ class EllipsoidViewer(Widget):
         glUniform1f(glGetUniformLocation(self._shader, "alpha_limit"), float(self.limit))
         glUniform1i(glGetUniformLocation(self._shader, "stage"), 0)
         glUniform1f(glGetUniformLocation(self._shader, "scaling_modifier"), float(self.scaling_modifier))
+        # 实例化绘制每个高斯的包围盒/椭球
         glDrawArraysInstanced(GL_TRIANGLES, 0, 36, self.num_gaussians)
 
         if self.render_floaters:
+            # 可选的半透明渲染通道
             glDepthMask(GL_FALSE)
             glEnable(GL_BLEND);
             glBlendEquation(GL_FUNC_ADD)
@@ -403,6 +416,7 @@ class EllipsoidViewer(Widget):
     def server_send(self):
         if not self.step_called:
             return None, None
+        # 读取颜色纹理并发送给客户端
         glBindTexture(GL_TEXTURE_2D, self._color_texture.id)
         arr = glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_BYTE)
         glBindTexture(GL_TEXTURE_2D, 0)
@@ -410,6 +424,7 @@ class EllipsoidViewer(Widget):
         return arr, {"shape": (self._color_texture.res_y, self._color_texture.res_x, 3)}
     
     def client_recv(self, binary, text):
+        # 客户端接收并更新纹理
         img = np.frombuffer(binary, dtype=np.uint8).reshape(text["shape"])
         # import matplotlib.pyplot as plt
         # plt.imshow(img)
@@ -431,6 +446,7 @@ class EllipsoidViewer(Widget):
         res_x = self._color_texture.res_x
         res_y = self._color_texture.res_y
         if draw_list is not None:
+            # 直接绘制到 draw list
             draw_list.add_image(self._color_texture.tex_ref, (0, 0), (res_x, res_y))
         else:
             imgui.image(self._color_texture.tex_ref, (res_x, res_y))

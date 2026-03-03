@@ -1,3 +1,7 @@
+# 图像变换实现
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 import numpy as np
 import cv2
 
@@ -49,6 +53,7 @@ class Resize(object):
         self.__image_interpolation_method = image_interpolation_method
 
     def constrain_to_multiple_of(self, x, min_val=0, max_val=None):
+        # 将尺寸约束为 multiple_of 的倍数
         y = (np.round(x / self.__multiple_of) * self.__multiple_of).astype(int)
 
         if max_val is not None and y > max_val:
@@ -65,6 +70,7 @@ class Resize(object):
         scale_width = self.__width / width
 
         if self.__keep_aspect_ratio:
+            # 按策略调整缩放比例
             if self.__resize_method == "lower_bound":
                 # scale such that output size is lower bound
                 if scale_width > scale_height:
@@ -110,9 +116,11 @@ class Resize(object):
         width, height = self.get_size(sample["image"].shape[1], sample["image"].shape[0])
         
         # resize sample
+        # 图像使用设定插值方式
         sample["image"] = cv2.resize(sample["image"], (width, height), interpolation=self.__image_interpolation_method)
 
         if self.__resize_target:
+            # 同步缩放深度与掩码
             if "depth" in sample:
                 sample["depth"] = cv2.resize(sample["depth"], (width, height), interpolation=cv2.INTER_NEAREST)
                 
@@ -131,6 +139,7 @@ class NormalizeImage(object):
         self.__std = std
 
     def __call__(self, sample):
+        # 按给定均值/方差归一化
         sample["image"] = (sample["image"] - self.__mean) / self.__std
 
         return sample
@@ -144,14 +153,17 @@ class PrepareForNet(object):
         pass
 
     def __call__(self, sample):
+        # HWC -> CHW，并保证连续内存
         image = np.transpose(sample["image"], (2, 0, 1))
         sample["image"] = np.ascontiguousarray(image).astype(np.float32)
 
         if "depth" in sample:
+            # depth 转 float32
             depth = sample["depth"].astype(np.float32)
             sample["depth"] = np.ascontiguousarray(depth)
         
         if "mask" in sample:
+            # mask 转 float32
             sample["mask"] = sample["mask"].astype(np.float32)
             sample["mask"] = np.ascontiguousarray(sample["mask"])
         

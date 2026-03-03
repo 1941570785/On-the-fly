@@ -8,6 +8,13 @@
 #   https://github.com/facebookresearch/dino/blob/master/vision_transformer.py
 #   https://github.com/rwightman/pytorch-image-models/tree/master/timm/layers/patch_embed.py
 
+# 参考：https://github.com/facebookresearch/dino/blob/master/vision_transformer.py
+# 参考：https://github.com/rwightman/pytorch-image-models/tree/master/timm/layers/patch_embed.py
+
+# DINOv2 Patch Embedding实现
+#  参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 from typing import Callable, Optional, Tuple, Union
 
 from torch import Tensor
@@ -20,6 +27,7 @@ def make_2tuple(x):
         return x
 
     assert isinstance(x, int)
+    # 标量转 (h, w) 形式
     return (x, x)
 
 
@@ -63,6 +71,7 @@ class PatchEmbed(nn.Module):
 
         self.flatten_embedding = flatten_embedding
 
+        # 使用卷积实现 patch 切分与线性投影
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_HW, stride=patch_HW)
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
@@ -70,19 +79,23 @@ class PatchEmbed(nn.Module):
         _, _, H, W = x.shape
         patch_H, patch_W = self.patch_size
 
+        # 输入尺寸必须能被 patch 大小整除
         assert H % patch_H == 0, f"Input image height {H} is not a multiple of patch height {patch_H}"
         assert W % patch_W == 0, f"Input image width {W} is not a multiple of patch width: {patch_W}"
 
         x = self.proj(x)  # B C H W
         H, W = x.size(2), x.size(3)
         x = x.flatten(2).transpose(1, 2)  # B HW C
+        # 按 token 维度归一化
         x = self.norm(x)
         if not self.flatten_embedding:
+            # 保持空间布局（B, H, W, C）
             x = x.reshape(-1, H, W, self.embed_dim)  # B H W C
         return x
 
     def flops(self) -> float:
         Ho, Wo = self.patches_resolution
+        # 估算卷积投影与归一化的 FLOPs
         flops = Ho * Wo * self.embed_dim * self.in_chans * (self.patch_size[0] * self.patch_size[1])
         if self.norm is not None:
             flops += Ho * Wo * self.embed_dim

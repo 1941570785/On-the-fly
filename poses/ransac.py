@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2025, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -7,7 +6,6 @@
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
-#
 
 # RANSAC估计器，用于估计相机位姿和3D点
 # 参考自：https://github.com/verlab/accelerated_features
@@ -51,6 +49,7 @@ class RANSACEstimator:
 
         # Set the functions and number of points required for each estimator
         if type == EstimatorType.FUNDAMENTAL_8PTS:
+            # 8 点法估计基础矩阵 + Sampson 距离内点判定
             self.model_estimator = self.module.get_function("batchFundMat8pts")
             self.inlier_mask_estimator = self.module.get_function("sampsonInliers")
             self.m = 8  # 8 pairs are required to estimate a fundamental matrix
@@ -59,6 +58,7 @@ class RANSACEstimator:
                 N, dtype=torch.bool, device=torch.device("cuda")
             )
         elif type == EstimatorType.P4P:
+            # 4 点 PnP：用 miniBA 批量求解初始位姿
             self.m = 4  # 4 pairs are required per estimation
             self.model_estimator = MiniBA(
                 self.N,
@@ -89,6 +89,7 @@ class RANSACEstimator:
         Estimate N models from the given matches.
         """
         if self.type == EstimatorType.FUNDAMENTAL_8PTS:
+            # CUDA 批量估计基础矩阵
             block_size = 64
             grid_size = math.ceil(idxs.shape[0] / block_size)
             self.model_estimator(
@@ -104,6 +105,7 @@ class RANSACEstimator:
                 ),
             )
         elif self.type == EstimatorType.P4P:
+            # 取每个样本的 4 点并用 miniBA 估计位姿
             mkpts1_candidates = mkpts1[idxs].view(self.N, -1)
             mkpts2_candidates = mkpts2[idxs]
             Rs6D_init = R6D_init[None, None].repeat(self.N, 1, 1, 1)
@@ -116,6 +118,7 @@ class RANSACEstimator:
 
     def get_inlier_mask(self, mkpts1, mkpts2, focal, centre):
         if self.type == EstimatorType.FUNDAMENTAL_8PTS:
+            # 使用 Sampson 距离判断内点
             inliers = torch.zeros(
                 self.models.shape[0],
                 mkpts1.shape[0],
@@ -139,6 +142,7 @@ class RANSACEstimator:
                 ),
             )
         elif self.type == EstimatorType.P4P:
+            # 将 3D 点投影回像素平面并计算重投影误差
             mkpts2_cam = (
                 torch.matmul(mkpts2, self.models[..., :3].transpose(-2, -1))
                 + self.models[..., None, :, 3]
@@ -182,6 +186,7 @@ class RANSACEstimator:
             assert centre is not None
 
         # Select N x m random points
+        # 每个模型随机采样 m 个匹配点
         random_scores = torch.rand(self.N, mkpts1.shape[0], device=mkpts1.device)
         _, idxs = torch.topk(random_scores, self.m, dim=1)
 
@@ -192,6 +197,7 @@ class RANSACEstimator:
         inliers = self.get_inlier_mask(mkpts1, mkpts2, focal, centre)
 
         # Compute inlier mask and find the best model
+        # 可按置信度加权统计内点数
         if confs is not None:
             inliers = inliers * confs[None]
         n_inliers = inliers.sum(dim=1)

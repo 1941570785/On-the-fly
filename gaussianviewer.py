@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2025, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -7,7 +6,10 @@
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
-#
+
+# 参考：https://github.com/graphdeco-inria/gaussian-splatting/blob/main/gaussianviewer.py
+# 3D 高斯场景可视化器
+
 
 import json
 import numpy as np
@@ -38,6 +40,7 @@ class GaussianViewer(Viewer):
             "show_top_view", "keyframe_id", "altitude_control", "altitude_smoothing",
             "snap_to_closest", "next_keyframe", "prev_keyframe", "reset_intrinsics_flag",
         ]
+    # 上述字段会在 client/server 间同步
 
     def __init__(self, mode: ViewerMode):
         super().__init__(mode)
@@ -125,6 +128,7 @@ class GaussianViewer(Viewer):
         self.updated_pose = None
     
     def render_mode(self):
+        # 当前渲染模式名称
         return self.render_modes[self.render_mode_id]
 
     def reset_intrinsics(self, view):
@@ -185,6 +189,7 @@ class GaussianViewer(Viewer):
                 self.updated_pose = keyframe_pose
 
         # Render scene
+        # 按视图渲染并写入图像缓冲
         for view in ["point_view", "top_view"]:
             camera = self.cameras[view]
             if self.reset_intrinsics_flag[view]:
@@ -221,6 +226,7 @@ class GaussianViewer(Viewer):
                     image = torch.tensor(image).cuda()
 
                 # Update the buffer
+                # 更新纹理显示缓冲
                 self.views[view].step(image)
 
             # Draw ellipsoids
@@ -228,6 +234,7 @@ class GaussianViewer(Viewer):
                 self.ellipsoid_viewer.step(camera)
 
         # Upload to OpenGL only after first anchor has been loaded (will be done in first render call)
+        # 高斯数量变化时刷新椭球渲染缓冲
         if self.ellipsoid_viewer.num_gaussians != self.scene_model.n_active_gaussians:
             self.ellipsoid_viewer.upload(
                 self.scene_model.xyz.detach().cpu().numpy(),

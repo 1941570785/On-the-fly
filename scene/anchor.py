@@ -1,4 +1,3 @@
-#
 # Copyright (C) 2025, Inria
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
@@ -7,7 +6,6 @@
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
-#
 
 # 锚点类，用于管理锚点的参数和相关关键帧
 # 参考自：https://github.com/verlab/accelerated_features
@@ -39,10 +37,12 @@ class Anchor:
         self.keyframe_ids = [keyframe.index for keyframe in keyframes]
 
     def add_keyframe(self, keyframe):
+        # 记录关联关键帧
         self.keyframes.append(keyframe)
         self.keyframe_ids.append(keyframe.index)
 
     def duplicate_param_dict(self):
+        # 复制参数字典以避免共享引用
         self.gaussian_params = {
             key: {k: v for k, v in value.items()}
             for key, value in self.gaussian_params.items()
@@ -59,6 +59,7 @@ class Anchor:
                     if type(param[key]) is torch.Tensor:
                         param[key] = tensor.to(device)
             if with_keyframes:
+                # 可选地同步移动关联关键帧
                 for keyframe in self.keyframes:
                     keyframe.to(device)
         return self
@@ -81,6 +82,7 @@ class Anchor:
         closest_anchors_dist, closest_anchors_ids = torch.topk(
             anchor_dists, min(3, len(anchors)), largest=False
         )
+        # 距离比值用于判断是否需要混合
         ratio = (
             (closest_anchors_dist[0]) / (closest_anchors_dist[1])
             if len(anchors) > 1
@@ -94,11 +96,13 @@ class Anchor:
                 anchors[anchor_id].to("cpu")
 
         # Apply eq. 5
+        # 根据相邻锚点距离决定单锚或双锚混合
         if ratio < (1 - anchor_overlap):
             gaussian_params = anchors[closest_anchors_ids[0]].gaussian_params
             anchor_weights[closest_anchors_ids[0]] = 1
         else:
             # Blend the opacities of the two closest anchors
+            # 仅对 opacity 做加权混合，其余参数拼接
             blending_weights = 1 - (ratio - (1 - anchor_overlap)) * (
                 0.5 / anchor_overlap
             )
@@ -127,6 +131,7 @@ class Anchor:
 
     @classmethod
     def from_ply(cls, anchor_path: str, position: torch.Tensor, max_sh_degree: str):
+        # 从 PLY 文件加载高斯参数
         plydata = PlyData.read(anchor_path)
         xyz = np.stack(
             (
@@ -188,6 +193,7 @@ class Anchor:
         return cls(gaussian_params, position.cuda(), [])
 
     def construct_list_of_attributes(self):
+        # 生成 PLY 写出所需的属性列表
         l = ["x", "y", "z", "nx", "ny", "nz"]
         # All channels except the 3 DC
         for i in range(self.gaussian_params["f_dc"]["val"].shape[2]):
@@ -207,6 +213,7 @@ class Anchor:
     def save_ply(self, path: str):
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
+        # 组装要写入的属性矩阵
         xyz = to_numpy(self.gaussian_params["xyz"]["val"])
         normals = np.zeros_like(xyz)
         f_dc = to_numpy(

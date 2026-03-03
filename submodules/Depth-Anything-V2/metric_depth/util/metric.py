@@ -1,24 +1,34 @@
+# 评估指标实现
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 import torch
 
 
 def eval_depth(pred, target):
     assert pred.shape == target.shape
 
+    # 误差阈值比率
     thresh = torch.max((target / pred), (pred / target))
 
+    # δ 阈值指标
     d1 = torch.sum(thresh < 1.25).float() / len(thresh)
     d2 = torch.sum(thresh < 1.25 ** 2).float() / len(thresh)
     d3 = torch.sum(thresh < 1.25 ** 3).float() / len(thresh)
 
+    # 差异与对数差异
     diff = pred - target
     diff_log = torch.log(pred) - torch.log(target)
 
+    # 相对误差
     abs_rel = torch.mean(torch.abs(diff) / target)
     sq_rel = torch.mean(torch.pow(diff, 2) / target)
 
+    # RMSE / log-RMSE
     rmse = torch.sqrt(torch.mean(torch.pow(diff, 2)))
     rmse_log = torch.sqrt(torch.mean(torch.pow(diff_log , 2)))
 
+    # log10 与 SiLog
     log10 = torch.mean(torch.abs(torch.log10(pred) - torch.log10(target)))
     silog = torch.sqrt(torch.pow(diff_log, 2).mean() - 0.5 * torch.pow(diff_log.mean(), 2))
 

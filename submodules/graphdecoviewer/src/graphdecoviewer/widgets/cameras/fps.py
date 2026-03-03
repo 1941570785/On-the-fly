@@ -1,3 +1,6 @@
+# 参考：https://github.com/graphdeco-inria/gaussian-splatting/blob/main/graphdecoviewer/widgets/cameras/fps.py
+
+
 import glfw
 import numpy as np
 import logging
@@ -19,6 +22,7 @@ class FPSCamera(Camera):
         to_world: np.ndarray = None,
     ):
         super().__init__(mode, res_x, res_y, fov_y, z_near, z_far, to_world)
+        # 运动与旋转的平滑参数
         self.smoothness = 0.4
         self.origin_motion = np.zeros(3)
         self.rotation_motion = np.zeros(3)
@@ -33,6 +37,7 @@ class FPSCamera(Camera):
 
     def setup(self):
         if self.mode != ViewerMode.SERVER:
+            # 记录常用按键映射（通过 ImGui 键码）
             self.movement_keys = {
                 "w": imgui.Key[glfw.get_key_name(glfw.KEY_UNKNOWN, glfw.get_key_scancode(glfw.KEY_W))],
                 "a": imgui.Key[glfw.get_key_name(glfw.KEY_UNKNOWN, glfw.get_key_scancode(glfw.KEY_A))],
@@ -50,6 +55,7 @@ class FPSCamera(Camera):
 
     def process_mouse_input(self) -> bool:
         if imgui.is_mouse_dragging(0):
+            # 鼠标拖拽控制视角旋转
             delta = imgui.get_mouse_drag_delta()
             delta.y *= -1 if self.invert_mouse else 1
             delta.x *= -1 if self.invert_mouse else 1
@@ -67,6 +73,7 @@ class FPSCamera(Camera):
 
     def process_keyboard_input(self) -> bool:
         if self.mode != ViewerMode.SERVER:
+            # 平移输入（WASD + QE）
             if imgui.is_key_down(self.movement_keys["w"]):
                 self.origin_motion += self.forward
             if imgui.is_key_down(self.movement_keys["a"]):
@@ -80,6 +87,7 @@ class FPSCamera(Camera):
             if imgui.is_key_down(self.movement_keys["e"]):
                 self.origin_motion += self.up
 
+            # 旋转输入（IJKL + UO）
             if imgui.is_key_down(self.movement_keys["o"]):
                 self.rotation_motion[0] += 50 * self.radians_per_pixel
             if imgui.is_key_down(self.movement_keys["u"]):
@@ -98,6 +106,7 @@ class FPSCamera(Camera):
     def show_gui(self):
         # Sliders
         super().show_gui()
+        # 控制平滑与速度参数
         _, self.smoothness = imgui.slider_float("Smoothness", self.smoothness, 0, 0.999)
         _, self.speed = imgui.slider_float("Speed", self.speed, 0.1, 10)
         _, self.rot_speed = imgui.slider_float(
@@ -106,6 +115,7 @@ class FPSCamera(Camera):
         _, self.invert_mouse = imgui.checkbox("Invert Mouse", self.invert_mouse)
 
         # Smooth motion
+        # 以指数平滑运动量
         weight = 1 - np.exp(-self.delta_time / (self.smoothness + 1e-6))
         self.smoothed_origin_motion = (
             self.smoothed_origin_motion * (1 - weight)
@@ -117,10 +127,12 @@ class FPSCamera(Camera):
         )
 
         # Apply motion
+        # 应用平移与旋转
         self.origin += self.smoothed_origin_motion * self.delta_time * self.speed
         self.apply_rotation(
             *(self.smoothed_rotation_motion * self.delta_time * self.rot_speed)
         )
 
+        # 清空本帧输入
         self.origin_motion = np.zeros(3)
         self.rotation_motion = np.zeros(3)

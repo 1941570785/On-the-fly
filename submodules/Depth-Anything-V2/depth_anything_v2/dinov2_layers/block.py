@@ -8,6 +8,10 @@
 #   https://github.com/facebookresearch/dino/blob/master/vision_transformer.py
 #   https://github.com/rwightman/pytorch-image-models/tree/master/timm/layers/patch_embed.py
 
+# DINOv2 块实现
+# 参考自：https://github.com/depth-anything/Depth-Anything-V2
+
+
 import logging
 from typing import Callable, List, Any, Tuple, Dict
 
@@ -29,6 +33,7 @@ try:
 
     XFORMERS_AVAILABLE = True
 except ImportError:
+    # 回退到普通注意力实现
     logger.warning("xFormers not available")
     XFORMERS_AVAILABLE = False
 
@@ -54,6 +59,7 @@ class Block(nn.Module):
         super().__init__()
         # print(f"biases: qkv: {qkv_bias}, proj: {proj_bias}, ffn: {ffn_bias}")
         self.norm1 = norm_layer(dim)
+        # 多头注意力 + 残差分支
         self.attn = attn_class(
             dim,
             num_heads=num_heads,
@@ -67,6 +73,7 @@ class Block(nn.Module):
 
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
+        # 前馈网络分支
         self.mlp = ffn_layer(
             in_features=dim,
             hidden_features=mlp_hidden_dim,
@@ -81,9 +88,11 @@ class Block(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         def attn_residual_func(x: Tensor) -> Tensor:
+            # 注意力残差
             return self.ls1(self.attn(self.norm1(x)))
 
         def ffn_residual_func(x: Tensor) -> Tensor:
+            # FFN 残差
             return self.ls2(self.mlp(self.norm2(x)))
 
         if self.training and self.sample_drop_ratio > 0.1:
@@ -143,8 +152,10 @@ def add_residual(x, brange, residual, residual_scale_factor, scaling_vector=None
     if scaling_vector is None:
         x_flat = x.flatten(1)
         residual = residual.flatten(1)
+        # 只对采样子集加残差
         x_plus_residual = torch.index_add(x_flat, 0, brange, residual.to(dtype=x.dtype), alpha=residual_scale_factor)
     else:
+        # 使用缩放向量的稀疏加和
         x_plus_residual = scaled_index_add(
             x, brange, residual.to(dtype=x.dtype), scaling=scaling_vector, alpha=residual_scale_factor
         )
@@ -161,6 +172,7 @@ def get_attn_bias_and_cat(x_list, branges=None):
     batch_sizes = [b.shape[0] for b in branges] if branges is not None else [x.shape[0] for x in x_list]
     all_shapes = tuple((b, x.shape[1]) for b, x in zip(batch_sizes, x_list))
     if all_shapes not in attn_bias_cache.keys():
+        # 为不同序列长度缓存 block-diagonal attention mask
         seqlens = []
         for b, x in zip(batch_sizes, x_list):
             for _ in range(b):
@@ -170,8 +182,10 @@ def get_attn_bias_and_cat(x_list, branges=None):
         attn_bias_cache[all_shapes] = attn_bias
 
     if branges is not None:
+        # 先按 brange 索引，再拼接
         cat_tensors = index_select_cat([x.flatten(1) for x in x_list], branges).view(1, -1, x_list[0].shape[-1])
     else:
+        # 批大小统一到 1 后直接拼接
         tensors_bs1 = tuple(x.reshape([1, -1, *x.shape[2:]]) for x in x_list)
         cat_tensors = torch.cat(tensors_bs1, dim=1)
 
@@ -211,9 +225,11 @@ class NestedTensorBlock(Block):
         if self.training and self.sample_drop_ratio > 0.0:
 
             def attn_residual_func(x: Tensor, attn_bias=None) -> Tensor:
+                # 注意力残差（嵌套张量）
                 return self.attn(self.norm1(x), attn_bias=attn_bias)
 
             def ffn_residual_func(x: Tensor, attn_bias=None) -> Tensor:
+                # FFN 残差（嵌套张量）
                 return self.mlp(self.norm2(x))
 
             x_list = drop_add_residual_stochastic_depth_list(
@@ -232,9 +248,11 @@ class NestedTensorBlock(Block):
         else:
 
             def attn_residual_func(x: Tensor, attn_bias=None) -> Tensor:
+                # 注意力残差（常规路径）
                 return self.ls1(self.attn(self.norm1(x), attn_bias=attn_bias))
 
             def ffn_residual_func(x: Tensor, attn_bias=None) -> Tensor:
+                # FFN 残差（常规路径）
                 return self.ls2(self.mlp(self.norm2(x)))
 
             attn_bias, x = get_attn_bias_and_cat(x_list)
@@ -244,8 +262,10 @@ class NestedTensorBlock(Block):
 
     def forward(self, x_or_x_list):
         if isinstance(x_or_x_list, Tensor):
+            # 普通张量路径
             return super().forward(x_or_x_list)
         elif isinstance(x_or_x_list, list):
+            # 嵌套张量路径（需要 xFormers）
             assert XFORMERS_AVAILABLE, "Please install xFormers for nested tensors usage"
             return self.forward_nested(x_or_x_list)
         else:
