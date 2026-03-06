@@ -88,11 +88,16 @@ class ImageDataset:
         # ========== 多线程预加载设置 ==========
         # 【数据加载模块】初始化多线程预加载机制
         self.downsampling = args.downsampling  # 下采样因子
+        self.rectify_colmap_cameras = args.rectify_colmap_cameras
         # 线程数：不超过图像数量和配置线程数的最小值
         self.num_threads = min(args.num_loader_threads, len(self.image_paths))
         self.current_index = 0  # 当前预加载索引
         self.preload_queue = Queue(maxsize=self.num_threads)  # 预加载队列
         self.executor = ThreadPoolExecutor(max_workers=self.num_threads)  # 线程池
+        self.rectify_map = None
+        self.rectify_mask = None
+        self.rectify_intrinsics = None
+        self.camera_model = None
 
         # ========== 图像元信息初始化 ==========
         # 【数据加载模块】为每张图像创建元信息字典
@@ -185,7 +190,7 @@ class ImageDataset:
         # 加载图像（IMREAD_UNCHANGED：保持原始通道数，包括Alpha通道）
         image = self._load_image(image_path, cv2.IMREAD_UNCHANGED)
         # 获取该图像的元信息
-        info = self.infos[os.path.basename(image_path)]
+        info = dict(self.infos[os.path.basename(image_path)])
         
         # ========== 处理RGBA图像的Alpha通道 ==========
         # 【数据加载模块】如果图像有Alpha通道，提取作为掩码
@@ -197,13 +202,20 @@ class ImageDataset:
         # 【数据加载模块】如果提供了掩码目录，从外部文件加载掩码
         # 注意：外部掩码会覆盖RGBA图像的Alpha掩码
         if self.mask_dir:
-            mask = self._load_image(self.mask_paths[index])
+            mask = self._load_image(self.mask_paths[index], is_mask=True)
             info["mask"] = mask[0][None]  # 掩码 [1, H, W]
+
+        if self.rectify_mask is not None:
+            rect_mask = torch.from_numpy(self.rectify_mask).float()[None]
+            if "mask" in info:
+                info["mask"] = info["mask"] * rect_mask
+            else:
+                info["mask"] = rect_mask
         
         # 返回GPU上的图像和元信息
         return image.cuda(), info
 
-    def _load_image(self, image_path, mode=cv2.IMREAD_COLOR):
+    def _load_image(self, image_path, mode=cv2.IMREAD_COLOR, is_mask=False):
         """
         【数据加载模块】加载并预处理单张图像
         
@@ -238,7 +250,16 @@ class ImageDataset:
                 (0, 0),  # 目标尺寸为0表示使用fx/fy缩放
                 fx=1 / self.downsampling,  # 水平缩放因子
                 fy=1 / self.downsampling,  # 垂直缩放因子
-                interpolation=cv2.INTER_AREA,  # 区域插值（适合缩小）
+                interpolation=cv2.INTER_NEAREST if is_mask else cv2.INTER_AREA,
+            )
+
+        if self.rectify_map is not None:
+            image = cv2.remap(
+                image,
+                self.rectify_map,
+                None,
+                cv2.INTER_NEAREST if is_mask else cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REFLECT,
             )
         
         # ========== 颜色空间转换 ==========
@@ -255,6 +276,75 @@ class ImageDataset:
         # /255.0: 归一化到[0,1]范围
         image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
         return image
+
+    def _build_rectification(self, camera):
+        model = camera.model
+        self.camera_model = model
+        scale_x = self.width / camera.width
+        scale_y = self.height / camera.height
+
+        if model == "SIMPLE_PINHOLE":
+            fx = fy = float(camera.params[0])
+            cx = float(camera.params[1])
+            cy = float(camera.params[2])
+            dist = np.zeros(5, dtype=np.float32)
+        elif model in ["PINHOLE", "OPENCV"]:
+            fx = float(camera.params[0])
+            fy = float(camera.params[1])
+            cx = float(camera.params[2])
+            cy = float(camera.params[3])
+            dist = (
+                np.array(camera.params[4:], dtype=np.float32)
+                if model == "OPENCV"
+                else np.zeros(5, dtype=np.float32)
+            )
+        else:
+            return
+
+        K_in = np.array(
+            [
+                [fx * scale_x, 0, cx * scale_x],
+                [0, fy * scale_y, cy * scale_y],
+                [0, 0, 1],
+            ],
+            dtype=np.float32,
+        )
+        principal_point_offset = np.array(
+            [
+                abs(K_in[0, 2] - (self.width - 1) / 2),
+                abs(K_in[1, 2] - (self.height - 1) / 2),
+            ]
+        )
+        need_rectify = (
+            np.linalg.norm(dist) > 1e-8
+            or abs(K_in[0, 0] - K_in[1, 1]) / max(K_in[0, 0], 1e-6) > 1e-3
+            or principal_point_offset.max() > 1.0
+        )
+        if not need_rectify:
+            return
+
+        K_out = cv2.getOptimalNewCameraMatrix(
+            K_in, dist, (self.width, self.height), 1, (self.width, self.height), True
+        )[0]
+        focal = float((K_out[0, 0] + K_out[1, 1]) / 2.0)
+        K_out[0, 0] = focal
+        K_out[1, 1] = focal
+        K_out[0, 2] = (self.width - 1) / 2.0
+        K_out[1, 2] = (self.height - 1) / 2.0
+
+        self.rectify_map = cv2.initUndistortRectifyMap(
+            K_in, dist, None, K_out, (self.width, self.height), cv2.CV_32FC2
+        )[0]
+        initial_mask = np.ones((self.height, self.width), dtype=np.uint8) * 255
+        rect_mask = cv2.remap(initial_mask, self.rectify_map, None, cv2.INTER_NEAREST)
+        self.rectify_mask = (rect_mask > 0).astype(np.float32)
+        self.rectify_intrinsics = {
+            "focal": focal,
+            "principal_point": [float(K_out[0, 2]), float(K_out[1, 2])],
+            "K_in": K_in.tolist(),
+            "K_out": K_out.tolist(),
+            "distortion": dist.tolist(),
+        }
 
     def _submit(self):
         """
@@ -351,6 +441,11 @@ class ImageDataset:
         model = list(cameras.values())[0].model
         if model != "PINHOLE" and model != "SIMPLE_PINHOLE":
             logging.warning(" Unexpected camera model: " + model)
+        camera0 = list(cameras.values())[0]
+        if getattr(self, "rectify_colmap_cameras", None) is None:
+            self.rectify_colmap_cameras = True
+        if self.rectify_colmap_cameras:
+            self._build_rectification(camera0)
 
         # ========== 处理每张图像 ==========
         for image_id, image in images.items():
@@ -363,12 +458,14 @@ class ImageDataset:
             # - PINHOLE: params = [fx, fy, cx, cy]（fx和fy可能不同）
             # - SIMPLE_PINHOLE: params = [f, cx, cy]（fx = fy = f）
             focal_x = camera.params[0]  # 水平焦距（像素）
-            focal_y = camera.params[1] if camera.model == "PINHOLE" else focal_x  # 垂直焦距
+            focal_y = camera.params[1] if camera.model in ["PINHOLE", "OPENCV"] else focal_x  # 垂直焦距
             # 使用平均焦距（虽然后续会重新计算）
             focal = (focal_x + focal_y) / 2
             # 根据当前图像尺寸缩放焦距（从COLMAP原始尺寸缩放到当前尺寸）
             # 假设主点在图像中心，焦距按比例缩放
             focal = focal_x * self.width / camera.width
+            if self.rectify_intrinsics is not None:
+                focal = self.rectify_intrinsics["focal"]
 
             # ========== 外参计算 ==========
             # 【数据加载模块】构建4x4位姿矩阵（世界到相机的变换）
@@ -382,10 +479,14 @@ class ImageDataset:
             # 【数据加载模块】将位姿和内参存储到对应图像的元信息中
             name = os.path.basename(image.name)  # 提取图像文件名
             # 只有当图像在数据集中时才存储（可能在COLMAP中但不在数据集中）
-            if image.name in self.infos:
+            if name in self.infos:
                 # 转换为GPU张量并存储
                 self.infos[name]["Rt"] = torch.tensor(Rt, device="cuda")  # 位姿矩阵 [4, 4]
                 self.infos[name]["focal"] = torch.tensor([focal], device="cuda").float()  # 焦距 [1]
+                self.infos[name]["camera_model"] = camera.model
+                self.infos[name]["rectified"] = self.rectify_intrinsics is not None
+                if self.rectify_intrinsics is not None:
+                    self.infos[name]["principal_point"] = self.rectify_intrinsics["principal_point"]
 
     def align_colmap_poses(self):
         """

@@ -131,23 +131,46 @@ def align_depth(
     Returns:
         对齐后的单目深度图
     """
+    valid_matches = desc_kpts.has_pt3d
+    num_matches = int(valid_matches.sum().item())
+    if num_matches == 0:
+        return mono_depth_map, {
+            "num_depth_points": 0,
+            "depth_align_scale": 1.0,
+            "depth_align_offset": 0.0,
+            "depth_align_error_mean": float("nan"),
+            "depth_align_error_median": float("nan"),
+            "depth_align_inlier_ratio": 0.0,
+        }
+
     mono_idepth = sample(
         mono_depth_map,
-        desc_kpts.kpts[desc_kpts.has_pt3d].view(1, 1, -1, 2),
+        desc_kpts.kpts[valid_matches].view(1, 1, -1, 2),
         width,
         height,
     )[0, 0, 0]
-    tri_idepth = 1 / desc_kpts.depth[desc_kpts.has_pt3d]
+    tri_idepth = 1 / desc_kpts.depth[valid_matches]
 
     mono_idepth_aligned, scale, offset = align_samples(tri_idepth, mono_idepth)
     err = (mono_idepth_aligned - tri_idepth).abs()
-    valid = err < 5 * err.median()
-    mono_idepth_aligned, scale, offset = align_samples(
-        tri_idepth[valid], mono_idepth[valid]
-    )
+    median_err = err.median()
+    valid = err < 5 * median_err
+    valid_count = int(valid.sum().item())
+    if valid_count >= 2:
+        mono_idepth_aligned, scale, offset = align_samples(
+            tri_idepth[valid], mono_idepth[valid]
+        )
+        err = (mono_idepth_aligned - tri_idepth[valid]).abs()
     mono_depth_map_aligned = mono_depth_map * scale + offset
 
-    return mono_depth_map_aligned
+    return mono_depth_map_aligned, {
+        "num_depth_points": num_matches,
+        "depth_align_scale": float(scale.item()),
+        "depth_align_offset": float(offset.item()),
+        "depth_align_error_mean": float(err.mean().item()),
+        "depth_align_error_median": float(err.median().item()),
+        "depth_align_inlier_ratio": float(valid.float().mean().item()),
+    }
 
 
 class MonoDepthEstimator:

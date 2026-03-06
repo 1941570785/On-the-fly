@@ -13,6 +13,7 @@
 
 from argparse import Namespace
 import gc
+import csv
 import os
 import json
 import math
@@ -116,6 +117,18 @@ class SceneModel:
             self.init_proba_scaler = args.init_proba_scaler  # 高斯初始化概率缩放因子
             self.max_active_keyframes = args.max_active_keyframes  # 最大活跃关键帧数（超过后移到CPU）
             self.use_last_frame_proba = args.use_last_frame_proba  # 使用最新帧进行训练的概率
+            self.save_diagnostics = args.save_diagnostics
+            self.enable_uncertainty_sampling = args.enable_uncertainty_sampling
+            self.uncertainty_render_weight = args.uncertainty_render_weight
+            self.uncertainty_depth_weight = args.uncertainty_depth_weight
+            self.uncertainty_pose_weight = args.uncertainty_pose_weight
+            self.uncertainty_penalty_relax = args.uncertainty_penalty_relax
+            self.uncertainty_prune_relax = args.uncertainty_prune_relax
+            self.enable_residual_replay = args.enable_residual_replay
+            self.replay_residual_weight = args.replay_residual_weight
+            self.replay_pose_weight = args.replay_pose_weight
+            self.replay_recency_weight = args.replay_recency_weight
+            self.replay_floor = args.replay_floor
             self.active_frames_cpu = []  # CPU上的关键帧索引
             self.active_frames_gpu = []  # GPU上的关键帧索引
             self.guided_mvs = GuidedMVS(args)  # 【场景表示模块】引导多视图立体匹配（用于深度估计）
@@ -185,6 +198,9 @@ class SceneModel:
         self.valid_keyframes = torch.empty(0, dtype=torch.bool)  # 关键帧有效性掩码
         self.lock = threading.Lock()  # 线程锁（用于多线程场景下的高斯参数访问）
         self.inference_mode = inference_mode  # 是否为推理模式
+        self.keyframe_scores = []
+        self.optimization_trace = []
+        self.anchor_events = []
 
         # ========== 高斯初始化辅助工具 ==========
         # 圆盘卷积核：用于计算图像的Laplacian范数（检测纹理/边缘区域）
@@ -397,14 +413,7 @@ class SceneModel:
         # ========== 关键帧选择策略 ==========
         # 训练策略：以一定概率使用最新关键帧，否则随机选择
         # 这样可以平衡新区域的学习和旧区域的细化
-        if (
-            np.random.rand() > self.use_last_frame_proba
-            or self.last_trained_id == -1
-            or finetuning
-        ):
-            keyframe_id = np.random.choice(self.active_frames_gpu)
-        else:
-            keyframe_id = -1  # 使用最新关键帧
+        keyframe_id = self._sample_training_keyframe_id(finetuning)
         keyframe = self.keyframes[keyframe_id]
         lvl = keyframe.pyr_lvl  # 当前使用的金字塔层级
 
@@ -461,6 +470,31 @@ class SceneModel:
             # 保存最新渲染的逆深度（用于后续的三角化）
             keyframe.latest_invdepth = render_pkg["invdepth"].detach()
 
+            diag = keyframe.info.setdefault("diagnostics", {})
+            diag.update(
+                {
+                    "render_l1": float(l1_loss.item()),
+                    "render_dssim": float(ssim_loss.item()),
+                    "depth_loss": float(depth_loss.item()),
+                    "depth_loss_weight": float(keyframe.depth_loss_weight),
+                    "selected_for_replay": True,
+                    "last_training_pyr_lvl": int(lvl),
+                    "last_training_step": int(keyframe.num_steps),
+                }
+            )
+            self.keyframe_scores = [self._score_keyframe(i) for i in range(len(self.keyframes))]
+            self.optimization_trace.append(
+                {
+                    "step": len(self.optimization_trace),
+                    "keyframe_id": int(keyframe.index),
+                    "image_name": keyframe.info.get("name", ""),
+                    "l1": float(l1_loss.item()),
+                    "dssim": float(ssim_loss.item()),
+                    "depth_loss": float(depth_loss.item()),
+                    "score": float(self.keyframe_scores[keyframe.index]),
+                }
+            )
+
         # 标记位姿缓存失效（需要重新计算）
         self.valid_Rt_cache[keyframe_id] = False
         self.last_trained_id = keyframe_id
@@ -516,6 +550,103 @@ class SceneModel:
             target=self.optimization_loop, args=(n_iters, True)
         )
         self.optimization_thread.start()
+
+    def _score_keyframe(self, keyframe_id: int):
+        keyframe = self.keyframes[keyframe_id]
+        diag = keyframe.info.get("diagnostics", {})
+        residual = float(diag.get("render_l1", 0.0) + diag.get("render_dssim", 0.0))
+        pose_uncertainty = 1.0 - float(diag.get("pose_confidence", 1.0))
+        age = max(len(self.keyframes) - 1 - keyframe_id, 0)
+        score = (
+            self.replay_floor
+            + self.replay_residual_weight * residual
+            + self.replay_pose_weight * pose_uncertainty
+            + self.replay_recency_weight * age
+        )
+        return max(score, self.replay_floor)
+
+    def _sample_training_keyframe_id(self, finetuning=False):
+        if (
+            not self.enable_residual_replay
+            or finetuning
+            or len(self.active_frames_gpu) <= 1
+        ):
+            if (
+                np.random.rand() > self.use_last_frame_proba
+                or self.last_trained_id == -1
+                or finetuning
+            ):
+                return int(np.random.choice(self.active_frames_gpu))
+            return -1
+
+        use_last = (
+            np.random.rand() <= self.use_last_frame_proba
+            and self.last_trained_id != -1
+            and not finetuning
+        )
+        if use_last:
+            return -1
+
+        weights = np.array(
+            [self._score_keyframe(keyframe_id) for keyframe_id in self.active_frames_gpu],
+            dtype=np.float64,
+        )
+        weights = weights / weights.sum()
+        return int(np.random.choice(self.active_frames_gpu, p=weights))
+
+    def _compute_uncertainty_map(self, keyframe: Keyframe, init_proba, render=None):
+        uncertainty = torch.zeros_like(init_proba)
+        if not self.enable_uncertainty_sampling:
+            return uncertainty
+
+        depth_uncertainty = 1 - keyframe.mono_depth_conf[0]
+        depth_uncertainty = F.interpolate(
+            depth_uncertainty[None, None],
+            (self.height, self.width),
+            mode="bilinear",
+            align_corners=True,
+        )[0, 0]
+        uncertainty += self.uncertainty_depth_weight * depth_uncertainty.clamp(0, 1)
+
+        if render is not None:
+            render_error = (render - keyframe.image_pyr[0]).abs().mean(dim=0)
+            if keyframe.mask_pyr is not None:
+                render_error = render_error * keyframe.mask_pyr[0][0]
+            uncertainty += self.uncertainty_render_weight * render_error.clamp(0, 1)
+
+        pose_conf = float(keyframe.info.get("diagnostics", {}).get("pose_confidence", 1.0))
+        uncertainty += self.uncertainty_pose_weight * (1.0 - pose_conf)
+        return uncertainty.clamp(0, 1)
+
+    def save_diagnostics_report(self, out_dir: str):
+        os.makedirs(out_dir, exist_ok=True)
+        json_path = os.path.join(out_dir, "keyframe_diagnostics.json")
+        csv_path = os.path.join(out_dir, "keyframe_diagnostics.csv")
+        payload = []
+        for keyframe in self.keyframes:
+            entry = {
+                "keyframe_id": keyframe.index,
+                "image_name": keyframe.info.get("name", ""),
+                "is_test": bool(keyframe.info.get("is_test", False)),
+                **keyframe.info.get("diagnostics", {}),
+            }
+            payload.append(entry)
+        with open(json_path, "w") as f:
+            json.dump(
+                {
+                    "keyframes": payload,
+                    "anchors": self.anchor_events,
+                    "optimization_trace": self.optimization_trace,
+                },
+                f,
+                indent=2,
+            )
+        fieldnames = sorted({key for entry in payload for key in entry.keys()}) if payload else ["keyframe_id"]
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for entry in payload:
+                writer.writerow(entry)
 
     @torch.no_grad()
     def harmonize_test_exposure(self):
@@ -1039,18 +1170,25 @@ class SceneModel:
         # 这避免了在已有良好表示的区域重复添加高斯点
         penalty = 0
         rendered_depth = None
+        render = None
         if self.xyz.shape[0] > 0:
             render_pkg = self.render_from_id(keyframe_id)
             render = render_pkg["render"]
             rendered_depth = 1 / render_pkg["invdepth"][0].clamp_min(1e-8)
             penalty = get_lapla_norm(render, self.disc_kernel)  # 渲染图像的Laplacian作为惩罚
 
+        uncertainty = self._compute_uncertainty_map(keyframe, init_proba, render)
+
         # ========== 采样掩码生成 ==========
         # 公式3：最终采样概率 = init_proba - penalty
         # 在纹理丰富且渲染质量差的区域添加新高斯点
         init_proba *= self.init_proba_scaler
         penalty *= self.init_proba_scaler
-        sample_mask = torch.rand_like(init_proba) < init_proba - penalty
+        init_proba = (init_proba * (1 + uncertainty)).clamp(0, 1)
+        penalty = (penalty * (1 - self.uncertainty_penalty_relax * uncertainty)).clamp(0, 1)
+        sample_scores = (init_proba - penalty).clamp_min(0)
+        sample_mask = torch.rand_like(init_proba) < sample_scores
+        n_sampled_candidates = int(sample_mask.sum().item())
 
         # ========== 深度估计 ==========
         sampled_uv = self.uv[sample_mask]  # 采样像素坐标
@@ -1072,6 +1210,7 @@ class SceneModel:
         depth = depth[valid_mask]
         sampled_uv = sampled_uv[valid_mask]
         accurate_mask = accurate_mask[valid_mask]
+        sampled_uncertainty = uncertainty[sample_mask]
 
         # ========== 剪枝过粗的高斯点 ==========
         # 【场景表示模块】如果新点比现有高斯点更精细，则移除过粗的旧高斯点
@@ -1086,7 +1225,8 @@ class SceneModel:
                 return_counts=True,
             )
             valid_gs_mask = torch.ones_like(self.xyz[:, 0], dtype=torch.bool)
-            valid_gs_mask[ids] = counts < 10  # 被覆盖次数少于10次的保留
+            coverage_limit = int(10 + 10 * sampled_uncertainty.mean().item()) if len(sampled_uncertainty) > 0 else 10
+            valid_gs_mask[ids] = counts < coverage_limit  # 被覆盖次数少于阈值的保留
             with self.lock:
                 self.optimizer.add_and_prune(
                     self.make_dummy_ext_tensor(), valid_gs_mask
@@ -1154,6 +1294,10 @@ class SceneModel:
         opacities[: sampled_uv.shape[0]] *= (
             0.07 * accurate_mask[..., None] + 0.02 * ~accurate_mask[..., None]
         )
+        if len(sampled_uncertainty) > 0:
+            opacities[: sampled_uv.shape[0]] *= (
+                1.0 - 0.5 * sampled_uncertainty[:, None]
+            ).clamp(0.5, 1.0)
         # 三角化得到的点使用更高的不透明度（0.2）
         opacities[sampled_uv.shape[0] :] *= 0.2
         opacities = inverse_sigmoid(opacities)  # 转换到logit空间
@@ -1174,7 +1318,8 @@ class SceneModel:
         # 【场景表示模块】确定哪些现有高斯点应该被剪枝
         if self.xyz.shape[0] > 0:
             # 只保留不透明度足够高的高斯点（>0.05）
-            valid_gs_mask = self.opacity[:, 0] > 0.05
+            opacity_thresh = 0.05 * (1 - self.uncertainty_prune_relax * uncertainty.mean().item())
+            valid_gs_mask = self.opacity[:, 0] > opacity_thresh
 
             # 移除在屏幕上过大的高斯点（可能是异常值）
             dist = torch.linalg.vector_norm(
@@ -1197,6 +1342,16 @@ class SceneModel:
         }
         with self.lock:
             self.optimizer.add_and_prune(extension_tensors, valid_gs_mask)
+        keyframe.info.setdefault("diagnostics", {}).update(
+            {
+                "spawn_candidates": int(n_sampled_candidates),
+                "spawn_selected": int(sample_mask.sum().item()),
+                "spawn_valid_depth": int(valid_mask.sum().item()) if len(valid_mask) > 0 else 0,
+                "spawn_uncertainty_mean": float(uncertainty.mean().item()),
+                "spawn_uncertainty_max": float(uncertainty.max().item()),
+                "num_gaussians_after_spawn": int(self.n_active_gaussians),
+            }
+        )
 
     def init_intrinsics(self):
         """
@@ -1266,6 +1421,7 @@ class SceneModel:
         # ========== 添加关键帧并更新索引 ==========
         # 将关键帧添加到列表
         self.keyframes.append(keyframe)
+        keyframe.info.setdefault("diagnostics", {})
         # 更新近似相机中心列表（用于距离计算和锚点选择）
         if self.approx_cam_centres is None:
             self.approx_cam_centres = keyframe.approx_centre[None]
@@ -1305,6 +1461,7 @@ class SceneModel:
             dim=0,
         )
         self.gt_f = keyframe.info.get("focal", self.f)
+        self.keyframe_scores.append(self.replay_floor if hasattr(self, "replay_floor") else 1.0)
 
         # ========== 训练模式下的额外操作 ==========
         if not self.inference_mode:
@@ -1385,6 +1542,12 @@ class SceneModel:
 
             if small_prop > small_prop_thresh:
                 with torch.no_grad():
+                    event = {
+                        "anchor_id_before": int(len(self.anchors) - 1),
+                        "trigger_keyframe_id": int(self.keyframes[-1].index),
+                        "small_prop": float(small_prop.item()),
+                        "num_gaussians_before": int(self.n_active_gaussians),
+                    }
                     # 扩大细小高斯点的掩码（屏幕大小<1.5）
                     small_mask = screen_size < 1.5
                     # 【场景表示模块】更新锚点位置（使用用于优化的相机位姿）
@@ -1463,6 +1626,14 @@ class SceneModel:
                     # 设置锚点混合权重（仅新锚点权重为1，其他为0）
                     self.anchor_weights = np.zeros(len(self.anchors))
                     self.anchor_weights[-1] = 1.0
+                    event.update(
+                        {
+                            "anchor_id_after": int(len(self.anchors) - 1),
+                            "num_gaussians_after": int(self.n_active_gaussians),
+                            "num_kept_frames": int(self.n_kept_frames),
+                        }
+                    )
+                    self.anchor_events.append(event)
 
                 gc.collect()
                 torch.cuda.empty_cache()
@@ -1519,6 +1690,8 @@ class SceneModel:
                 "height": self.height,  # 图像高度
                 "sh_degree": self.max_sh_degree,  # 球谐函数阶数
                 "f": self.f,  # 焦距
+                "enable_uncertainty_sampling": bool(getattr(self, "enable_uncertainty_sampling", False)),
+                "enable_residual_replay": bool(getattr(self, "enable_residual_replay", False)),
             },
             "anchors": [
                 {
@@ -1538,6 +1711,8 @@ class SceneModel:
         # ========== 保存测试关键帧渲染图像 ==========
         # 【评估模块】渲染所有测试关键帧并保存图像（用于可视化结果）
         self.save_test_frames(os.path.join(path, "test_images"))
+        if getattr(self, "save_diagnostics", False):
+            self.save_diagnostics_report(os.path.join(path, "diagnostics"))
 
         # ========== 保存COLMAP格式数据 ==========
         # 【场景表示模块】将关键帧转换为COLMAP格式（用于兼容性）

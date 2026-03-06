@@ -110,6 +110,7 @@ class Keyframe:
         self.desc_kpts = desc_kpts  # 描述的关键点
         self.info = info  # 元信息
         self.is_test = info["is_test"]  # 是否为测试帧
+        self.info.setdefault("diagnostics", {})
 
         # ========== 可优化参数初始化 ==========
         # 【优化模块】相机位姿（6D表示：前两列旋转矩阵）
@@ -277,9 +278,10 @@ class Keyframe:
         注意：调用此函数前必须先调用update_3dpts()
         """
         if (self.desc_kpts.pts_conf > 0).any():
-            self.mono_idepth = align_depth(
+            self.mono_idepth, stats = align_depth(
                 self.mono_idepth, self.desc_kpts, self.width, self.height
             )
+            self.info["diagnostics"].update(stats)
         self.idepth_pyr = [
             F.interpolate(
                 self.mono_idepth,
@@ -326,6 +328,14 @@ class Keyframe:
             info["name"] = self.info["name"]
         if "Rt" in self.info:
             info["gt_Rt"] = self.info["Rt"].cpu().numpy().tolist()
+        if "diagnostics" in self.info:
+            info["diagnostics"] = self.info["diagnostics"]
+        if "camera_model" in self.info:
+            info["camera_model"] = self.info["camera_model"]
+        if "rectified" in self.info:
+            info["rectified"] = self.info["rectified"]
+        if "principal_point" in self.info:
+            info["principal_point"] = self.info["principal_point"]
 
         return {
             "info": info,

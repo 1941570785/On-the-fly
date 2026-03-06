@@ -78,6 +78,8 @@ class PoseInitializer():
             make_cuda_graph=True, iters=args.iters_miniba_incr)
         
         self.PnPRANSAC = RANSACEstimator(args.pnpransac_samples, self.max_pnp_error, EstimatorType.P4P)
+        self.last_bootstrap_stats = {}
+        self.last_incremental_stats = {}
 
     def build_problem(self,
                       desc_kpts_list: list[DescribedKeypoints],
@@ -212,6 +214,13 @@ class PoseInitializer():
         else:
             Rs6D, ts, f, xyz, r, r_init, mask = self.miniba_bootstrap(Rs6D_init, ts_init, f_init, xyz_init, self.centre, uvs.view(-1))
         final_residual = (r * mask).abs().sum()/mask.sum()
+        self.last_bootstrap_stats = {
+            "bootstrap_num_cams": int(n_cams),
+            "bootstrap_num_points": int(npts),
+            "bootstrap_valid_ratio": float(mask.float().mean().item()),
+            "bootstrap_final_residual": float(final_residual.item()),
+            "bootstrap_rebooting": bool(rebooting),
+        }
 
         self.f = f
         self.intrinsics = torch.cat([f, self.centre], dim=0)
@@ -270,6 +279,19 @@ class PoseInitializer():
         uvs = torch.cat(uvs, dim=0)
         confs = torch.cat(confs, dim=0)
         match_indices = torch.cat(match_indices, dim=0)
+        num_matches_before = int(len(xyz))
+        if num_matches_before < 4:
+            self.last_incremental_stats = {
+                "num_matches_before_pnp": int(num_matches_before),
+                "num_pnp_inliers": 0,
+                "pnp_inlier_ratio": 0.0,
+                "miniba_valid_points": 0,
+                "miniba_init_residual": float("inf"),
+                "miniba_final_residual": float("inf"),
+                "pose_confidence": 0.0,
+                "pose_initialization_failed": True,
+            }
+            return None
 
         # Subsample the points if there are too many
         # 先按置信度采样控制 PnP 输入规模
@@ -286,6 +308,7 @@ class PoseInitializer():
         Rs6D_init = keyframes[0].rW2C
         ts_init = keyframes[0].tW2C
         Rt, inliers = self.PnPRANSAC(uvs, xyz, self.f, self.centre, Rs6D_init, ts_init, confs)
+        num_pnp_inliers = int(inliers.sum().item())
 
         xyz = xyz[inliers]
         uvs = uvs[inliers]
@@ -309,6 +332,24 @@ class PoseInitializer():
         Rt = torch.eye(4, device="cuda")
         Rt[:3, :3] = sixD2mtx(Rs6D)[0]
         Rt[:3, 3] = ts[0]
+        valid_mask = mask > 0
+        final_residual = (
+            (r[valid_mask]).abs().mean().item() if valid_mask.any() else float("inf")
+        )
+        init_residual = (
+            (r_init[valid_mask]).abs().mean().item() if valid_mask.any() else float("inf")
+        )
+        pose_confidence = num_pnp_inliers / max(num_matches_before, 1)
+        self.last_incremental_stats = {
+            "num_matches_before_pnp": int(num_matches_before),
+            "num_pnp_inliers": int(num_pnp_inliers),
+            "pnp_inlier_ratio": float(pose_confidence),
+            "miniba_valid_points": int(valid_mask.sum().item()),
+            "miniba_init_residual": float(init_residual),
+            "miniba_final_residual": float(final_residual),
+            "pose_confidence": float(min(max(pose_confidence, 0.0), 1.0)),
+            "pose_initialization_failed": False,
+        }
 
         # Check if we have sufficiently many inliers
         # 训练阶段要求足够内点以避免错误注册
@@ -317,6 +358,7 @@ class PoseInitializer():
             return Rt
         else:
             print("Too few inliers for pose initialization")
+            self.last_incremental_stats["pose_initialization_failed"] = True
             # Remove matches as we prevent the current frame from being registered
             for keyframe in keyframes:
                 keyframe.desc_kpts.matches.pop(index, None)
