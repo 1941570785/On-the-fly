@@ -93,6 +93,29 @@ class Keyframe:
             # 【场景表示模块】构建多分辨率图像金字塔（用于多尺度训练）
             for _ in range(args.pyr_levels - 1):
                 self.image_pyr.append(F.avg_pool2d(self.image_pyr[-1], 2))
+            gray = image.mean(dim=0, keepdim=True)
+            sobel_x = torch.tensor(
+                [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                device=image.device,
+                dtype=image.dtype,
+            ).view(1, 1, 3, 3)
+            sobel_y = torch.tensor(
+                [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                device=image.device,
+                dtype=image.dtype,
+            ).view(1, 1, 3, 3)
+            grad_x = F.conv2d(gray[None], sobel_x, padding=1)[0]
+            grad_y = F.conv2d(gray[None], sobel_y, padding=1)[0]
+            sharpness = torch.sqrt(grad_x.square() + grad_y.square())
+            sharpness = sharpness / (
+                sharpness.mean() + sharpness.std() + 1e-6
+            )
+            sharpness = sharpness.clamp(0, 1)
+            self.sharpness_pyr = [sharpness]
+            self.depth_conf_pyr = [self.mono_depth_conf]
+            for _ in range(args.pyr_levels - 1):
+                self.sharpness_pyr.append(F.avg_pool2d(self.sharpness_pyr[-1], 2))
+                self.depth_conf_pyr.append(F.avg_pool2d(self.depth_conf_pyr[-1], 2))
             
             # 掩码金字塔（如果有）
             self.mask_pyr = info.pop("mask", None)
@@ -153,6 +176,10 @@ class Keyframe:
                 self.idepth_pyr[i] = self.idepth_pyr[i].to(device)
             if self.mask_pyr is not None:
                 self.mask_pyr[i] = self.mask_pyr[i].to(device)
+            if hasattr(self, "sharpness_pyr"):
+                self.sharpness_pyr[i] = self.sharpness_pyr[i].to(device)
+            if hasattr(self, "depth_conf_pyr"):
+                self.depth_conf_pyr[i] = self.depth_conf_pyr[i].to(device)
         if not only_train:
             self.feat_map = self.feat_map.to(device)
             self.mono_idepth = self.mono_idepth.to(device)
@@ -266,6 +293,16 @@ class Keyframe:
         if self.idepth_pyr[lvl].device.type != "cuda":
             self.idepth_pyr[lvl] = self.idepth_pyr[lvl].cuda()
         return self.idepth_pyr[lvl] * self.depth_scale + self.depth_offset
+
+    def get_depth_conf(self, lvl=0):
+        if self.depth_conf_pyr[lvl].device.type != "cuda":
+            self.depth_conf_pyr[lvl] = self.depth_conf_pyr[lvl].cuda()
+        return self.depth_conf_pyr[lvl]
+
+    def get_sharpness(self, lvl=0):
+        if self.sharpness_pyr[lvl].device.type != "cuda":
+            self.sharpness_pyr[lvl] = self.sharpness_pyr[lvl].cuda()
+        return self.sharpness_pyr[lvl]
 
     @torch.no_grad()
     def align_depth(self):

@@ -127,8 +127,17 @@ class SceneModel:
             self.enable_residual_replay = args.enable_residual_replay
             self.replay_residual_weight = args.replay_residual_weight
             self.replay_pose_weight = args.replay_pose_weight
+            self.replay_depth_weight = args.replay_depth_weight
+            self.replay_anchor_weight = args.replay_anchor_weight
             self.replay_recency_weight = args.replay_recency_weight
             self.replay_floor = args.replay_floor
+            self.replay_anchor_window = args.replay_anchor_window
+            self.enable_dynamic_suppression = args.enable_dynamic_suppression
+            self.dynamic_blur_weight = args.dynamic_blur_weight
+            self.dynamic_residual_weight = args.dynamic_residual_weight
+            self.dynamic_depth_weight = args.dynamic_depth_weight
+            self.dynamic_mask_floor = args.dynamic_mask_floor
+            self.dynamic_sample_threshold = args.dynamic_sample_threshold
             self.active_frames_cpu = []  # CPU上的关键帧索引
             self.active_frames_gpu = []  # GPU上的关键帧索引
             self.guided_mvs = GuidedMVS(args)  # 【场景表示模块】引导多视图立体匹配（用于深度估计）
@@ -201,6 +210,8 @@ class SceneModel:
         self.keyframe_scores = []
         self.optimization_trace = []
         self.anchor_events = []
+        self.backward_error_count = 0
+        self.sanitize_event_count = 0
 
         # ========== 高斯初始化辅助工具 ==========
         # 圆盘卷积核：用于计算图像的Laplacian范数（检测纹理/边缘区域）
@@ -313,6 +324,41 @@ class SceneModel:
             int: 高斯点数量
         """
         return self.xyz.shape[0]
+
+    def _sanitize_gaussian_state(self):
+        """
+        清理高斯参数中的非法值，避免CUDA光栅化核崩溃。
+        """
+        modified = False
+        with torch.no_grad():
+            for key in ("xyz", "f_dc", "f_rest", "scaling", "rotation", "opacity"):
+                raw = self.gaussian_params[key]["val"]
+                if not torch.isfinite(raw).all():
+                    self.gaussian_params[key]["val"] = torch.nan_to_num(
+                        raw, nan=0.0, posinf=0.0, neginf=0.0
+                    )
+                    modified = True
+
+            self.gaussian_params["xyz"]["val"].clamp_(-1e4, 1e4)
+            self.gaussian_params["f_dc"]["val"].clamp_(-50.0, 50.0)
+            self.gaussian_params["f_rest"]["val"].clamp_(-50.0, 50.0)
+            # scaling 在log空间中，限制后可避免 exp 溢出
+            self.gaussian_params["scaling"]["val"].clamp_(-8.0, 6.0)
+            self.gaussian_params["opacity"]["val"].clamp_(-20.0, 20.0)
+
+            rot = self.gaussian_params["rotation"]["val"]
+            rot_norm = torch.linalg.norm(rot, dim=-1, keepdim=True)
+            bad_rot = rot_norm.squeeze(-1) < 1e-8
+            if bad_rot.any():
+                rot[bad_rot] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=rot.device)
+                modified = True
+
+        if modified:
+            self.sanitize_event_count += 1
+            if self.sanitize_event_count <= 5 or self.sanitize_event_count % 50 == 0:
+                warnings.warn(
+                    f"[sanitize] corrected gaussian params, count={self.sanitize_event_count}"
+                )
 
     @classmethod
     def from_scene(cls, scene_dir: str, args):
@@ -432,26 +478,91 @@ class SceneModel:
         # 获取真实图像和单目深度
         gt_image = keyframe.image_pyr[lvl]
         mono_idepth = keyframe.get_mono_idepth(lvl)
+        dynamic_mask = self._compute_dynamic_mask(keyframe, lvl, image)
+        rgb_loss_mask = dynamic_mask.expand_as(image)
 
         # ========== 掩码处理 ==========
         # 如果有关键帧掩码，应用掩码（排除无效区域）
         if keyframe.mask_pyr is not None:
-            image = image * keyframe.mask_pyr[lvl]
-            gt_image = gt_image * keyframe.mask_pyr[lvl]
-            invdepth = invdepth * keyframe.mask_pyr[lvl]
-            mono_idepth = mono_idepth * keyframe.mask_pyr[lvl]
+            rgb_loss_mask = rgb_loss_mask * keyframe.mask_pyr[lvl]
+            dynamic_mask = dynamic_mask * keyframe.mask_pyr[lvl]
+
+        masked_image = image * rgb_loss_mask
+        masked_gt_image = gt_image * rgb_loss_mask
+        masked_invdepth = invdepth * dynamic_mask
+        masked_mono_idepth = mono_idepth * dynamic_mask
+
+        # 避免将无效数值送入自定义CUDA反传核
+        for tensor_name, tensor in (
+            ("render", image),
+            ("invdepth", invdepth),
+            ("gt_image", gt_image),
+            ("mono_idepth", mono_idepth),
+            ("dynamic_mask", dynamic_mask),
+            ("rgb_loss_mask", rgb_loss_mask),
+        ):
+            if not torch.isfinite(tensor).all():
+                warnings.warn(
+                    f"[optimization_step] skip non-finite tensor: {tensor_name}, "
+                    f"keyframe={keyframe_id}, lvl={lvl}"
+                )
+                keyframe.info.setdefault("diagnostics", {})["skip_reason"] = (
+                    f"non_finite_{tensor_name}"
+                )
+                self.valid_Rt_cache[keyframe_id] = False
+                self.last_trained_id = keyframe_id
+                return
 
         # ========== 损失计算 ==========
         # 【损失函数模块】计算多任务损失
-        l1_loss = (image - gt_image).abs().mean()  # L1损失（像素级）
-        ssim_loss = 1 - fused_ssim(image[None], gt_image[None])  # DSSIM损失（结构相似性）
-        depth_loss = (invdepth - mono_idepth).abs().mean()  # 深度损失（与单目深度对齐）
+        l1_loss = ((image - gt_image).abs() * rgb_loss_mask).sum() / rgb_loss_mask.sum().clamp_min(1e-6)
+        ssim_loss = 1 - fused_ssim(masked_image[None], masked_gt_image[None])  # DSSIM损失（结构相似性）
+        depth_loss = ((invdepth - mono_idepth).abs() * dynamic_mask).sum() / dynamic_mask.sum().clamp_min(1e-6)
         loss = (
             self.lambda_dssim * ssim_loss
             + (1 - self.lambda_dssim) * l1_loss
             + keyframe.depth_loss_weight * depth_loss
         )
-        loss.backward()
+        if not torch.isfinite(loss):
+            warnings.warn(
+                f"[optimization_step] skip non-finite loss, "
+                f"keyframe={keyframe_id}, lvl={lvl}"
+            )
+            keyframe.info.setdefault("diagnostics", {})["skip_reason"] = "non_finite_loss"
+            self.valid_Rt_cache[keyframe_id] = False
+            self.last_trained_id = keyframe_id
+            return
+
+        try:
+            loss.backward()
+        except RuntimeError as exc:
+            err_msg = str(exc)
+            if "invalid configuration argument" in err_msg or "CUDA error" in err_msg:
+                self.backward_error_count += 1
+                diag = keyframe.info.setdefault("diagnostics", {})
+                diag.update(
+                    {
+                        "skip_reason": "cuda_backward_error",
+                        "cuda_backward_error_count": int(self.backward_error_count),
+                        "last_cuda_error": err_msg[:512],
+                        "render_min": float(image.detach().min().item()),
+                        "render_max": float(image.detach().max().item()),
+                        "invdepth_min": float(invdepth.detach().min().item()),
+                        "invdepth_max": float(invdepth.detach().max().item()),
+                        "dynamic_mask_min": float(dynamic_mask.detach().min().item()),
+                        "dynamic_mask_max": float(dynamic_mask.detach().max().item()),
+                        "num_gaussians": int(render_pkg["radii"].shape[0]),
+                    }
+                )
+                warnings.warn(
+                    f"[optimization_step] skip CUDA backward step at keyframe={keyframe_id}, "
+                    f"lvl={lvl}, gaussians={render_pkg['radii'].shape[0]}\n{err_msg}"
+                )
+                torch.cuda.empty_cache()
+                self.valid_Rt_cache[keyframe_id] = False
+                self.last_trained_id = keyframe_id
+                return
+            raise
 
         # ========== 参数更新 ==========
         with torch.no_grad():
@@ -480,9 +591,12 @@ class SceneModel:
                     "selected_for_replay": True,
                     "last_training_pyr_lvl": int(lvl),
                     "last_training_step": int(keyframe.num_steps),
+                    "dynamic_mask_mean": float(dynamic_mask.mean().item()),
+                    "dynamic_suppressed_ratio": float((1.0 - dynamic_mask).mean().item()),
                 }
             )
             self.keyframe_scores = [self._score_keyframe(i) for i in range(len(self.keyframes))]
+            diag["replay_score"] = float(self.keyframe_scores[keyframe.index])
             self.optimization_trace.append(
                 {
                     "step": len(self.optimization_trace),
@@ -492,6 +606,7 @@ class SceneModel:
                     "dssim": float(ssim_loss.item()),
                     "depth_loss": float(depth_loss.item()),
                     "score": float(self.keyframe_scores[keyframe.index]),
+                    "dynamic_mask_mean": float(dynamic_mask.mean().item()),
                 }
             )
 
@@ -554,14 +669,48 @@ class SceneModel:
     def _score_keyframe(self, keyframe_id: int):
         keyframe = self.keyframes[keyframe_id]
         diag = keyframe.info.get("diagnostics", {})
-        residual = float(diag.get("render_l1", 0.0) + diag.get("render_dssim", 0.0))
+        residual = float(diag.get("render_l1", 0.0)) + float(
+            diag.get("render_dssim", 0.0)
+        )
+        residual = min(max(2.0 * residual, 0.0), 1.0)
         pose_uncertainty = 1.0 - float(diag.get("pose_confidence", 1.0))
+        pose_uncertainty += 0.1 * min(
+            float(diag.get("miniba_final_residual", 0.0)),
+            1.0,
+        )
+        pose_uncertainty = min(max(pose_uncertainty, 0.0), 1.0)
+        depth_uncertainty = min(
+            max(
+                4.0 * float(diag.get("depth_align_error_mean", 0.0))
+                + (1.0 - float(diag.get("depth_align_inlier_ratio", 1.0))),
+                0.0,
+            ),
+            1.0,
+        )
+        anchor_boost = 0.0
+        if len(self.anchors) > 1:
+            min_boundary_dist = self.replay_anchor_window + 1
+            for anchor in self.anchors:
+                if len(anchor.keyframe_ids) == 0:
+                    continue
+                min_boundary_dist = min(
+                    min_boundary_dist,
+                    abs(keyframe_id - anchor.keyframe_ids[0]),
+                    abs(keyframe_id - anchor.keyframe_ids[-1]),
+                )
+            anchor_boost = max(
+                0.0,
+                1.0 - min_boundary_dist / max(self.replay_anchor_window, 1),
+            )
         age = max(len(self.keyframes) - 1 - keyframe_id, 0)
+        recency = 1.0 - age / max(len(self.keyframes) - 1, 1)
         score = (
             self.replay_floor
             + self.replay_residual_weight * residual
             + self.replay_pose_weight * pose_uncertainty
-            + self.replay_recency_weight * age
+            + self.replay_depth_weight * depth_uncertainty
+            + self.replay_anchor_weight * anchor_boost
+            + self.replay_recency_weight * recency
         )
         return max(score, self.replay_floor)
 
@@ -577,7 +726,7 @@ class SceneModel:
                 or finetuning
             ):
                 return int(np.random.choice(self.active_frames_gpu))
-            return -1
+            return int(self.active_frames_gpu[-1])
 
         use_last = (
             np.random.rand() <= self.use_last_frame_proba
@@ -585,12 +734,13 @@ class SceneModel:
             and not finetuning
         )
         if use_last:
-            return -1
+            return int(self.active_frames_gpu[-1])
 
         weights = np.array(
             [self._score_keyframe(keyframe_id) for keyframe_id in self.active_frames_gpu],
             dtype=np.float64,
         )
+        weights = np.nan_to_num(weights, nan=self.replay_floor, posinf=self.replay_floor)
         weights = weights / weights.sum()
         return int(np.random.choice(self.active_frames_gpu, p=weights))
 
@@ -599,7 +749,12 @@ class SceneModel:
         if not self.enable_uncertainty_sampling:
             return uncertainty
 
-        depth_uncertainty = 1 - keyframe.mono_depth_conf[0]
+        depth_conf = keyframe.get_depth_conf(0)
+        if depth_conf.dim() == 4:
+            depth_conf = depth_conf[0]
+        if depth_conf.dim() == 3:
+            depth_conf = depth_conf[0]
+        depth_uncertainty = 1 - depth_conf
         depth_uncertainty = F.interpolate(
             depth_uncertainty[None, None],
             (self.height, self.width),
@@ -614,9 +769,63 @@ class SceneModel:
                 render_error = render_error * keyframe.mask_pyr[0][0]
             uncertainty += self.uncertainty_render_weight * render_error.clamp(0, 1)
 
-        pose_conf = float(keyframe.info.get("diagnostics", {}).get("pose_confidence", 1.0))
-        uncertainty += self.uncertainty_pose_weight * (1.0 - pose_conf)
+        diag = keyframe.info.get("diagnostics", {})
+        pose_conf = float(diag.get("pose_confidence", 1.0))
+        pose_residual = min(float(diag.get("miniba_final_residual", 0.0)), 1.0)
+        pose_uncertainty = min(max((1.0 - pose_conf) + 0.1 * pose_residual, 0.0), 1.0)
+        uncertainty += self.uncertainty_pose_weight * pose_uncertainty
+        frame_depth_uncertainty = min(
+            max(
+                4.0 * float(diag.get("depth_align_error_mean", 0.0))
+                + (1.0 - float(diag.get("depth_align_inlier_ratio", 1.0))),
+                0.0,
+            ),
+            1.0,
+        )
+        uncertainty += 0.5 * self.uncertainty_depth_weight * frame_depth_uncertainty
         return uncertainty.clamp(0, 1)
+
+    def _compute_dynamic_mask(self, keyframe: Keyframe, lvl: int, render=None):
+        image = keyframe.image_pyr[lvl]
+        mask = torch.ones_like(image[:1])
+        if not self.enable_dynamic_suppression:
+            return mask
+
+        blur_term = 1.0 - keyframe.get_sharpness(lvl).clamp(0, 1)
+        if blur_term.dim() == 4:
+            blur_term = blur_term[0]
+        if blur_term.dim() == 3 and blur_term.shape[0] != 1:
+            blur_term = blur_term.mean(dim=0, keepdim=True)
+        depth_term = keyframe.get_depth_conf(lvl).clamp(0, 1)
+        if depth_term.dim() == 4:
+            depth_term = depth_term[0]
+        if depth_term.dim() == 3 and depth_term.shape[0] != 1:
+            depth_term = depth_term.mean(dim=0, keepdim=True)
+        depth_term = 1.0 - depth_term
+        target_size = image.shape[-2:]
+        if blur_term.shape[-2:] != target_size:
+            blur_term = F.interpolate(
+                blur_term[None],
+                size=target_size,
+                mode="bilinear",
+                align_corners=True,
+            )[0]
+        if depth_term.shape[-2:] != target_size:
+            depth_term = F.interpolate(
+                depth_term[None],
+                size=target_size,
+                mode="bilinear",
+                align_corners=True,
+            )[0]
+        residual_term = torch.zeros_like(blur_term)
+        if render is not None:
+            residual_term = (render - image).abs().mean(dim=0, keepdim=True).clamp(0, 1)
+        suppression = (
+            self.dynamic_blur_weight * blur_term
+            + self.dynamic_residual_weight * residual_term
+            + self.dynamic_depth_weight * depth_term
+        ).clamp(0, 1)
+        return (1.0 - suppression).clamp(self.dynamic_mask_floor, 1.0)
 
     def save_diagnostics_report(self, out_dir: str):
         os.makedirs(out_dir, exist_ok=True)
@@ -695,6 +904,7 @@ class SceneModel:
         if with_LPIPS:
             metrics["LPIPS"] = 0
         n_test_frames = 0
+        psnr_values = []
         # 确定评估的关键帧范围
         start_index = 0 if all else self.active_anchor.keyframe_ids[0]
         
@@ -718,7 +928,9 @@ class SceneModel:
                 gt_image = gt_image * mask
                 
                 # 计算PSNR（峰值信噪比）
-                metrics["PSNR"] += psnr(image[mask], gt_image[mask])
+                psnr_value = psnr(image[mask], gt_image[mask])
+                metrics["PSNR"] += psnr_value
+                psnr_values.append(float(psnr_value))
                 # 计算SSIM（结构相似性）
                 metrics["SSIM"] += fused_ssim(
                     image[None], gt_image[None], train=False
@@ -732,6 +944,9 @@ class SceneModel:
         if n_test_frames > 0:
             for metric in metrics:
                 metrics[metric] /= n_test_frames
+            metrics["PSNR_std"] = float(np.std(psnr_values))
+            metrics["bad_16_ratio"] = float(np.mean(np.array(psnr_values) < 16.0))
+            metrics["bad_18_ratio"] = float(np.mean(np.array(psnr_values) < 18.0))
         else:
             metrics = {}
 
@@ -908,6 +1123,7 @@ class SceneModel:
                 self.gaussian_params, self.anchor_weights = Anchor.blend(
                     cam_centre, self.anchors, self.anchor_overlap
                 )
+            self._sanitize_gaussian_state()
             
             # 屏幕空间点（用于计算2D位置，需要梯度用于优化）
             screenspace_points = torch.zeros_like(self.xyz, requires_grad=True)
@@ -1178,6 +1394,7 @@ class SceneModel:
             penalty = get_lapla_norm(render, self.disc_kernel)  # 渲染图像的Laplacian作为惩罚
 
         uncertainty = self._compute_uncertainty_map(keyframe, init_proba, render)
+        dynamic_mask = self._compute_dynamic_mask(keyframe, 0, render)[0]
 
         # ========== 采样掩码生成 ==========
         # 公式3：最终采样概率 = init_proba - penalty
@@ -1186,13 +1403,14 @@ class SceneModel:
         penalty *= self.init_proba_scaler
         init_proba = (init_proba * (1 + uncertainty)).clamp(0, 1)
         penalty = (penalty * (1 - self.uncertainty_penalty_relax * uncertainty)).clamp(0, 1)
-        sample_scores = (init_proba - penalty).clamp_min(0)
+        sample_scores = (init_proba - penalty).clamp_min(0) * dynamic_mask
         sample_mask = torch.rand_like(init_proba) < sample_scores
         n_sampled_candidates = int(sample_mask.sum().item())
 
         # ========== 深度估计 ==========
         sampled_uv = self.uv[sample_mask]  # 采样像素坐标
         sampled_uncertainty = uncertainty[sample_mask]
+        sampled_dynamic = dynamic_mask[sample_mask]
         
         # 【场景表示模块】使用引导多视图立体匹配（Guided MVS）估计深度
         # 策略：利用历史关键帧的密集特征进行立体匹配
@@ -1203,15 +1421,23 @@ class SceneModel:
             if keyframe.index == prev_keyframe.index:
                 prev_KFs.pop(i)
                 break
-        depth, accurate_mask = self.guided_mvs(sampled_uv, keyframe, prev_KFs)
+        depth, mvs_confidence = self.guided_mvs(sampled_uv, keyframe, prev_KFs)
         
         # 过滤：保留置信度高且深度有效的点
-        valid_mask = (keyframe.sample_conf(sampled_uv) > 0.5) * (depth > 1e-6)
+        valid_mask = (
+            (keyframe.sample_conf(sampled_uv) > 0.5)
+            * (depth > 1e-6)
+            * (mvs_confidence > 0.05)
+            * (sampled_dynamic > self.dynamic_sample_threshold)
+        )
         sample_mask[sample_mask.clone()] = valid_mask
         depth = depth[valid_mask]
         sampled_uv = sampled_uv[valid_mask]
-        accurate_mask = accurate_mask[valid_mask]
+        mvs_confidence = mvs_confidence[valid_mask]
+        accurate_mask = mvs_confidence > 0.5
         sampled_uncertainty = sampled_uncertainty[valid_mask]
+        sampled_dynamic = sampled_dynamic[valid_mask]
+        sampled_uncertainty = torch.maximum(sampled_uncertainty, 1.0 - mvs_confidence)
 
         # ========== 剪枝过粗的高斯点 ==========
         # 【场景表示模块】如果新点比现有高斯点更精细，则移除过粗的旧高斯点
@@ -1226,7 +1452,15 @@ class SceneModel:
                 return_counts=True,
             )
             valid_gs_mask = torch.ones_like(self.xyz[:, 0], dtype=torch.bool)
-            coverage_limit = int(10 + 10 * sampled_uncertainty.mean().item()) if len(sampled_uncertainty) > 0 else 10
+            coverage_limit = (
+                int(
+                    10
+                    + 10 * sampled_uncertainty.mean().item()
+                    + 5 * (1.0 - sampled_dynamic.mean().item())
+                )
+                if len(sampled_uncertainty) > 0
+                else 10
+            )
             valid_gs_mask[ids] = counts < coverage_limit  # 被覆盖次数少于阈值的保留
             with self.lock:
                 self.optimizer.add_and_prune(
@@ -1243,7 +1477,9 @@ class SceneModel:
             depth = depth[valid_mask]
             sampled_uv = sampled_uv[valid_mask]
             accurate_mask = accurate_mask[valid_mask]
+            mvs_confidence = mvs_confidence[valid_mask]
             sampled_uncertainty = sampled_uncertainty[valid_mask]
+            sampled_dynamic = sampled_dynamic[valid_mask]
 
         # ========== 3D位置初始化 ==========
         # 【场景表示模块】将像素坐标+深度转换为世界坐标系3D点
@@ -1300,6 +1536,12 @@ class SceneModel:
             opacities[: sampled_uv.shape[0]] *= (
                 1.0 - 0.5 * sampled_uncertainty[:, None]
             ).clamp(0.5, 1.0)
+            opacities[: sampled_uv.shape[0]] *= (
+                0.5 + 0.5 * sampled_dynamic[:, None]
+            ).clamp(0.5, 1.0)
+            opacities[: sampled_uv.shape[0]] *= (
+                0.5 + 0.5 * mvs_confidence[:, None]
+            ).clamp(0.5, 1.0)
         # 三角化得到的点使用更高的不透明度（0.2）
         opacities[sampled_uv.shape[0] :] *= 0.2
         opacities = inverse_sigmoid(opacities)  # 转换到logit空间
@@ -1351,6 +1593,9 @@ class SceneModel:
                 "spawn_valid_depth": int(valid_mask.sum().item()) if len(valid_mask) > 0 else 0,
                 "spawn_uncertainty_mean": float(uncertainty.mean().item()),
                 "spawn_uncertainty_max": float(uncertainty.max().item()),
+                "spawn_mvs_conf_mean": float(mvs_confidence.mean().item()) if len(mvs_confidence) > 0 else float("nan"),
+                "spawn_dynamic_mask_mean": float(dynamic_mask.mean().item()),
+                "spawn_dynamic_kept_mean": float(sampled_dynamic.mean().item()) if len(sampled_dynamic) > 0 else float("nan"),
                 "num_gaussians_after_spawn": int(self.n_active_gaussians),
             }
         )
@@ -1694,6 +1939,7 @@ class SceneModel:
                 "f": self.f,  # 焦距
                 "enable_uncertainty_sampling": bool(getattr(self, "enable_uncertainty_sampling", False)),
                 "enable_residual_replay": bool(getattr(self, "enable_residual_replay", False)),
+                "enable_dynamic_suppression": bool(getattr(self, "enable_dynamic_suppression", False)),
             },
             "anchors": [
                 {

@@ -77,4 +77,11 @@ class GuidedMVS():
             )
         )
 
-        return depth, idist >= 0
+        mvs_conf = torch.zeros_like(idist)
+        valid = idist >= 0
+        if valid.any():
+            mvs_conf[valid] = torch.exp(
+                -(idist[valid] / max(self.idepth_range, 1e-6)).clamp_min(0)
+            )
+
+        return depth, mvs_conf

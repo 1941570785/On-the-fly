@@ -190,6 +190,18 @@ def get_args():
         help="Weight of pose uncertainty in replay scheduling.",
     )
     parser.add_argument(
+        '--replay_depth_weight',
+        type=float,
+        default=0.35,
+        help="Weight of depth alignment reliability in replay scheduling.",
+    )
+    parser.add_argument(
+        '--replay_anchor_weight',
+        type=float,
+        default=0.20,
+        help="Weight of anchor-boundary proximity in replay scheduling.",
+    )
+    parser.add_argument(
         '--replay_recency_weight',
         type=float,
         default=0.05,
@@ -200,6 +212,48 @@ def get_args():
         type=float,
         default=0.05,
         help="Minimum replay probability assigned to active keyframes.",
+    )
+    parser.add_argument(
+        '--replay_anchor_window',
+        type=int,
+        default=20,
+        help="Number of keyframes around anchor boundaries to prioritize during replay.",
+    )
+    parser.add_argument(
+        '--enable_dynamic_suppression',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Downweight blurred or transient regions during training and Gaussian spawning.",
+    )
+    parser.add_argument(
+        '--dynamic_blur_weight',
+        type=float,
+        default=0.45,
+        help="Weight of image sharpness in the dynamic suppression mask.",
+    )
+    parser.add_argument(
+        '--dynamic_residual_weight',
+        type=float,
+        default=0.35,
+        help="Weight of render residual in the dynamic suppression mask.",
+    )
+    parser.add_argument(
+        '--dynamic_depth_weight',
+        type=float,
+        default=0.20,
+        help="Weight of mono-depth confidence in the dynamic suppression mask.",
+    )
+    parser.add_argument(
+        '--dynamic_mask_floor',
+        type=float,
+        default=0.15,
+        help="Minimum supervision weight kept after dynamic suppression.",
+    )
+    parser.add_argument(
+        '--dynamic_sample_threshold',
+        type=float,
+        default=0.35,
+        help="Minimum dynamic mask value required to keep a spawned Gaussian candidate.",
     )
 
     ## Keyframe management

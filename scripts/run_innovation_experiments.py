@@ -15,21 +15,25 @@ VARIANTS = {
     "baseline": [
         "--no-enable_uncertainty_sampling",
         "--no-enable_residual_replay",
+        "--no-enable_dynamic_suppression",
         "--no-rectify_colmap_cameras",
     ],
-    "uncertainty_only": [
-        "--enable_uncertainty_sampling",
-        "--no-enable_residual_replay",
+    "replay_only": [
+        "--no-enable_uncertainty_sampling",
+        "--enable_residual_replay",
+        "--no-enable_dynamic_suppression",
         "--no-rectify_colmap_cameras",
     ],
     "uncertainty_replay": [
         "--enable_uncertainty_sampling",
         "--enable_residual_replay",
+        "--no-enable_dynamic_suppression",
         "--no-rectify_colmap_cameras",
     ],
     "full": [
         "--enable_uncertainty_sampling",
         "--enable_residual_replay",
+        "--enable_dynamic_suppression",
         "--rectify_colmap_cameras",
     ],
 }
