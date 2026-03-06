@@ -1192,6 +1192,7 @@ class SceneModel:
 
         # ========== 深度估计 ==========
         sampled_uv = self.uv[sample_mask]  # 采样像素坐标
+        sampled_uncertainty = uncertainty[sample_mask]
         
         # 【场景表示模块】使用引导多视图立体匹配（Guided MVS）估计深度
         # 策略：利用历史关键帧的密集特征进行立体匹配
@@ -1210,7 +1211,7 @@ class SceneModel:
         depth = depth[valid_mask]
         sampled_uv = sampled_uv[valid_mask]
         accurate_mask = accurate_mask[valid_mask]
-        sampled_uncertainty = uncertainty[sample_mask]
+        sampled_uncertainty = sampled_uncertainty[valid_mask]
 
         # ========== 剪枝过粗的高斯点 ==========
         # 【场景表示模块】如果新点比现有高斯点更精细，则移除过粗的旧高斯点
@@ -1242,6 +1243,7 @@ class SceneModel:
             depth = depth[valid_mask]
             sampled_uv = sampled_uv[valid_mask]
             accurate_mask = accurate_mask[valid_mask]
+            sampled_uncertainty = sampled_uncertainty[valid_mask]
 
         # ========== 3D位置初始化 ==========
         # 【场景表示模块】将像素坐标+深度转换为世界坐标系3D点

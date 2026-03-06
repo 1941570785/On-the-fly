@@ -79,10 +79,21 @@ def main():
                 cmd += args.extra_train_args.split()
 
             print("Running:", " ".join(cmd))
-            subprocess.run(cmd, cwd=repo_root, check=False)
+            train_proc = subprocess.run(cmd, cwd=repo_root, check=False)
 
             if args.plot_diagnostics:
                 metrics_csv = os.path.join(out, "keyframe_metrics.csv")
+                if train_proc.returncode != 0:
+                    print(
+                        f"Skipping plots because training failed for {scene} "
+                        f"(exit code {train_proc.returncode})."
+                    )
+                    continue
+                if not os.path.exists(metrics_csv):
+                    print(
+                        f"Skipping plots because metrics file was not created: {metrics_csv}"
+                    )
+                    continue
                 diag_out_dir = os.path.join(out, "diagnostic_plots")
                 plot_cmd = [
                     "python",

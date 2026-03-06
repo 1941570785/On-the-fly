@@ -102,9 +102,20 @@ def main():
 
             print("Running:", " ".join(cmd))
             if not args.dry_run:
-                subprocess.run(cmd, cwd=repo_root, check=False)
+                train_proc = subprocess.run(cmd, cwd=repo_root, check=False)
+                if train_proc.returncode != 0:
+                    print(
+                        f"Skipping plots because training failed for {variant}:{scene} "
+                        f"(exit code {train_proc.returncode})."
+                    )
+                    continue
 
                 metrics_csv = os.path.join(out, "keyframe_metrics.csv")
+                if not os.path.exists(metrics_csv):
+                    print(
+                        f"Skipping plots because metrics file was not created: {metrics_csv}"
+                    )
+                    continue
                 plot_cmd = [
                     "python",
                     diag_plotter,

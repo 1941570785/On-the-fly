@@ -35,6 +35,8 @@ def _as_bool(v: str) -> bool:
 
 
 def _read_rows(path: str, only: str):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"CSV not found: {path}")
     rows = []
     with open(path, "r", newline="") as f:
         reader = csv.DictReader(f)
@@ -129,7 +131,10 @@ def _plot_metric(out_path, title, xs, ys, metric_name):
 def main():
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
-    rows = _read_rows(args.csv_path, args.only)
+    try:
+        rows = _read_rows(args.csv_path, args.only)
+    except FileNotFoundError as e:
+        raise SystemExit(str(e)) from e
     xs = list(range(1, len(rows) + 1))
     for metric in args.metrics:
         ys = [_to_float(row, metric) for row in rows]
