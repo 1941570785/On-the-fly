@@ -2,6 +2,7 @@ import argparse
 import csv
 import json
 import math
+import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -19,7 +20,7 @@ DEFAULT_COMPARE_ROOT_B = [
     "results/ablation/NoJoint/StaticHikes",
     "results/ablation/NoJoint/TUM",
 ]
-DEFAULT_COMPARE_OUTPUT = "contrast"
+DEFAULT_COMPARE_OUTPUT = "results/contrast"
 
 
 def parse_args():
@@ -31,9 +32,9 @@ def parse_args():
     )
     parser.add_argument(
         "--mode",
-        choices=["single", "compare"],
+        choices=["single", "compare", "test_images", "compare_test_images"],
         default="single",
-        help="single: plot each dataset independently; compare: overlay two experiment trees.",
+        help="single: plot keyframe snapshots; compare: overlay keyframe snapshots; test_images: re-evaluate rendered test images; compare_test_images: overlay test_images metrics.",
     )
     parser.add_argument(
         "--roots",
@@ -79,6 +80,16 @@ def parse_args():
         choices=["svg"],
         default="svg",
         help="Output figure format. Currently only svg is supported without external dependencies.",
+    )
+    parser.add_argument(
+        "--show-metadata-mean",
+        action="store_true",
+        help="Draw metadata.json final metric lines when plotting.",
+    )
+    parser.add_argument(
+        "--dataset-base-dir",
+        default="datasets",
+        help="Ground-truth dataset root used by test_images mode.",
     )
     return parser.parse_args()
 
@@ -149,6 +160,27 @@ def _read_rows(csv_path: Path, only: str) -> list[dict]:
     return rows
 
 
+def _read_test_image_metric_rows(csv_path: Path) -> list[dict]:
+    rows = []
+    with csv_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            try:
+                rows.append(
+                    {
+                        "frame_id": int(float(row.get("frame_id", "0"))),
+                        "image_name": row.get("image_name", ""),
+                        "psnr": float(row.get("psnr", "nan")),
+                        "ssim": float(row.get("ssim", "nan")),
+                        "lpips": float(row.get("lpips", "nan")),
+                    }
+                )
+            except (TypeError, ValueError):
+                continue
+    rows.sort(key=lambda item: item["frame_id"])
+    return rows
+
+
 def _read_metadata_metrics(metadata_path: Path) -> dict[str, float]:
     with metadata_path.open("r") as handle:
         metadata = json.load(handle)
@@ -191,6 +223,13 @@ def _series_payload(rows: list[dict], metric_name: str) -> dict:
     }
 
 
+def _mean_of_values(values: list[float]) -> float:
+    valid = [value for value in values if value == value and not math.isinf(value)]
+    if not valid:
+        return float("nan")
+    return sum(valid) / len(valid)
+
+
 def _base_svg_style() -> str:
     return """
         .title { font: 700 28px Arial, sans-serif; fill: #111827; }
@@ -223,6 +262,8 @@ def _write_svg_lineplot(
     y_min: float,
     y_max: float,
     mean_value: float,
+    subtitle: str,
+    show_mean_line: bool,
 ):
     width = 1600
     height = 720
@@ -264,10 +305,10 @@ def _write_svg_lineplot(
         "</style>",
         f'<rect x="0" y="0" width="{width}" height="{height}" fill="#ffffff"/>',
         f'<text class="title" x="{pad_left}" y="42">{_svg_escape(title)} | {metric_label}</text>',
-        f'<text class="subtitle" x="{pad_left}" y="68">Blue line: frame metric | Red dashed line: final mean from metadata.json</text>',
+        f'<text class="subtitle" x="{pad_left}" y="68">{_svg_escape(subtitle)}</text>',
     ]
 
-    if mean_value == mean_value and not math.isinf(mean_value):
+    if show_mean_line and mean_value == mean_value and not math.isinf(mean_value):
         mean_y = ty(mean_value)
         bottom_y = ty(y_min)
         if mean_y < bottom_y:
@@ -331,6 +372,7 @@ def _write_svg_comparison_plot(
     series_b: dict,
     mean_b: float,
     label_b: str,
+    show_mean_lines: bool,
 ):
     width = 1700
     height = 760
@@ -384,7 +426,7 @@ def _write_svg_comparison_plot(
         "</style>",
         f'<rect x="0" y="0" width="{width}" height="{height}" fill="#ffffff"/>',
         f'<text class="title" x="{pad_left}" y="42">{_svg_escape(title)} | {metric_label}</text>',
-        f'<text class="subtitle" x="{pad_left}" y="68">Overlay comparison: points, lines and mean lines use different colors for each experiment</text>',
+        f'<text class="subtitle" x="{pad_left}" y="68">Overlay comparison: each experiment uses different point and line colors</text>',
     ]
 
     for i in range(6):
@@ -414,21 +456,17 @@ def _write_svg_comparison_plot(
     svg.append(f'<rect class="legend-box" x="{legend_x}" y="{legend_y}" width="290" height="84" rx="8"/>')
     svg.append(f'<line x1="{legend_x + 18}" y1="{legend_y + 28}" x2="{legend_x + 60}" y2="{legend_y + 28}" stroke="{colors["a_line"]}" stroke-width="3"/>')
     svg.append(f'<circle cx="{legend_x + 39}" cy="{legend_y + 28}" r="5" fill="{colors["a_point"]}" stroke="#ffffff" stroke-width="1.2"/>')
-    svg.append(f'<line x1="{legend_x + 18}" y1="{legend_y + 54}" x2="{legend_x + 60}" y2="{legend_y + 54}" stroke="{colors["a_mean"]}" stroke-width="3" stroke-dasharray="12 6"/>')
     svg.append(f'<text class="legend-text" x="{legend_x + 72}" y="{legend_y + 33}">{_svg_escape(label_a)} frames</text>')
-    svg.append(f'<text class="legend-text" x="{legend_x + 72}" y="{legend_y + 59}">{_svg_escape(label_a)} mean</text>')
     svg.append(f'<line x1="{legend_x + 160}" y1="{legend_y + 28}" x2="{legend_x + 202}" y2="{legend_y + 28}" stroke="{colors["b_line"]}" stroke-width="3"/>')
     svg.append(f'<circle cx="{legend_x + 181}" cy="{legend_y + 28}" r="5" fill="{colors["b_point"]}" stroke="#ffffff" stroke-width="1.2"/>')
-    svg.append(f'<line x1="{legend_x + 160}" y1="{legend_y + 54}" x2="{legend_x + 202}" y2="{legend_y + 54}" stroke="{colors["b_mean"]}" stroke-width="3" stroke-dasharray="4 5"/>')
     svg.append(f'<text class="legend-text" x="{legend_x + 214}" y="{legend_y + 33}">{_svg_escape(label_b)} frames</text>')
-    svg.append(f'<text class="legend-text" x="{legend_x + 214}" y="{legend_y + 59}">{_svg_escape(label_b)} mean</text>')
 
-    if mean_a == mean_a and not math.isinf(mean_a):
+    if show_mean_lines and mean_a == mean_a and not math.isinf(mean_a):
         mean_y_a = ty(mean_a)
         svg.append(f'<line class="mean-a" x1="{pad_left}" y1="{mean_y_a:.2f}" x2="{pad_left + plot_width}" y2="{mean_y_a:.2f}" stroke="{colors["a_mean"]}"/>')
         svg.append(f'<text class="mean-label-a" x="{pad_left + plot_width - 300}" y="{mean_y_a - 12:.2f}" fill="{colors["a_mean"]}">{_svg_escape(label_a)} mean = {_fmt(mean_a)}</text>')
 
-    if mean_b == mean_b and not math.isinf(mean_b):
+    if show_mean_lines and mean_b == mean_b and not math.isinf(mean_b):
         mean_y_b = ty(mean_b)
         svg.append(f'<line class="mean-b" x1="{pad_left}" y1="{mean_y_b:.2f}" x2="{pad_left + plot_width}" y2="{mean_y_b:.2f}" stroke="{colors["b_mean"]}"/>')
         offset = 18 if mean_a == mean_a and abs(mean_y_b - ty(mean_a)) < 18 else -12
@@ -472,6 +510,8 @@ def _plot_dataset(dataset_dir: Path, only: str):
             y_min=spec["y_min"],
             y_max=spec["y_max"],
             mean_value=metadata_metrics[metric_name],
+            subtitle="Blue line: per-frame snapshot metric",
+            show_mean_line=False,
         )
 
     summary_path = dataset_dir / "keyframe_plot_summary.txt"
@@ -491,6 +531,119 @@ def _plot_dataset(dataset_dir: Path, only: str):
     )
 
 
+def _compute_test_image_rows(dataset_dir: Path, dataset_base_dir: str) -> list[dict]:
+    import cv2  # type: ignore
+    import lpips  # type: ignore
+    import torch
+    from fused_ssim import fused_ssim  # type: ignore
+
+    repo_root = Path(__file__).resolve().parents[1]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from utils import psnr  # type: ignore
+
+    render_dir = dataset_dir / "test_images"
+    gt_dir = Path(dataset_base_dir) / dataset_dir.parent.name / dataset_dir.name / "images"
+    if not render_dir.exists():
+        raise RuntimeError(f"Missing test_images directory: {render_dir}")
+    if not gt_dir.exists():
+        raise RuntimeError(f"Missing ground-truth image directory: {gt_dir}")
+
+    image_names = sorted(
+        path.name
+        for path in render_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"}
+    )
+    if not image_names:
+        raise RuntimeError(f"No rendered test images found in {render_dir}")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    lpips_net = lpips.LPIPS(net="vgg").to(device)
+    lpips_net.eval()
+
+    rows = []
+    for frame_idx, image_name in enumerate(image_names, start=1):
+        render_path = render_dir / image_name
+        gt_path = gt_dir / image_name
+        if not gt_path.exists():
+            raise RuntimeError(f"Ground-truth image not found for {render_path}: {gt_path}")
+
+        image = cv2.cvtColor(cv2.imread(str(render_path)), cv2.COLOR_BGR2RGB)
+        gt_image = cv2.cvtColor(cv2.imread(str(gt_path)), cv2.COLOR_BGR2RGB)
+        if image.shape != gt_image.shape:
+            image = cv2.resize(
+                image,
+                (gt_image.shape[1], gt_image.shape[0]),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        image_t = torch.from_numpy(image).permute(2, 0, 1).float().to(device) / 255.0
+        gt_t = torch.from_numpy(gt_image).permute(2, 0, 1).float().to(device) / 255.0
+
+        mask = gt_t.sum(0) > 0 if dataset_dir.parent.name == "TUM" else torch.ones_like(gt_t[0], dtype=torch.bool)
+        mask = mask.expand_as(image_t)
+        image_masked = image_t * mask
+
+        psnr_val = psnr(image_masked[mask], gt_t[mask]) if mask.any() else float("nan")
+        ssim_val = fused_ssim(image_masked[None], gt_t[None], train=False).item()
+        lpips_val = lpips_net(image_masked[None], gt_t[None]).item()
+
+        rows.append(
+            {
+                "frame_id": frame_idx,
+                "image_name": image_name,
+                "psnr": float(psnr_val),
+                "ssim": float(ssim_val),
+                "lpips": float(lpips_val),
+            }
+        )
+
+    return rows
+
+
+def _plot_test_images_dataset(dataset_dir: Path, dataset_base_dir: str):
+    rows = _compute_test_image_rows(dataset_dir, dataset_base_dir=dataset_base_dir)
+    dataset_title = f"{dataset_dir.parent.name}/{dataset_dir.name}"
+
+    csv_path = dataset_dir / "test_images_metrics.csv"
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["frame_id", "image_name", "psnr", "ssim", "lpips"])
+        for row in rows:
+            writer.writerow([row["frame_id"], row["image_name"], row["psnr"], row["ssim"], row["lpips"]])
+
+    for metric_name, spec in METRIC_SPECS.items():
+        series = _series_payload(rows, metric_name)
+        mean_value = _mean_of_values(series["ys"])
+        _write_svg_lineplot(
+            out_path=dataset_dir / f"test_images_{spec['label']}.svg",
+            title=dataset_title,
+            metric_label=spec["label"],
+            xs=series["xs"],
+            ys=series["ys"],
+            y_min=spec["y_min"],
+            y_max=spec["y_max"],
+            mean_value=mean_value,
+            subtitle="Blue line: per-frame test_images metric | Red dashed line: mean of plotted frames",
+            show_mean_line=True,
+        )
+
+    summary_path = dataset_dir / "test_images_plot_summary.txt"
+    summary_path.write_text(
+        "\n".join(
+            [
+                f"dataset={dataset_title}",
+                f"frames={len(rows)}",
+                f"mean_psnr={_fmt(_mean_of_values([row['psnr'] for row in rows]))}",
+                f"mean_ssim={_fmt(_mean_of_values([row['ssim'] for row in rows]))}",
+                f"mean_lpips={_fmt(_mean_of_values([row['lpips'] for row in rows]))}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _plot_comparisons(
     roots_a: Iterable[str],
     roots_b: Iterable[str],
@@ -498,6 +651,7 @@ def _plot_comparisons(
     only: str,
     label_a: str,
     label_b: str,
+    show_mean_lines: bool,
 ):
     dataset_map_a = _relative_dataset_map(roots_a)
     dataset_map_b = _relative_dataset_map(roots_b)
@@ -538,6 +692,7 @@ def _plot_comparisons(
                 series_b=_series_payload(rows_b, metric_name),
                 mean_b=metrics_b[metric_name],
                 label_b=label_b,
+                show_mean_lines=show_mean_lines,
             )
 
         (out_dir / "contrast_summary.txt").write_text(
@@ -560,6 +715,74 @@ def _plot_comparisons(
         )
 
 
+def _plot_test_images_comparisons(
+    roots_a: Iterable[str],
+    roots_b: Iterable[str],
+    output_root: str,
+    label_a: str,
+    label_b: str,
+):
+    dataset_map_a = _relative_dataset_map(roots_a)
+    dataset_map_b = _relative_dataset_map(roots_b)
+    shared_keys = sorted(set(dataset_map_a) & set(dataset_map_b))
+    if not shared_keys:
+        raise SystemExit("No matching datasets were found between the two experiment trees.")
+
+    output_root_path = Path(output_root)
+    print(f"Found {len(shared_keys)} matching datasets.")
+    for rel_key in shared_keys:
+        dataset_dir_a = dataset_map_a[rel_key]
+        dataset_dir_b = dataset_map_b[rel_key]
+        print(f"Comparing test_images for {rel_key} ...")
+
+        rows_a = _read_test_image_metric_rows(dataset_dir_a / "test_images_metrics.csv")
+        rows_b = _read_test_image_metric_rows(dataset_dir_b / "test_images_metrics.csv")
+        if not rows_a or not rows_b:
+            raise RuntimeError(f"test_images_metrics.csv is empty for dataset {rel_key}")
+
+        path_parts = Path(rel_key).parts
+        group_name = dataset_dir_a.parent.name
+        dataset_name = path_parts[-1]
+        title = f"{group_name}/{dataset_name}"
+        out_dir = output_root_path / group_name / dataset_name
+
+        for metric_name, spec in METRIC_SPECS.items():
+            series_a = _series_payload(rows_a, metric_name)
+            series_b = _series_payload(rows_b, metric_name)
+            _write_svg_comparison_plot(
+                out_path=out_dir / f"test_images_{spec['label']}.svg",
+                title=title,
+                metric_label=spec["label"],
+                y_min=spec["y_min"],
+                y_max=spec["y_max"],
+                series_a=series_a,
+                mean_a=_mean_of_values(series_a["ys"]),
+                label_a=label_a,
+                series_b=series_b,
+                mean_b=_mean_of_values(series_b["ys"]),
+                label_b=label_b,
+                show_mean_lines=True,
+            )
+
+        (out_dir / "test_images_contrast_summary.txt").write_text(
+            "\n".join(
+                [
+                    f"dataset={title}",
+                    f"{label_a}_frames={len(rows_a)}",
+                    f"{label_b}_frames={len(rows_b)}",
+                    f"{label_a}_mean_psnr={_fmt(_mean_of_values([row['psnr'] for row in rows_a]))}",
+                    f"{label_b}_mean_psnr={_fmt(_mean_of_values([row['psnr'] for row in rows_b]))}",
+                    f"{label_a}_mean_ssim={_fmt(_mean_of_values([row['ssim'] for row in rows_a]))}",
+                    f"{label_b}_mean_ssim={_fmt(_mean_of_values([row['ssim'] for row in rows_b]))}",
+                    f"{label_a}_mean_lpips={_fmt(_mean_of_values([row['lpips'] for row in rows_a]))}",
+                    f"{label_b}_mean_lpips={_fmt(_mean_of_values([row['lpips'] for row in rows_b]))}",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+
 def main():
     args = parse_args()
     if args.mode == "single":
@@ -570,6 +793,22 @@ def main():
         for dataset_dir in dataset_dirs:
             print(f"Plotting {dataset_dir} ...")
             _plot_dataset(dataset_dir, only=args.only)
+    elif args.mode == "test_images":
+        dataset_dirs = _dataset_dirs(args.roots)
+        if not dataset_dirs:
+            raise SystemExit("No dataset directories with keyframe_metrics.csv and metadata.json were found.")
+        print(f"Found {len(dataset_dirs)} dataset directories.")
+        for dataset_dir in dataset_dirs:
+            print(f"Evaluating test_images for {dataset_dir} ...")
+            _plot_test_images_dataset(dataset_dir, dataset_base_dir=args.dataset_base_dir)
+    elif args.mode == "compare_test_images":
+        _plot_test_images_comparisons(
+            roots_a=args.compare_roots_a,
+            roots_b=args.compare_roots_b,
+            output_root=args.compare_output_root,
+            label_a=args.compare_label_a,
+            label_b=args.compare_label_b,
+        )
     else:
         _plot_comparisons(
             roots_a=args.compare_roots_a,
@@ -578,6 +817,7 @@ def main():
             only=args.only,
             label_a=args.compare_label_a,
             label_b=args.compare_label_b,
+            show_mean_lines=args.show_metadata_mean,
         )
     print("Done.")
 
