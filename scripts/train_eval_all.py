@@ -44,12 +44,12 @@ if __name__ == "__main__":
     # Set the test parameters for each scene
     # 各数据集的测试抽帧间隔
     all_test_params = {
-        "TUM/rgbd_dataset_freiburg1_desk": {"test_hold": 30},
-        "TUM/rgbd_dataset_freiburg2_xyz": {"test_hold": 30},
-        "TUM/rgbd_dataset_freiburg3_long_office_household": {"test_hold": 30},
-        "MipNerf360/garden": {"test_hold": 8},
-        "MipNerf360/bonsai": {"test_hold": 8},
-        "MipNerf360/counter": {"test_hold": 8},
+        "TUM/desk1": {"test_hold": 30},
+        "TUM/desk2": {"test_hold": 30},
+        "TUM/long_office_household": {"test_hold": 30},
+        "MipNeRF360/garden": {"test_hold": 8},
+        "MipNeRF360/bonsai": {"test_hold": 8},
+        "MipNeRF360/counter": {"test_hold": 8},
         "StaticHikes/forest1": {"test_hold": 10},
         "StaticHikes/forest2": {"test_hold": 10},
         "StaticHikes/university2": {"test_hold": 10},
@@ -73,7 +73,7 @@ if __name__ == "__main__":
             # 调用训练脚本执行重建
             subprocess.run(
                 args=[
-                    "python",
+                    sys.executable,
                     "train.py",
                     "-s",
                     os.path.join(args.base_dir, scene),
