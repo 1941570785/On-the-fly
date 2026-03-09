@@ -12,11 +12,53 @@
 
 
 import argparse
+import ast
 import os
+
+def _parse_simple_config(config_path: str):
+    """
+    Parse a tiny YAML-like config file with `key: value`.
+    Supports bool/int/float/str and comma-separated lists.
+    """
+    config = {}
+    with open(config_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            key = key.strip()
+            value = value.strip()
+            if value == "":
+                continue
+            lowered = value.lower()
+            if lowered in {"true", "false"}:
+                config[key] = lowered == "true"
+                continue
+            if value.startswith("[") and value.endswith("]"):
+                try:
+                    parsed = ast.literal_eval(value)
+                except Exception:
+                    parsed = [v.strip() for v in value[1:-1].split(",") if v.strip()]
+                config[key] = parsed
+                continue
+            try:
+                config[key] = ast.literal_eval(value)
+            except Exception:
+                config[key] = value
+    return config
 
 def get_args():
     # 构建命令行解析器，集中管理训练/数据相关参数
     parser = argparse.ArgumentParser(description="Options for data loading and training")
+    parser.add_argument(
+        "--config_path",
+        type=str,
+        default="",
+        help="Path to a minimal YAML-like config file. Values override argparse defaults.",
+    )
 
     ## Data and Images
     # 数据与图像路径配置
@@ -111,6 +153,28 @@ def get_args():
     parser.add_argument('--num_pts_miniba_incr', type=int, default=2000,
                         help="Number of keypoints considered for initial mini bundle adjustment")
     parser.add_argument('--iters_miniba_incr', type=int, default=20)
+    parser.add_argument('--pose_refine_iters', type=int, default=25,
+                        help="Number of pose refinement iterations after PnP initialization")
+    parser.add_argument('--pose_refine_lr', type=float, default=2e-3,
+                        help="Learning rate for pose refinement")
+    parser.add_argument('--use_pose_reprojection_loss', action='store_true',
+                        help="Enable reprojection loss branch for pose refinement")
+    parser.add_argument('--pose_reprojection_weight', type=float, default=1.0,
+                        help="Weight for pose reprojection loss")
+    parser.add_argument('--use_pose_photometric_refine', action='store_true',
+                        help="Enable photometric pose refinement branch with current renderer")
+    parser.add_argument('--pose_photometric_weight', type=float, default=0.2,
+                        help="Weight for pose photometric refinement")
+    parser.add_argument('--pose_refine_downsample', type=int, default=4,
+                        help="Downsample factor for photometric pose refinement")
+    parser.add_argument('--use_correspondence_guided_pose_init', action='store_true',
+                        help="Use rendered-depth-guided correspondences for 2D-3D pose initialization")
+    parser.add_argument('--min_pnp_inliers', type=int, default=24,
+                        help="Minimum inliers required for PnP pose initialization")
+    parser.add_argument('--enable_pnp_fallback_global_refine', action='store_true',
+                        help="Trigger global refine and retry when PnP fails")
+    parser.add_argument('--fallback_global_refine_iters', type=int, default=60,
+                        help="Iterations for fallback global pose+gaussian refine")
 
     ## Gaussian initialization options
     # 高斯初始化概率相关参数
@@ -121,11 +185,41 @@ def get_args():
     # 锚点融合相关
     parser.add_argument('--anchor_overlap', type=float, default=0.3,
                         help="Size of the overlapping regions when blending between anchors")
+    parser.add_argument('--use_adaptive_octree_anchor', action='store_true',
+                        help="Enable adaptive octree-like anchor/gaussian insertion")
+    parser.add_argument('--octree_max_level', type=int, default=3,
+                        help="Maximum level for adaptive octree insertion")
+    parser.add_argument('--octree_split_threshold', type=int, default=12,
+                        help="Density threshold used to keep finer octree cells")
+    parser.add_argument('--octree_prune_threshold', type=int, default=2,
+                        help="Minimum points per octree cell to keep")
+    parser.add_argument('--anchor_overlap_prune', action='store_true',
+                        help="Prune overlapping insertions in adaptive octree mode")
+    parser.add_argument('--enable_new_region_unprojection', action='store_true',
+                        help="Insert gaussians from newly visible regions via unprojection")
+    parser.add_argument('--new_region_sample_cap', type=int, default=5000,
+                        help="Maximum number of newly visible pixels to unproject per keyframe")
+    parser.add_argument('--new_gaussian_conf_thresh', type=float, default=0.5,
+                        help="Minimum confidence for new gaussian initialization")
+    parser.add_argument('--aggressive_prune_opacity', type=float, default=0.02,
+                        help="Opacity threshold for lightweight aggressive pruning")
 
     ## Keyframe management
     # 关键帧管理
     parser.add_argument('--max_active_keyframes', type=int, default=200,
                         help="Maximum number of keyframes to keep in GPU memory. Will start offloading keyframes to CPU if this number is exceeded.")
+    parser.add_argument('--optimizer_mode', choices=['baseline', 'merged'], default='baseline',
+                        help="Optimization schedule mode")
+    parser.add_argument('--use_visibility_window', action='store_true',
+                        help="Use visibility-adapted local optimization window")
+    parser.add_argument('--global_refine_every_n_frames', type=int, default=0,
+                        help="Run periodic global refinement every N keyframes (0 to disable)")
+    parser.add_argument('--local_window_min', type=int, default=3,
+                        help="Minimum size for visibility local window")
+    parser.add_argument('--local_window_max', type=int, default=8,
+                        help="Maximum size for visibility local window")
+    parser.add_argument('--visibility_iou_threshold', type=float, default=0.2,
+                        help="Visibility overlap threshold for local window selection")
 
     ## Evaluation
     # 测试频率与展示
@@ -152,6 +246,12 @@ def get_args():
                         help="Port of the viewer client, if using server viewer_mode")
 
     args = parser.parse_args()
+
+    if args.config_path:
+        config_values = _parse_simple_config(args.config_path)
+        for key, value in config_values.items():
+            if hasattr(args, key):
+                setattr(args, key, value)
 
     ## Set the output directory if not specified
     # 若未指定输出目录，则在 results 下自动递增创建

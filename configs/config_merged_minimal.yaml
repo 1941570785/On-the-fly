@@ -1,0 +1,31 @@
+# LongSplat-inspired merged mode for On-the-fly baseline.
+# This file is parsed by --config_path (simple key: value parser in args.py).
+
+optimizer_mode: merged
+use_visibility_window: true
+global_refine_every_n_frames: 12
+local_window_min: 3
+local_window_max: 8
+visibility_iou_threshold: 0.2
+
+use_correspondence_guided_pose_init: true
+min_pnp_inliers: 24
+use_pose_reprojection_loss: true
+pose_reprojection_weight: 1.0
+use_pose_photometric_refine: true
+pose_photometric_weight: 0.15
+pose_refine_iters: 20
+pose_refine_lr: 0.002
+pose_refine_downsample: 4
+enable_pnp_fallback_global_refine: true
+fallback_global_refine_iters: 40
+
+use_adaptive_octree_anchor: true
+octree_max_level: 3
+octree_split_threshold: 12
+octree_prune_threshold: 2
+anchor_overlap_prune: true
+enable_new_region_unprojection: true
+new_region_sample_cap: 4000
+new_gaussian_conf_thresh: 0.45
+aggressive_prune_opacity: 0.02

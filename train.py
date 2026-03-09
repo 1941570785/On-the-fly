@@ -129,6 +129,12 @@ if __name__ == "__main__":
     # Dict of runtimes for each step
     runtimes = ["Load", "BAB", "tri", "BAI", "Add", "Init", "Opt", "anc"]
     metrics = {}
+    run_stats = {
+        "pnp_inliers": 0,
+        "pnp_trials": 0,
+        "pnp_failures": 0,
+        "fallback_triggers": 0,
+    }
 
     runtimes = {key: [0, 0] for key in runtimes}
     ## 场景重建主循环
@@ -295,9 +301,16 @@ if __name__ == "__main__":
                 
                 start_time = time.time()
                 # 【姿态估计模块】增量姿态初始化：使用PnP-RANSAC和Mini-BA估计新帧位姿
-                Rt = pose_initializer.initialize_incremental(
-                    prev_keyframes, desc_kpts, n_keyframes, info["is_test"], image
+                Rt, pose_stats = pose_initializer.initialize_incremental(
+                    prev_keyframes,
+                    desc_kpts,
+                    n_keyframes,
+                    info["is_test"],
+                    image,
+                    scene_model=scene_model,
                 )
+                run_stats["pnp_trials"] += 1
+                run_stats["pnp_inliers"] += pose_stats["pnp_inliers"]
                 increment_runtime(runtimes["BAI"], start_time)
                 
                 start_time = time.time()
@@ -333,11 +346,65 @@ if __name__ == "__main__":
                     if is_stream:
                         scene_model.optimize_async(args.num_iterations)
                     else:
-                        scene_model.optimization_loop(args.num_iterations)
+                        if args.optimizer_mode == "merged":
+                            scene_model.optimization_schedule_step(
+                                args.num_iterations, n_keyframes
+                            )
+                        else:
+                            scene_model.optimization_loop(args.num_iterations)
+                    scene_model.prune_unstable_gaussians()
                     increment_runtime(runtimes["Opt"], start_time)
                 else:
-                    # 姿态估计失败，跳过该帧
-                    should_add_keyframe = False
+                    run_stats["pnp_failures"] += 1
+                    if args.enable_pnp_fallback_global_refine:
+                        run_stats["fallback_triggers"] += 1
+                        print(
+                            f"[PoseFallback] frame={n_keyframes} pnp_inliers={pose_stats['pnp_inliers']} "
+                            f"corr={pose_stats['n_correspondences']} -> global_refine({args.fallback_global_refine_iters})"
+                        )
+                        scene_model.run_global_refinement(args.fallback_global_refine_iters)
+                        prev_keyframes = scene_model.get_prev_keyframes(
+                            args.num_prev_keyframes_miniba_incr, True, desc_kpts
+                        )
+                        Rt, pose_stats = pose_initializer.initialize_incremental(
+                            prev_keyframes,
+                            desc_kpts,
+                            n_keyframes,
+                            info["is_test"],
+                            image,
+                            scene_model=scene_model,
+                        )
+                    if Rt is None:
+                        # 姿态估计失败，跳过该帧
+                        should_add_keyframe = False
+                    else:
+                        if args.use_colmap_poses:
+                            Rt = info["Rt"]
+                        keyframe = Keyframe(
+                            image,
+                            info,
+                            desc_kpts,
+                            Rt,
+                            n_keyframes,
+                            f,
+                            dense_extractor,
+                            depth_estimator,
+                            triangulator,
+                            args,
+                        )
+                        scene_model.add_keyframe(keyframe)
+                        prev_keyframe = keyframe
+                        scene_model.add_new_gaussians()
+                        if is_stream:
+                            scene_model.optimize_async(args.num_iterations)
+                        else:
+                            if args.optimizer_mode == "merged":
+                                scene_model.optimization_schedule_step(
+                                    args.num_iterations, n_keyframes
+                                )
+                            else:
+                                scene_model.optimization_loop(args.num_iterations)
+                        scene_model.prune_unstable_gaussians()
 
         if should_add_keyframe:
             # ========== 锚点管理：处理大尺度场景 ==========
@@ -387,6 +454,9 @@ if __name__ == "__main__":
                 f"\033[36mKeyframes:{n_keyframes}\033[0m",
                 f"\033[36mGaussians:{scene_model.n_active_gaussians}\033[0m",
                 f"\033[36mAnchors:{len(scene_model.anchors)}\033[0m",
+                f"\033[36mPnPInliers:{pose_stats['pnp_inliers'] if 'pose_stats' in locals() else 0}\033[0m",
+                f"\033[36mFallbacks:{run_stats['fallback_triggers']}\033[0m",
+                f"\033[36mL/G:{scene_model.runtime_stats['local_refine_calls']}/{scene_model.runtime_stats['global_refine_calls']}\033[0m",
             ]
             pbar.set_postfix_str(",".join(bar_postfix), refresh=False)
 
@@ -406,6 +476,17 @@ if __name__ == "__main__":
             else f"{metric}: {value}"
             for metric, value in metrics.items()
         )
+    )
+    avg_inliers = run_stats["pnp_inliers"] / max(1, run_stats["pnp_trials"])
+    print(
+        "[MergedStats] "
+        f"avg_pnp_inliers={avg_inliers:.1f}, "
+        f"pnp_failures={run_stats['pnp_failures']}, "
+        f"fallbacks={run_stats['fallback_triggers']}, "
+        f"gauss_added={scene_model.runtime_stats['gaussians_added']}, "
+        f"gauss_pruned={scene_model.runtime_stats['gaussians_pruned']}, "
+        f"local_refine={scene_model.runtime_stats['local_refine_calls']}, "
+        f"global_refine={scene_model.runtime_stats['global_refine_calls']}"
     )
 
     # ========== 可选微调阶段 ==========

@@ -16,6 +16,7 @@ import gc
 import os
 import json
 import math
+from collections import defaultdict
 import threading
 import time
 import warnings
@@ -94,6 +95,21 @@ class SceneModel:
         self.centre = torch.tensor([(width - 1) / 2, (height - 1) / 2], device="cuda")  # 图像中心点
         self.anchor_overlap = args.anchor_overlap  # 锚点重叠区域大小（用于平滑融合）
         self.optimization_thread = None  # 异步优化线程（流式模式下使用）
+        self.optimizer_mode = args.optimizer_mode
+        self.use_visibility_window = args.use_visibility_window
+        self.global_refine_every_n_frames = args.global_refine_every_n_frames
+        self.local_window_min = args.local_window_min
+        self.local_window_max = args.local_window_max
+        self.visibility_iou_threshold = args.visibility_iou_threshold
+        self.use_adaptive_octree_anchor = args.use_adaptive_octree_anchor
+        self.octree_max_level = args.octree_max_level
+        self.octree_split_threshold = args.octree_split_threshold
+        self.octree_prune_threshold = args.octree_prune_threshold
+        self.anchor_overlap_prune = args.anchor_overlap_prune
+        self.enable_new_region_unprojection = args.enable_new_region_unprojection
+        self.new_region_sample_cap = args.new_region_sample_cap
+        self.new_gaussian_conf_thresh = args.new_gaussian_conf_thresh
+        self.aggressive_prune_opacity = args.aggressive_prune_opacity
 
         # ========== LPIPS评估器初始化 ==========
         # 用于评估渲染质量（感知损失）
@@ -185,6 +201,7 @@ class SceneModel:
         self.valid_keyframes = torch.empty(0, dtype=torch.bool)  # 关键帧有效性掩码
         self.lock = threading.Lock()  # 线程锁（用于多线程场景下的高斯参数访问）
         self.inference_mode = inference_mode  # 是否为推理模式
+        self.runtime_stats = defaultdict(int)
 
         # ========== 高斯初始化辅助工具 ==========
         # 圆盘卷积核：用于计算图像的Laplacian范数（检测纹理/边缘区域）
@@ -378,7 +395,7 @@ class SceneModel:
         """
         return self.last_active_frame - self.first_active_frame + 1
 
-    def optimization_step(self, finetuning=False):
+    def optimization_step(self, finetuning=False, candidate_frame_ids=None):
         """
         【优化模块】执行一步优化
         
@@ -397,12 +414,17 @@ class SceneModel:
         # ========== 关键帧选择策略 ==========
         # 训练策略：以一定概率使用最新关键帧，否则随机选择
         # 这样可以平衡新区域的学习和旧区域的细化
+        active_pool = (
+            candidate_frame_ids
+            if candidate_frame_ids is not None and len(candidate_frame_ids) > 0
+            else self.active_frames_gpu
+        )
         if (
             np.random.rand() > self.use_last_frame_proba
             or self.last_trained_id == -1
             or finetuning
         ):
-            keyframe_id = np.random.choice(self.active_frames_gpu)
+            keyframe_id = np.random.choice(active_pool)
         else:
             keyframe_id = -1  # 使用最新关键帧
         keyframe = self.keyframes[keyframe_id]
@@ -465,7 +487,7 @@ class SceneModel:
         self.valid_Rt_cache[keyframe_id] = False
         self.last_trained_id = keyframe_id
 
-    def optimization_loop(self, n_iters: int, run_until_interupt: bool = False):
+    def optimization_loop(self, n_iters: int, run_until_interupt: bool = False, candidate_frame_ids=None):
         """
         【优化模块】优化循环
         
@@ -482,7 +504,7 @@ class SceneModel:
         i = 0
         # 持续优化直到达到最小迭代次数，或收到中断信号
         while i < n_iters or (run_until_interupt and not self.interupt_optimization): 
-            self.optimization_step()
+            self.optimization_step(candidate_frame_ids=candidate_frame_ids)
             i += 1
         
     def join_optimization_thread(self):
@@ -516,6 +538,65 @@ class SceneModel:
             target=self.optimization_loop, args=(n_iters, True)
         )
         self.optimization_thread.start()
+
+    @torch.no_grad()
+    def _compute_visibility_iou(self, src_id: int, dst_id: int):
+        src_vis = self.render_from_id(src_id)["visibility_filter"]
+        dst_vis = self.render_from_id(dst_id)["visibility_filter"]
+        src_count = src_vis.sum().item()
+        dst_count = dst_vis.sum().item()
+        denom = max(1, min(src_count, dst_count))
+        inter = torch.logical_and(src_vis, dst_vis).sum().item()
+        return inter / denom
+
+    @torch.no_grad()
+    def get_visibility_window(self, center_frame_id: int):
+        if len(self.active_frames_gpu) <= self.local_window_min:
+            return list(self.active_frames_gpu)
+        if not self.use_visibility_window:
+            return list(self.active_frames_gpu[-self.local_window_max :])
+
+        center = self.approx_cam_centres[center_frame_id]
+        candidate_ids = list(self.active_frames_gpu)
+        candidate_ids.sort(
+            key=lambda x: torch.linalg.vector_norm(
+                self.approx_cam_centres[x] - center
+            ).item()
+        )
+        candidate_ids = candidate_ids[: max(self.local_window_max * 2, self.local_window_min)]
+        scores = []
+        for cand_id in candidate_ids:
+            if cand_id == center_frame_id:
+                scores.append((cand_id, 1.0))
+            else:
+                scores.append((cand_id, self._compute_visibility_iou(center_frame_id, cand_id)))
+        scores.sort(key=lambda x: x[1], reverse=True)
+
+        selected = [frame_id for frame_id, score in scores if score >= self.visibility_iou_threshold]
+        if len(selected) < self.local_window_min:
+            selected = [frame_id for frame_id, _ in scores[: self.local_window_min]]
+        return selected[: self.local_window_max]
+
+    def run_global_refinement(self, n_iters: int):
+        n_iters = max(1, int(n_iters))
+        self.optimization_loop(n_iters, candidate_frame_ids=list(self.active_frames_gpu))
+        self.runtime_stats["global_refine_calls"] += 1
+
+    def optimization_schedule_step(self, base_iters: int, current_frame_id: int):
+        if self.optimizer_mode == "baseline":
+            self.optimization_loop(base_iters)
+            return
+
+        local_window = self.get_visibility_window(current_frame_id)
+        self.optimization_loop(base_iters, candidate_frame_ids=local_window)
+        self.runtime_stats["local_refine_calls"] += 1
+
+        if (
+            self.global_refine_every_n_frames > 0
+            and current_frame_id > 0
+            and current_frame_id % self.global_refine_every_n_frames == 0
+        ):
+            self.run_global_refinement(max(1, base_iters // 2))
 
     @torch.no_grad()
     def harmonize_test_exposure(self):
@@ -968,6 +1049,54 @@ class SceneModel:
             "rotation": self.rotation[:0].detach(),
         }
 
+    @torch.no_grad()
+    def _adaptive_octree_keep_mask(self, points: torch.Tensor):
+        """
+        Approximate adaptive octree insertion: keep denser voxels at finer levels and
+        prune sparse cells to reduce unstable new gaussians.
+        """
+        if points.shape[0] == 0:
+            return torch.zeros(0, device=points.device, dtype=torch.bool)
+        if points.shape[0] < self.octree_prune_threshold:
+            return torch.ones(points.shape[0], device=points.device, dtype=torch.bool)
+
+        pts = points.detach()
+        bbox_min = pts.min(dim=0)[0]
+        bbox_max = pts.max(dim=0)[0]
+        extent = (bbox_max - bbox_min).max().clamp_min(1e-4)
+        voxel_size = extent / float(2 ** max(1, self.octree_max_level))
+        coords = torch.floor((pts - bbox_min[None]) / voxel_size).to(torch.int64)
+        unique, inverse, counts = torch.unique(
+            coords, return_inverse=True, return_counts=True, dim=0
+        )
+        keep_cells = counts >= self.octree_prune_threshold
+        keep = keep_cells[inverse]
+
+        if self.anchor_overlap_prune:
+            # Keep one sample per occupied voxel to avoid overlap-heavy insertions.
+            selected = torch.zeros_like(keep)
+            first_idx = torch.full((unique.shape[0],), -1, device=pts.device, dtype=torch.long)
+            for idx in range(inverse.shape[0]):
+                cid = inverse[idx]
+                if first_idx[cid] < 0 and keep[idx]:
+                    first_idx[cid] = idx
+            selected[first_idx[first_idx >= 0]] = True
+            keep = selected
+
+        return keep
+
+    @torch.no_grad()
+    def prune_unstable_gaussians(self):
+        if self.xyz.shape[0] == 0:
+            return 0
+        before = self.xyz.shape[0]
+        valid = self.opacity[:, 0] >= self.aggressive_prune_opacity
+        with self.lock:
+            self.optimizer.add_and_prune(self.make_dummy_ext_tensor(), valid)
+        pruned = int(before - self.xyz.shape[0])
+        self.runtime_stats["gaussians_pruned"] += max(0, pruned)
+        return pruned
+
     def reset(self, keyframe_id: int = -1):
         """
         【优化模块】移除指定关键帧中可见的高斯点
@@ -1067,11 +1196,43 @@ class SceneModel:
         depth, accurate_mask = self.guided_mvs(sampled_uv, keyframe, prev_KFs)
         
         # 过滤：保留置信度高且深度有效的点
-        valid_mask = (keyframe.sample_conf(sampled_uv) > 0.5) * (depth > 1e-6)
+        valid_mask = (keyframe.sample_conf(sampled_uv) > self.new_gaussian_conf_thresh) * (depth > 1e-6)
         sample_mask[sample_mask.clone()] = valid_mask
         depth = depth[valid_mask]
         sampled_uv = sampled_uv[valid_mask]
         accurate_mask = accurate_mask[valid_mask]
+
+        if (
+            self.enable_new_region_unprojection
+            and rendered_depth is not None
+            and self.new_region_sample_cap > 0
+        ):
+            new_vis_mask = (rendered_depth <= 1e-6) * (init_proba > 0.15)
+            if new_vis_mask.any():
+                uv_new = self.uv[new_vis_mask]
+                if uv_new.shape[0] > self.new_region_sample_cap:
+                    selected = torch.randperm(uv_new.shape[0], device=uv_new.device)[
+                        : self.new_region_sample_cap
+                    ]
+                    uv_new = uv_new[selected]
+                mono_depth = 1.0 / keyframe.get_mono_idepth(0).clamp_min(1e-6)
+                sampler = make_torch_sampler(
+                    uv_new.view(1, 1, -1, 2), self.width, self.height
+                )
+                depth_new = F.grid_sample(
+                    mono_depth[None, None],
+                    sampler,
+                    mode="bilinear",
+                    align_corners=True,
+                )[0, 0, 0]
+                keep_new = depth_new > 1e-6
+                if keep_new.any():
+                    sampled_uv = torch.cat([sampled_uv, uv_new[keep_new]], dim=0)
+                    depth = torch.cat([depth, depth_new[keep_new]], dim=0)
+                    accurate_mask = torch.cat(
+                        [accurate_mask, torch.zeros_like(depth_new[keep_new], dtype=torch.bool)],
+                        dim=0,
+                    )
 
         # ========== 剪枝过粗的高斯点 ==========
         # 【场景表示模块】如果新点比现有高斯点更精细，则移除过粗的旧高斯点
@@ -1195,8 +1356,29 @@ class SceneModel:
             "scaling": scales,
             "rotation": rots,
         }
+        if self.use_adaptive_octree_anchor and new_pts.shape[0] > 0:
+            keep_new = self._adaptive_octree_keep_mask(new_pts)
+            new_pts = new_pts[keep_new]
+            f_dc = f_dc[keep_new]
+            f_rest = f_rest[keep_new]
+            opacities = opacities[keep_new]
+            scales = scales[keep_new]
+            rots = rots[keep_new]
+            extension_tensors = {
+                "xyz": new_pts,
+                "f_dc": f_dc,
+                "f_rest": f_rest,
+                "opacity": opacities,
+                "scaling": scales,
+                "rotation": rots,
+            }
+
+        before = int(self.xyz.shape[0])
         with self.lock:
             self.optimizer.add_and_prune(extension_tensors, valid_gs_mask)
+        after = int(self.xyz.shape[0])
+        self.runtime_stats["gaussians_added"] += max(0, after - valid_gs_mask.sum().item())
+        self.runtime_stats["gaussians_pruned"] += max(0, before - int(valid_gs_mask.sum().item()))
 
     def init_intrinsics(self):
         """
@@ -1520,6 +1702,7 @@ class SceneModel:
                 "sh_degree": self.max_sh_degree,  # 球谐函数阶数
                 "f": self.f,  # 焦距
             },
+            "runtime_stats": dict(self.runtime_stats),
             "anchors": [
                 {
                     "position": anchor.position.cpu().numpy().tolist(),  # 锚点位置（世界坐标系）

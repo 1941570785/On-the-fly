@@ -13,10 +13,11 @@
 
 import torch
 import math
+import torch.nn.functional as F
 
 from poses.feature_detector import DescribedKeypoints
 from poses.mini_ba import MiniBA
-from utils import fov2focal, depth2points, sixD2mtx
+from utils import fov2focal, depth2points, sixD2mtx, mtx2sixD, make_torch_sampler
 from scene.keyframe import Keyframe
 from poses.ransac import RANSACEstimator, EstimatorType
 
@@ -56,6 +57,15 @@ class PoseInitializer():
         self.num_pts_pnpransac = 2 * args.num_pts_miniba_incr
         self.num_pts_miniba_incr = args.num_pts_miniba_incr
         self.min_num_inliers = args.min_num_inliers
+        self.min_pnp_inliers = args.min_pnp_inliers
+        self.pose_refine_iters = args.pose_refine_iters
+        self.pose_refine_lr = args.pose_refine_lr
+        self.use_pose_reprojection_loss = args.use_pose_reprojection_loss
+        self.pose_reprojection_weight = args.pose_reprojection_weight
+        self.use_pose_photometric_refine = args.use_pose_photometric_refine
+        self.pose_photometric_weight = args.pose_photometric_weight
+        self.pose_refine_downsample = args.pose_refine_downsample
+        self.use_correspondence_guided_pose_init = args.use_correspondence_guided_pose_init
 
         # Initialize the focal length
         # 选择初始焦距：优先用户给定，其次 FOV，最后默认 0.7*width
@@ -78,6 +88,104 @@ class PoseInitializer():
             make_cuda_graph=True, iters=args.iters_miniba_incr)
         
         self.PnPRANSAC = RANSACEstimator(args.pnpransac_samples, self.max_pnp_error, EstimatorType.P4P)
+
+    @torch.no_grad()
+    def _collect_rendered_correspondences(
+        self,
+        ref_keyframe: Keyframe,
+        curr_desc_kpts: DescribedKeypoints,
+        scene_model,
+        curr_index: int,
+    ):
+        """
+        Build extra 2D-3D correspondences from rendered depth on the previous keyframe.
+        """
+        if scene_model is None:
+            return None, None, None, 0
+
+        matches = self.matcher(
+            curr_desc_kpts,
+            ref_keyframe.desc_kpts,
+            remove_outliers=True,
+            update_kpts_flag="all",
+            kID=curr_index,
+            kID_other=ref_keyframe.index,
+        )
+        if len(matches.idx) == 0:
+            return None, None, None, 0
+
+        render_pkg = scene_model.render_from_id(ref_keyframe.index)
+        ref_depth = 1.0 / render_pkg["invdepth"][0].clamp_min(1e-6)
+
+        ref_uv = matches.kpts_other
+        sampler = make_torch_sampler(ref_uv.view(1, 1, -1, 2), self.width, self.height)
+        sampled_depth = F.grid_sample(
+            ref_depth[None, None], sampler, mode="bilinear", align_corners=True
+        )[0, 0, 0]
+
+        valid = sampled_depth > 1e-6
+        if valid.sum() < 4:
+            return None, None, None, 0
+
+        ref_uv = ref_uv[valid]
+        curr_uv = matches.kpts[valid]
+        depth = sampled_depth[valid]
+        pts_cam = depth2points(ref_uv, depth.unsqueeze(-1), self.f, self.centre)
+        pts_world = (pts_cam - ref_keyframe.get_t()) @ ref_keyframe.get_R()
+
+        conf = torch.ones_like(depth) * 0.6
+        return pts_world, curr_uv, conf, int(valid.sum().item())
+
+    def _refine_pose_with_renderer(self, Rt, xyz, uvs, curr_img, scene_model):
+        """
+        Lightweight joint refinement branch:
+        - reprojection loss on correspondences
+        - optional photometric loss using the current renderer
+        """
+        if self.pose_refine_iters <= 0:
+            return Rt
+
+        with torch.enable_grad():
+            rW2C = torch.nn.Parameter(mtx2sixD(Rt[:3, :3]).clone())
+            tW2C = torch.nn.Parameter(Rt[:3, 3].clone())
+            optimizer = torch.optim.Adam([rW2C, tW2C], lr=self.pose_refine_lr)
+
+            target = curr_img.cuda()
+            ds = max(1, int(self.pose_refine_downsample))
+            if ds > 1:
+                target = F.avg_pool2d(target[None], ds)[0]
+
+            for _ in range(self.pose_refine_iters):
+                optimizer.zero_grad()
+                R = sixD2mtx(rW2C)
+                xyz_cam = xyz @ R.T + tW2C[None]
+                proj = self.f * xyz_cam[:, :2] / xyz_cam[:, 2:3].clamp_min(1e-6) + self.centre
+                reproj = (proj - uvs).abs().mean()
+                loss = self.pose_reprojection_weight * reproj
+
+                if self.use_pose_photometric_refine and scene_model is not None:
+                    Rt_tmp = torch.eye(4, device="cuda")
+                    Rt_tmp[:3, :3] = R
+                    Rt_tmp[:3, 3] = tW2C
+                    view_matrix = Rt_tmp.transpose(0, 1)
+                    render_pkg = scene_model.render(
+                        self.width // ds,
+                        self.height // ds,
+                        view_matrix,
+                        scaling_modifier=1,
+                        bg=torch.zeros(3, device="cuda"),
+                    )
+                    rendered = render_pkg["render"]
+                    photo = (rendered - target).abs().mean()
+                    loss = loss + self.pose_photometric_weight * photo
+
+                loss.backward()
+                optimizer.step()
+
+        refined = torch.eye(4, device="cuda")
+        refined[:3, :3] = sixD2mtx(rW2C)
+        refined[:3, 3] = tW2C
+        return refined
 
     def build_problem(self,
                       desc_kpts_list: list[DescribedKeypoints],
@@ -229,7 +337,15 @@ class PoseInitializer():
         return Rts, f, final_residual
 
     @torch.no_grad()
-    def initialize_incremental(self, keyframes: list[Keyframe], curr_desc_kpts: DescribedKeypoints, index: int, is_test: bool, curr_img):
+    def initialize_incremental(
+        self,
+        keyframes: list[Keyframe],
+        curr_desc_kpts: DescribedKeypoints,
+        index: int,
+        is_test: bool,
+        curr_img,
+        scene_model=None,
+    ):
         """
         【位姿估计模块】增量位姿初始化
         
@@ -256,6 +372,12 @@ class PoseInitializer():
         uvs = []
         confs = []
         match_indices = []
+        stats = {
+            "n_correspondences": 0,
+            "n_corr_guided": 0,
+            "pnp_inliers": 0,
+            "pnp_success": False,
+        }
         for keyframe in keyframes:
             # 匹配当前帧与历史关键帧并过滤外点
             matches = self.matcher(curr_desc_kpts, keyframe.desc_kpts, remove_outliers=True, update_kpts_flag="all", kID=index, kID_other=keyframe.index)
@@ -266,10 +388,25 @@ class PoseInitializer():
             confs.append(keyframe.desc_kpts.pts_conf[matches.idx_other[mask]])
             match_indices.append(matches.idx[mask])
 
+        if self.use_correspondence_guided_pose_init and len(keyframes) > 0:
+            pts_w, uv_curr, corr_conf, n_corr = self._collect_rendered_correspondences(
+                keyframes[0], curr_desc_kpts, scene_model, index
+            )
+            if pts_w is not None:
+                xyz.append(pts_w)
+                uvs.append(uv_curr)
+                confs.append(corr_conf)
+                match_indices.append(torch.zeros_like(corr_conf, dtype=torch.long))
+                stats["n_corr_guided"] = n_corr
+
+        if len(xyz) == 0:
+            return None, stats
+
         xyz = torch.cat(xyz, dim=0)
         uvs = torch.cat(uvs, dim=0)
         confs = torch.cat(confs, dim=0)
         match_indices = torch.cat(match_indices, dim=0)
+        stats["n_correspondences"] = int(xyz.shape[0])
 
         # Subsample the points if there are too many
         # 先按置信度采样控制 PnP 输入规模
@@ -286,6 +423,7 @@ class PoseInitializer():
         Rs6D_init = keyframes[0].rW2C
         ts_init = keyframes[0].tW2C
         Rt, inliers = self.PnPRANSAC(uvs, xyz, self.f, self.centre, Rs6D_init, ts_init, confs)
+        stats["pnp_inliers"] = int(inliers.sum().item())
 
         xyz = xyz[inliers]
         uvs = uvs[inliers]
@@ -310,14 +448,18 @@ class PoseInitializer():
         Rt[:3, :3] = sixD2mtx(Rs6D)[0]
         Rt[:3, 3] = ts[0]
 
+        if self.use_pose_reprojection_loss or self.use_pose_photometric_refine:
+            Rt = self._refine_pose_with_renderer(Rt, xyz, uvs, curr_img, scene_model)
+
         # Check if we have sufficiently many inliers
         # 训练阶段要求足够内点以避免错误注册
-        if is_test or mask.sum() > self.min_num_inliers:
+        if is_test or (mask.sum() > self.min_num_inliers and stats["pnp_inliers"] >= self.min_pnp_inliers):
             # Return the pose of the current frame
-            return Rt
+            stats["pnp_success"] = True
+            return Rt, stats
         else:
             print("Too few inliers for pose initialization")
             # Remove matches as we prevent the current frame from being registered
             for keyframe in keyframes:
                 keyframe.desc_kpts.matches.pop(index, None)
-            return None
+            return None, stats
