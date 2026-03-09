@@ -175,12 +175,24 @@ if __name__ == "__main__":
         # 基于匹配点位移判断是否生成新关键帧
         # 关键帧选择策略：当相机运动足够大时才添加关键帧，避免冗余
         dist = torch.norm(curr_prev_matches.kpts - curr_prev_matches.kpts_other, dim=-1)
+        median_displacement = dist.median().item() if len(dist) > 0 else 0.0
         should_add_keyframe = (
-            dist.median() > min_displacement  # 中位位移超过阈值
+            len(curr_prev_matches.kpts) > 0
+            and median_displacement > min_displacement  # 中位位移超过阈值
             and len(curr_prev_matches.kpts) > args.min_num_inliers  # 匹配点数量足够
         )
         # 测试帧始终加入，用于姿态估计和评估（但不参与训练）
         should_add_keyframe |= info["is_test"]
+        info.setdefault("diagnostics", {})
+        info["diagnostics"].update(
+            {
+                "frame_id": int(frameID),
+                "median_displacement_px": float(median_displacement),
+                "match_count_prev_frame": int(len(curr_prev_matches.kpts)),
+                "min_displacement_px": float(min_displacement),
+                "should_add_keyframe": bool(should_add_keyframe),
+            }
+        )
         increment_runtime(runtimes["Load"], start_time)
 
         if should_add_keyframe:
@@ -197,6 +209,11 @@ if __name__ == "__main__":
                 Rts, f, _ = pose_initializer.initialize_bootstrap(bootstrap_desc_kpts)
                 focal = f.cpu().item()
                 increment_runtime(runtimes["BAB"], start_time)
+                for keyframe_dict in bootstrap_keyframe_dicts:
+                    keyframe_dict["info"].setdefault("diagnostics", {})
+                    keyframe_dict["info"]["diagnostics"].update(
+                        pose_initializer.last_bootstrap_stats
+                    )
                 
                 # 为每个Bootstrap关键帧创建Keyframe对象并添加到场景
                 for index, (keyframe_dict, desc_kpts, Rt) in enumerate(
@@ -299,6 +316,11 @@ if __name__ == "__main__":
                     prev_keyframes, desc_kpts, n_keyframes, info["is_test"], image
                 )
                 increment_runtime(runtimes["BAI"], start_time)
+                info.setdefault("diagnostics", {})
+                info["diagnostics"].update(pose_initializer.last_incremental_stats)
+                info["diagnostics"]["matched_prev_keyframes"] = [
+                    int(kf.index) for kf in prev_keyframes
+                ]
                 
                 start_time = time.time()
                 if Rt is not None:  # 姿态估计成功
@@ -346,6 +368,14 @@ if __name__ == "__main__":
             start_time = time.time()
             scene_model.place_anchor_if_needed()
             increment_runtime(runtimes["anc"], start_time)
+
+            if n_keyframes > 0 and len(scene_model.keyframes) > 0:
+                scene_model.keyframes[-1].info.setdefault("diagnostics", {}).update(
+                    {
+                        "num_anchors": int(len(scene_model.anchors)),
+                        "num_gaussians": int(scene_model.n_active_gaussians),
+                    }
+                )
 
             n_keyframes += 1
             # 更新上一帧的描述子（用于下一帧的匹配）
