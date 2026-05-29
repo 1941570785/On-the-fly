@@ -136,6 +136,492 @@ def get_args():
     parser.add_argument('--display_runtimes', action='store_true', 
                         help="Display runtimes for each step in the tqdm bar")
 
+    ## Paper-aligned risk admission (default off keeps baseline unchanged)
+    parser.add_argument(
+        '--risk_admission_mode',
+        type=str,
+        default='off',
+        choices=[
+            'off',
+            'paper_aligned_baseline_passthrough',
+            'paper_aligned_semantic_v1',
+        ],
+        help='Risk admission mode. off keeps baseline runtime unchanged.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_commit_bridge',
+        type=str,
+        default='true_source_commit',
+        choices=['off', 'semantic_surrogate', 'true_source_commit'],
+        help='Recovery commit bridge mode for semantic runtime.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_commit_control',
+        type=str,
+        default='off',
+        choices=[
+            'off',
+            'conservative',
+            'adaptive',
+            'conservative_gap_aware',
+            'conservative_gap_aware_v2',
+            'recovery_commit_strict_v3',
+            'recovery_commit_balanced_v4',
+            'recovery_commit_rescue_v5',
+        ],
+        help='Post-success recovery commit control mode. off keeps prior behavior.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_window_size',
+        type=int,
+        default=30,
+        help='Sliding window size for recovery commit rate control.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_commit_max_per_window',
+        type=int,
+        default=5,
+        help='Maximum recovery commits per sliding window.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_candidate_max_age',
+        type=int,
+        default=180,
+        help='Maximum source age allowed for recovery commit candidate.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_hold_max_retries',
+        type=int,
+        default=4,
+        help='Maximum hold retries before rejecting a recovery candidate.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_hold_retry_interval',
+        type=int,
+        default=6,
+        help='Retry interval (ticks) for held recovery candidates.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_density_upper_per_100',
+        type=float,
+        default=46.0,
+        help='Density upper bound (keyframes per 100 frames) for recovery commits.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_gap_override_threshold',
+        type=float,
+        default=5.0,
+        help='Enable gap-aware override when local main-chain gap reaches this threshold.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_gap_override_max_per_interval',
+        type=int,
+        default=2,
+        help='Maximum override commits in each high-risk gap interval.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_gap_override_density_upper_per_100',
+        type=float,
+        default=55.0,
+        help='Density upper bound for allowing gap-aware overrides.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_gap_override_min_v',
+        type=float,
+        default=0.25,
+        help='Minimum V_t for a gap-aware override candidate.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_gap_override_min_q',
+        type=float,
+        default=0.10,
+        help='Minimum Q_t for a gap-aware override candidate.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v2_source_gap_trigger',
+        type=int,
+        default=20,
+        help='Enable v2 override when source gap to last committed reaches this threshold.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v2_predicted_gap_trigger',
+        type=int,
+        default=20,
+        help='Enable v2 override when predicted gap if hold exceeds this threshold.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v2_episode_override_budget',
+        type=int,
+        default=2,
+        help='Maximum v2 overrides allowed in one long-gap episode.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v3_density_upper_per_100',
+        type=float,
+        default=42.0,
+        help='Strict v3 density upper bound (keyframes per 100 frames).',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v3_gap_critical_trigger',
+        type=int,
+        default=18,
+        help='Strict v3 source gap trigger for gap-critical recovery commit.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v3_gap_hard_limit',
+        type=int,
+        default=20,
+        help='Strict v3 hard predicted gap limit.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v3_window_size',
+        type=int,
+        default=50,
+        help='Strict v3 commit accounting window size.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v3_max_normal_per_window',
+        type=int,
+        default=1,
+        help='Strict v3 max support-ranked normal commits per window.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v3_max_gap_critical_per_window',
+        type=int,
+        default=2,
+        help='Strict v3 max gap-critical commits per window.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v3_min_source_gap',
+        type=int,
+        default=5,
+        help='Strict v3 minimum source-frame gap to avoid local over-stacking.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v3_support_topk',
+        type=int,
+        default=1,
+        help='Strict v3 support top-k kept for sparse normal commits.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v3_anchor_guard_enabled',
+        type=lambda x: str(x).strip().lower() in {'1', 'true', 'yes', 'y', 't'},
+        default=True,
+        help='Enable strict v3 anchor-aware guard.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v3_anchor_soft_limit',
+        type=int,
+        default=5,
+        help='Strict v3 anchor soft limit for normal commits.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v3_min_v',
+        type=float,
+        default=0.25,
+        help='Strict v3 minimum V_t for eligible recovery commit.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v3_min_q',
+        type=float,
+        default=0.10,
+        help='Strict v3 minimum Q_t for eligible recovery commit.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v3_max_r',
+        type=float,
+        default=0.75,
+        help='Strict v3 maximum R_t for eligible recovery commit.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_density_lower_per_100',
+        type=float,
+        default=28.0,
+        help='Balanced v4 density lower bound.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_density_target_per_100',
+        type=float,
+        default=35.0,
+        help='Balanced v4 density target center.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_density_upper_per_100',
+        type=float,
+        default=42.0,
+        help='Balanced v4 density soft upper bound.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_density_hard_upper_per_100',
+        type=float,
+        default=50.0,
+        help='Balanced v4 density hard upper bound.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_gap_trigger',
+        type=int,
+        default=18,
+        help='Balanced v4 source gap trigger for gap rescue.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_gap_hard_limit',
+        type=int,
+        default=20,
+        help='Balanced v4 hard gap limit.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_gap_rescue_budget_per_episode',
+        type=int,
+        default=4,
+        help='Balanced v4 gap rescue budget per long-gap episode.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_window_size',
+        type=int,
+        default=50,
+        help='Balanced v4 decision window size.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_normal_topk_below_lower',
+        type=int,
+        default=2,
+        help='Balanced v4 support top-k when density below lower bound.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_normal_topk_in_band',
+        type=int,
+        default=1,
+        help='Balanced v4 support top-k in target band.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_normal_topk_above_upper',
+        type=int,
+        default=0,
+        help='Balanced v4 support top-k when density above upper bound.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_min_source_gap',
+        type=int,
+        default=4,
+        help='Balanced v4 minimum source gap for non-gap-rescue commits.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_min_v',
+        type=float,
+        default=0.25,
+        help='Balanced v4 minimum V_t.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_min_q',
+        type=float,
+        default=0.10,
+        help='Balanced v4 minimum Q_t.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_max_r',
+        type=float,
+        default=0.75,
+        help='Balanced v4 maximum R_t.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_anchor_target_min',
+        type=int,
+        default=4,
+        help='Balanced v4 anchor target lower bound.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_anchor_target_max',
+        type=int,
+        default=5,
+        help='Balanced v4 anchor target upper bound.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_anchor_soft_upper',
+        type=int,
+        default=6,
+        help='Balanced v4 anchor soft upper guard.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_retry_extension_for_gap',
+        type=lambda x: str(x).strip().lower() in {'1', 'true', 'yes', 'y', 't'},
+        default=True,
+        help='Allow retry extension for gap-critical candidates in v4.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v4_retry_extension_for_coverage',
+        type=lambda x: str(x).strip().lower() in {'1', 'true', 'yes', 'y', 't'},
+        default=True,
+        help='Allow retry extension for coverage-floor candidates in v4.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_density_lower_per_100',
+        type=float,
+        default=28.0,
+        help='Rescue v5 density lower bound.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_density_target_per_100',
+        type=float,
+        default=35.0,
+        help='Rescue v5 density target center.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_density_upper_per_100',
+        type=float,
+        default=42.0,
+        help='Rescue v5 density soft upper bound.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_density_hard_upper_per_100',
+        type=float,
+        default=50.0,
+        help='Rescue v5 density hard upper bound.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_gap_trigger',
+        type=int,
+        default=18,
+        help='Rescue v5 source gap trigger.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_gap_hard_limit',
+        type=int,
+        default=20,
+        help='Rescue v5 hard gap limit.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_gap_rescue_base_budget',
+        type=int,
+        default=4,
+        help='Rescue v5 base gap rescue budget per episode.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_window_size',
+        type=int,
+        default=50,
+        help='Rescue v5 ranking window size.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_normal_topk_below_lower',
+        type=int,
+        default=2,
+        help='Rescue v5 normal top-k below lower density.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_normal_topk_in_band',
+        type=int,
+        default=1,
+        help='Rescue v5 normal top-k in target band.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_normal_topk_above_upper',
+        type=int,
+        default=0,
+        help='Rescue v5 normal top-k above upper density.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_coverage_topk',
+        type=int,
+        default=3,
+        help='Rescue v5 relaxed top-k for coverage rescue.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_min_source_gap',
+        type=int,
+        default=4,
+        help='Rescue v5 minimum source gap for normal commits.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_min_v',
+        type=float,
+        default=0.25,
+        help='Rescue v5 minimum V_t.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_min_q',
+        type=float,
+        default=0.10,
+        help='Rescue v5 minimum Q_t.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_max_r',
+        type=float,
+        default=0.75,
+        help='Rescue v5 maximum R_t.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_anchor_target_min',
+        type=int,
+        default=4,
+        help='Rescue v5 anchor target lower bound.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_anchor_target_max',
+        type=int,
+        default=5,
+        help='Rescue v5 anchor target upper bound.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_anchor_soft_upper',
+        type=int,
+        default=6,
+        help='Rescue v5 anchor soft upper bound.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_growth_window_short',
+        type=int,
+        default=100,
+        help='Rescue v5 short growth window size.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_growth_window_long',
+        type=int,
+        default=200,
+        help='Rescue v5 long growth window size.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_growth_plateau_min_short',
+        type=int,
+        default=10,
+        help='Rescue v5 minimum keyframe growth in short window.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_growth_plateau_min_long',
+        type=int,
+        default=20,
+        help='Rescue v5 minimum keyframe growth in long window.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_retry_extension_for_gap',
+        type=lambda x: str(x).strip().lower() in {'1', 'true', 'yes', 'y', 't'},
+        default=True,
+        help='Allow retry extension for gap rescue in v5.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v5_retry_extension_for_coverage',
+        type=lambda x: str(x).strip().lower() in {'1', 'true', 'yes', 'y', 't'},
+        default=True,
+        help='Allow retry extension for coverage rescue in v5.',
+    )
+    parser.add_argument(
+        '--paper_aligned_contract_trace_path',
+        type=str,
+        default='',
+        help='Optional output JSON path for runtime contract trace.',
+    )
+    parser.add_argument(
+        '--paper_aligned_lifecycle_csv',
+        type=str,
+        default='',
+        help='Optional lifecycle CSV path for paper-aligned semantic mode.',
+    )
+    parser.add_argument(
+        '--max_frames',
+        type=int,
+        default=-1,
+        help='Debug-only frame limit for short runs. -1 means no limit.',
+    )
+
     ## Checkpoint options
     # 输出与 checkpoint 相关
     parser.add_argument('-m', '--model_path', default="", 

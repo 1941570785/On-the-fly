@@ -1,0 +1,526 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from .recovery_commit_control import RecoveryCommitController
+from .semantic_runtime import SemanticV1RuntimePolicy
+
+
+def _to_bool(x: Any) -> bool:
+    if isinstance(x, bool):
+        return x
+    if x is None:
+        return False
+    if isinstance(x, (int, float)):
+        return x != 0
+    return str(x).strip().lower() in {"1", "true", "yes", "y", "t"}
+
+
+class PaperAlignedRuntimeGate:
+    def __init__(self, args: Any) -> None:
+        self.mode = str(getattr(args, "risk_admission_mode", "off") or "off")
+        self.trace_path = str(getattr(args, "paper_aligned_contract_trace_path", "") or "").strip()
+        self.recovery_bridge_mode = str(
+            getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit") or "true_source_commit"
+        )
+        self.recovery_commit_control_mode = str(
+            getattr(args, "paper_aligned_recovery_commit_control", "off") or "off"
+        )
+        self.recovery_window_size = int(getattr(args, "paper_aligned_recovery_window_size", 30) or 30)
+        self.trace_events: list[dict[str, Any]] = []
+        self._event_index: dict[int, int] = {}
+        self._pending_true_source_commits: list[dict[str, Any]] = []
+        self._held_true_source_commits: list[dict[str, Any]] = []
+        self.true_recovery_commit_events: list[dict[str, Any]] = []
+        self.recovery_commit_control_events: list[dict[str, Any]] = []
+        self.semantic_policy: SemanticV1RuntimePolicy | None = None
+        self.recovery_commit_controller = RecoveryCommitController(args)
+        if self.mode == "paper_aligned_semantic_v1":
+            self.semantic_policy = SemanticV1RuntimePolicy()
+
+    def _get_event(self, frame_id: int) -> dict[str, Any] | None:
+        idx = self._event_index.get(frame_id)
+        if idx is None:
+            return None
+        if idx < 0 or idx >= len(self.trace_events):
+            return None
+        return self.trace_events[idx]
+
+    def _source_payload(self, frame_id: int, info: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "source_frame_id": int(frame_id),
+            "source_input_index": int(frame_id),
+            "source_image_name": str(info.get("image_name", info.get("image_path", "")) or ""),
+            "image_path": str(info.get("image_path", "")),
+            "source_info": dict(info),
+            "image_tensor": info.get("_image_tensor"),
+            "desc_kpts": info.get("_desc_kpts"),
+            "inlier_evidence": info.get("_inlier_evidence", {}),
+            "local_context": info.get("_local_context", {}),
+            "D_t_evidence": dict(evidence),
+        }
+
+    def pop_pending_true_source_commits(self, current_tick_frame_id: int | None = None) -> list[dict[str, Any]]:
+        items = list(self._pending_true_source_commits)
+        self._pending_true_source_commits = []
+        if current_tick_frame_id is not None and self._held_true_source_commits:
+            remaining: list[dict[str, Any]] = []
+            for item in self._held_true_source_commits:
+                if int(item.get("_next_retry_tick", 0)) <= int(current_tick_frame_id):
+                    items.append(item)
+                else:
+                    remaining.append(item)
+            self._held_true_source_commits = remaining
+        return items
+
+    def _recent_recovery_commit_count(self, current_tick_frame_id: int) -> int:
+        if current_tick_frame_id <= 0:
+            return 0
+        lo = max(1, int(current_tick_frame_id) - self.recovery_window_size + 1)
+        count = 0
+        for ev in self.true_recovery_commit_events:
+            tick = int(ev.get("recovery_attempt_tick", -1))
+            if lo <= tick <= int(current_tick_frame_id) and bool(ev.get("final_keyframe_incremented", False)):
+                count += 1
+        return count
+
+    def _current_keyframe_density(self, current_tick_frame_id: int) -> float:
+        if current_tick_frame_id <= 0:
+            return 0.0
+        final_count = self._current_keyframe_count()
+        return (100.0 * float(final_count)) / float(max(current_tick_frame_id, 1))
+
+    def _current_keyframe_count(self) -> int:
+        return int(sum(1 for e in self.trace_events if bool(e.get("final_keyframe_incremented", False))))
+
+    def _main_chain_gap_p90_recent(self) -> float:
+        ticks = sorted(
+            int(e.get("frame_id", -1))
+            for e in self.trace_events
+            if bool(e.get("final_keyframe_incremented", False))
+        )
+        if len(ticks) < 3:
+            return 999.0
+        gaps = [ticks[i] - ticks[i - 1] for i in range(1, len(ticks))]
+        if not gaps:
+            return 999.0
+        gaps.sort()
+        idx = int(round((len(gaps) - 1) * 0.9))
+        idx = max(0, min(len(gaps) - 1, idx))
+        return float(gaps[idx])
+
+    def _keyframe_growth_recent(self, current_tick_frame_id: int, window: int = 100) -> int:
+        if current_tick_frame_id <= 0:
+            return 0
+        ticks = sorted(
+            int(e.get("frame_id", -1))
+            for e in self.trace_events
+            if bool(e.get("final_keyframe_incremented", False))
+        )
+        if not ticks:
+            return 0
+        now_lo = max(1, int(current_tick_frame_id) - int(window) + 1)
+        prev_lo = max(1, int(current_tick_frame_id) - int(2 * window) + 1)
+        prev_hi = max(0, int(current_tick_frame_id) - int(window))
+        now_cnt = sum(1 for t in ticks if now_lo <= t <= int(current_tick_frame_id))
+        prev_cnt = sum(1 for t in ticks if prev_lo <= t <= prev_hi)
+        return int(now_cnt - prev_cnt)
+
+    def _final_committed_source_ticks(self) -> list[int]:
+        return sorted(
+            int(e.get("frame_id", -1))
+            for e in self.trace_events
+            if bool(e.get("final_keyframe_incremented", False))
+        )
+
+    def _last_committed_source_before(self, source_frame_id: int) -> tuple[int, str]:
+        ticks: list[tuple[int, str]] = sorted(
+            (
+                int(e.get("frame_id", -1)),
+                str(e.get("action", "")),
+            )
+            for e in self.trace_events
+            if bool(e.get("final_keyframe_incremented", False))
+        )
+        prev_tick = -1
+        prev_action = ""
+        for tick, action in ticks:
+            if tick < int(source_frame_id):
+                prev_tick = tick
+                prev_action = action
+            else:
+                break
+        return prev_tick, prev_action
+
+    def _source_already_committed(self, source_frame_id: int) -> bool:
+        event = self._get_event(int(source_frame_id))
+        if event is None:
+            return False
+        return bool(event.get("final_keyframe_incremented", False)) or bool(
+            event.get("source_recovery_committed", False)
+        )
+
+    def _current_anchor_count(self) -> int | None:
+        # Runtime does not expose authoritative anchor cardinality here.
+        # Do not reinterpret anchor_update call count as anchor count.
+        return None
+
+    def decide_recovered_commit(
+        self,
+        recovered: dict[str, Any],
+        current_tick_frame_id: int,
+    ) -> dict[str, Any]:
+        source_frame_id = int(recovered.get("source_frame_id", -1))
+        source_input_index = int(recovered.get("source_input_index", source_frame_id))
+        source_event = self._get_event(source_frame_id) or {}
+        prev_committed_source, prev_committed_action = self._last_committed_source_before(source_input_index)
+        if prev_committed_source >= 0:
+            source_gap_to_last_committed = max(0, source_input_index - prev_committed_source)
+            current_open_gap = max(0, int(current_tick_frame_id) - prev_committed_source)
+        else:
+            source_gap_to_last_committed = 999
+            current_open_gap = 999
+        predicted_gap_if_hold = max(
+            source_gap_to_last_committed + int(self.recovery_commit_controller.retry_interval),
+            current_open_gap,
+        )
+        episode_trigger = max(
+            int(getattr(self.recovery_commit_controller, "v2_source_gap_trigger", 0)),
+            int(getattr(self.recovery_commit_controller, "v4_gap_trigger", 0)),
+            int(getattr(self.recovery_commit_controller, "v5_gap_trigger", 0)),
+        )
+        long_gap_episode_id = prev_committed_source if current_open_gap >= int(episode_trigger) else 0
+        source_num_inliers = max(
+            int(source_event.get("num_pnp_inliers", 0) or 0),
+            int(source_event.get("num_miniba_inliers", 0) or 0),
+        )
+        source_action = str(source_event.get("action", ""))
+        is_surrogate = bool(source_frame_id == int(current_tick_frame_id))
+        is_contamination_risk = bool(source_action not in {"defer_recoverable", "direct_admit"})
+        anchor_count_before = self._current_anchor_count()
+        growth_short = self._keyframe_growth_recent(
+            current_tick_frame_id,
+            window=int(getattr(self.recovery_commit_controller, "v5_growth_window_short", 100)),
+        )
+        growth_long = self._keyframe_growth_recent(
+            current_tick_frame_id,
+            window=int(getattr(self.recovery_commit_controller, "v5_growth_window_long", 200)),
+        )
+        density_now = self._current_keyframe_density(current_tick_frame_id)
+        context = {
+            "current_tick_frame_id": int(current_tick_frame_id),
+            "recent_recovery_commit_count": self._recent_recovery_commit_count(current_tick_frame_id),
+            "keyframe_density_per_100": density_now,
+            "current_keyframe_count": self._current_keyframe_count(),
+            "main_chain_gap_p90_recent": self._main_chain_gap_p90_recent(),
+            "keyframe_growth_recent": self._keyframe_growth_recent(current_tick_frame_id, window=100),
+            "recent_keyframe_growth_short": growth_short,
+            "recent_keyframe_growth_long": growth_long,
+            "starvation_risk": bool(
+                growth_short
+                <= int(getattr(self.recovery_commit_controller, "v5_growth_plateau_min_short", 10))
+                and density_now
+                < float(getattr(self.recovery_commit_controller, "v5_density_lower", 28.0))
+            ),
+            "source_already_committed": self._source_already_committed(
+                source_frame_id
+            ),
+            "source_gap_to_last_committed": source_gap_to_last_committed,
+            "predicted_gap_if_hold": predicted_gap_if_hold,
+            "long_gap_episode_id": long_gap_episode_id,
+            "source_committed_action": prev_committed_action,
+            "anchor_count_before": anchor_count_before,
+            "anchor_count_available": bool(anchor_count_before is not None),
+            "source_num_inliers": int(source_num_inliers),
+            "is_surrogate": is_surrogate,
+            "is_contamination_risk": is_contamination_risk,
+            "open_gap_unclosed": bool(current_open_gap > int(episode_trigger)),
+        }
+        decision = self.recovery_commit_controller.decide(recovered, context)
+        payload = {
+            "source_frame_id": source_frame_id,
+            "current_frame_id": int(current_tick_frame_id),
+            "source_input_index": source_input_index,
+            "current_tick_frame_id": int(current_tick_frame_id),
+            "pool_enter_tick": int(recovered.get("pool_enter_tick", -1)),
+            "recovery_attempt_tick": int(recovered.get("recovery_attempt_tick", -1)),
+            "recovery_attempt_count": int(recovered.get("recovery_attempt_count", 0)),
+            "control_mode": self.recovery_commit_control_mode,
+            "decision": decision.action,
+            "decision_reason": decision.reason,
+            "source_gap_to_last_committed": source_gap_to_last_committed,
+            "predicted_gap_if_hold": predicted_gap_if_hold,
+            "long_gap_episode_id": long_gap_episode_id,
+            "episode_override_count": int(decision.debug.get("episode_override_count", 0)),
+            "density_before": float(decision.debug.get("density_before", 0.0)),
+            "density_after": float(decision.debug.get("density_after", 0.0)),
+            "override_reason": str(decision.debug.get("override_reason", "")),
+            "commit_channel": str(decision.debug.get("commit_channel", "")),
+            "R_t": float(decision.debug.get("R_t", 0.0)),
+            "V_t": float(decision.debug.get("V_t", 0.0)),
+            "Q_t": float(decision.debug.get("Q_t", 0.0)),
+            "num_matches": int(decision.debug.get("num_matches", 0) or 0),
+            "num_inliers": int(decision.debug.get("num_inliers", 0) or 0),
+            "window_id": int(decision.debug.get("window_id", 0) or 0),
+            "window_candidate_rank": int(decision.debug.get("window_candidate_rank", 0) or 0),
+            "window_support_score": float(decision.debug.get("window_support_score", 0.0) or 0.0),
+            "support_score": float(decision.debug.get("support_score", 0.0) or 0.0),
+            "window_normal_commit_count": int(decision.debug.get("window_normal_commit_count", 0) or 0),
+            "window_gap_critical_commit_count": int(
+                decision.debug.get("window_gap_critical_commit_count", 0) or 0
+            ),
+            "window_budget_used": int(decision.debug.get("window_budget_used", 0) or 0),
+            "rescue_budget_used": int(decision.debug.get("rescue_budget_used", 0) or 0),
+            "gap_rescue_budget_used": int(decision.debug.get("gap_rescue_budget_used", 0) or 0),
+            "density_state": str(decision.debug.get("density_state", "")),
+            "expected_min_keyframes": float(decision.debug.get("expected_min_keyframes", 0.0) or 0.0),
+            "keyframe_deficit": float(decision.debug.get("keyframe_deficit", 0.0) or 0.0),
+            "recent_keyframe_growth": int(decision.debug.get("recent_keyframe_growth", 0) or 0),
+            "growth_plateau": bool(decision.debug.get("growth_plateau", False)),
+            "rescue_channel": str(decision.debug.get("rescue_channel", "")),
+            "anchor_count_before": int(decision.debug.get("anchor_count_before", 0) or 0),
+            "anchor_count_after_if_available": decision.debug.get("anchor_count_after_if_available", None),
+            "anchor_guard_triggered": bool(decision.debug.get("anchor_guard_triggered", False)),
+            "anchor_guard_action": str(decision.debug.get("anchor_guard_action", "")),
+            "anchor_target_state": str(decision.debug.get("anchor_target_state", "")),
+            "anchor_override_reason": str(decision.debug.get("anchor_override_reason", "")),
+            "retry_limit_extended": bool(decision.debug.get("retry_limit_extended", False)),
+            "retry_extension_reason": str(decision.debug.get("retry_extension_reason", "")),
+            "budget_override_reason": str(decision.debug.get("budget_override_reason", "")),
+            "coverage_rescue_triggered": bool(decision.debug.get("coverage_rescue_triggered", False)),
+            "gap_rescue_triggered": bool(decision.debug.get("gap_rescue_triggered", False)),
+            "blocked_by_hard_semantics": bool(decision.debug.get("blocked_by_hard_semantics", False)),
+            "keyframe_growth_recent": int(decision.debug.get("keyframe_growth_recent", 0) or 0),
+            "starvation_risk": bool(decision.debug.get("starvation_risk", False)),
+            "is_gap_critical": bool(decision.debug.get("is_gap_critical", False)),
+            "is_coverage_floor": bool(decision.debug.get("is_coverage_floor", False)),
+            "is_support_topk": bool(decision.debug.get("is_support_topk", False)),
+            "is_coverage_sparse": bool(decision.debug.get("is_coverage_sparse", False)),
+            "is_duplicate": bool(decision.debug.get("is_duplicate", False)),
+            "is_surrogate": bool(decision.debug.get("is_surrogate", False)),
+            "is_contamination_risk": bool(decision.debug.get("is_contamination_risk", False)),
+            "blocked_reason": str(decision.debug.get("blocked_reason", "")),
+            "debug": decision.debug,
+        }
+        self.recovery_commit_control_events.append(payload)
+        return payload
+
+    def hold_recovered_source(
+        self,
+        recovered: dict[str, Any],
+        current_tick_frame_id: int,
+        reason: str,
+    ) -> None:
+        item = dict(recovered)
+        retries = int(item.get("_hold_retries", 0)) + 1
+        item["_hold_retries"] = retries
+        item["_hold_reason"] = str(reason)
+        item["_next_retry_tick"] = int(current_tick_frame_id) + int(
+            self.recovery_commit_controller.retry_interval
+        )
+        self._held_true_source_commits.append(item)
+
+    def reject_recovered_source(self, recovered: dict[str, Any], reason: str) -> None:
+        event = self._get_event(int(recovered.get("source_frame_id", -1)))
+        if event is not None:
+            event["source_recovery_commit"] = True
+            event["source_recovery_payload_present"] = True
+            event["source_recovery_committed"] = False
+            event["source_recovery_failure_reason"] = str(reason)
+
+    def decide(
+        self,
+        frame_id: int,
+        info: dict[str, Any],
+        baseline_should_add: bool,
+        phase: str = "incremental",
+        evidence: dict[str, Any] | None = None,
+    ) -> tuple[bool, str]:
+        action = "direct_admit" if baseline_should_add else "discard"
+        decision_meta: dict[str, Any] = {}
+
+        if self.mode == "paper_aligned_baseline_passthrough":
+            action = "direct_admit" if baseline_should_add else "discard"
+        elif self.mode == "paper_aligned_semantic_v1":
+            assert self.semantic_policy is not None
+            semantic_input = dict(evidence or {})
+            semantic = self.semantic_policy.decide(
+                frame_id=frame_id,
+                baseline_should_add=baseline_should_add,
+                evidence=semantic_input,
+                source_payload=self._source_payload(frame_id, info, semantic_input),
+            )
+            action = str(semantic["action"])
+            bridge_tag = "none"
+            if (
+                self.recovery_bridge_mode == "semantic_surrogate"
+                and action != "direct_admit"
+                and int((semantic.get("recovery_tick", {}) or {}).get("success", 0)) > 0
+                and bool(baseline_should_add)
+            ):
+                action = "current_frame_surrogate_commit"
+                bridge_tag = "semantic_surrogate"
+
+            if self.recovery_bridge_mode == "true_source_commit":
+                for recovered in self.semantic_policy.pop_recovered_sources():
+                    recovered["current_tick_frame_id"] = int(frame_id)
+                    recovered["current_tick_image_name"] = str(info.get("image_name", ""))
+                    recovered["bridge_type"] = "true_source_commit"
+                    self._pending_true_source_commits.append(recovered)
+
+            decision_meta = {
+                "R_t": semantic["scores"]["R_t"],
+                "V_t": semantic["scores"]["V_t"],
+                "Q_t": semantic["scores"]["Q_t"],
+                "C_t": semantic["scores"]["C_t"],
+                "B_R_t": semantic["scores"]["B_R_t"],
+                "recovery_pool_size": semantic["recovery_pool_size"],
+                "recovery_tick": semantic["recovery_tick"],
+                "recovery_bridge_tag": bridge_tag,
+                "thresholds": semantic["thresholds"],
+            }
+
+        admit = action in ("direct_admit", "current_frame_surrogate_commit")
+        event = {
+            "frame_id": int(frame_id),
+            "image_name": str(info.get("image_name", "")),
+            "is_test": _to_bool(info.get("is_test", False)),
+            "phase_at_decision": phase,
+            "baseline_should_add": bool(baseline_should_add),
+            "action": action,
+            "admit_to_chain": admit,
+            "mode": self.mode,
+            "decision_meta": decision_meta,
+            "pose_init_attempted": False,
+            "pose_init_success": None,
+            "pose_fail_detail": "",
+            "num_2d3d_correspondences": None,
+            "num_pnp_inliers": None,
+            "num_miniba_inliers": None,
+            "keyframe_add_called": False,
+            "gaussian_update_called": False,
+            "anchor_update_called": False,
+            "final_keyframe_incremented": False,
+            "drop_reason": "",
+            "source_recovery_commit": False,
+            "source_recovery_payload_present": False,
+            "source_recovery_committed": False,
+            "source_recovery_failure_reason": "",
+        }
+        self._event_index[int(frame_id)] = len(self.trace_events)
+        self.trace_events.append(event)
+        return admit, action
+
+    def mark_pose_attempt(self, frame_id: int) -> None:
+        event = self._get_event(frame_id)
+        if event is not None:
+            event["pose_init_attempted"] = True
+
+    def mark_pose_result(self, frame_id: int, success: bool) -> None:
+        event = self._get_event(frame_id)
+        if event is not None:
+            event["pose_init_attempted"] = True
+            event["pose_init_success"] = bool(success)
+            if not success and not event.get("drop_reason"):
+                event["drop_reason"] = "pose_init_failed"
+
+    def annotate_pose_debug(self, frame_id: int, debug: dict[str, Any]) -> None:
+        event = self._get_event(frame_id)
+        if event is None or not isinstance(debug, dict):
+            return
+        event["num_2d3d_correspondences"] = debug.get("num_2d3d_correspondences")
+        event["num_pnp_inliers"] = debug.get("num_pnp_inliers")
+        event["num_miniba_inliers"] = debug.get("num_miniba_inliers")
+        detail = str(debug.get("failure_reason", "") or "")
+        if detail:
+            event["pose_fail_detail"] = detail
+
+    def mark_keyframe_add(self, frame_id: int) -> None:
+        event = self._get_event(frame_id)
+        if event is not None:
+            event["keyframe_add_called"] = True
+
+    def mark_gaussian_update(self, frame_id: int) -> None:
+        event = self._get_event(frame_id)
+        if event is not None:
+            event["gaussian_update_called"] = True
+
+    def mark_anchor_update(self, frame_id: int) -> None:
+        event = self._get_event(frame_id)
+        if event is not None:
+            event["anchor_update_called"] = True
+
+    def mark_final_keyframe_increment(self, frame_id: int) -> None:
+        event = self._get_event(frame_id)
+        if event is not None:
+            event["final_keyframe_incremented"] = True
+
+    def mark_drop_reason(self, frame_id: int, reason: str) -> None:
+        event = self._get_event(frame_id)
+        if event is not None and reason:
+            event["drop_reason"] = str(reason)
+            if not event.get("pose_fail_detail"):
+                event["pose_fail_detail"] = str(reason)
+
+    def mark_true_source_recovery_attempt(
+        self,
+        source_frame_id: int,
+        current_tick_frame_id: int,
+        current_tick_image_name: str,
+        pool_enter_tick: int,
+        recovery_attempt_tick: int,
+    ) -> None:
+        event = self._get_event(source_frame_id)
+        if event is not None:
+            event["source_recovery_commit"] = True
+            event["source_recovery_payload_present"] = True
+            event["source_recovery_current_tick_frame_id"] = int(current_tick_frame_id)
+            event["source_recovery_current_tick_image_name"] = str(current_tick_image_name)
+            event["source_recovery_pool_enter_tick"] = int(pool_enter_tick)
+            event["source_recovery_attempt_tick"] = int(recovery_attempt_tick)
+
+    def mark_true_source_recovery_result(self, source_frame_id: int, committed: bool, reason: str = "") -> None:
+        event = self._get_event(source_frame_id)
+        if event is not None:
+            event["source_recovery_committed"] = bool(committed)
+            event["source_recovery_failure_reason"] = str(reason or "")
+            if committed:
+                event["source_recovery_commit"] = True
+                event["source_recovery_payload_present"] = True
+
+    def append_true_recovery_commit_event(self, payload: dict[str, Any]) -> None:
+        self.true_recovery_commit_events.append(dict(payload))
+
+    def flush_trace(self) -> None:
+        if not self.trace_path:
+            return
+        out = Path(self.trace_path).resolve()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, Any] = {
+            "mode": self.mode,
+            "num_events": len(self.trace_events),
+            "direct_admit": int(sum(1 for e in self.trace_events if e.get("action") == "direct_admit")),
+            "true_recovery_commit": int(sum(1 for e in self.trace_events if e.get("source_recovery_committed", False))),
+            "recovery_signal_bridge": int(
+                sum(1 for e in self.trace_events if e.get("action") == "current_frame_surrogate_commit")
+            ),
+            "defer_recoverable": int(sum(1 for e in self.trace_events if e.get("action") == "defer_recoverable")),
+            "discard": int(sum(1 for e in self.trace_events if e.get("action") == "discard")),
+            "direct_not_finalized": int(
+                sum(
+                    1
+                    for e in self.trace_events
+                    if e.get("action") in ("direct_admit", "current_frame_surrogate_commit")
+                    and not e.get("final_keyframe_incremented", False)
+                )
+            ),
+            "events": self.trace_events,
+            "true_recovery_commit_events": self.true_recovery_commit_events,
+            "recovery_commit_control_mode": self.recovery_commit_control_mode,
+            "recovery_commit_control_events": self.recovery_commit_control_events,
+        }
+        if self.semantic_policy is not None:
+            payload["semantic_summary"] = self.semantic_policy.summary()
+        out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

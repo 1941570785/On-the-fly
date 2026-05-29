@@ -13,6 +13,11 @@
 
 import os
 import time
+import atexit
+import json
+from collections import deque
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -36,6 +41,8 @@ from gaussianviewer import GaussianViewer
 from webviewer.webviewer import WebViewer
 from graphdecoviewer.types import ViewerMode
 from utils import align_mean_up_fwd, increment_runtime
+from paper_aligned_policy.runtime_gate import PaperAlignedRuntimeGate
+from scene.keyframe import pop_chosen_kfs_resolution_events
 
 if __name__ == "__main__":
     """
@@ -55,6 +62,22 @@ if __name__ == "__main__":
 
     # 解析命令行参数（数据路径、训练超参、可视化选项等）
     args = get_args()
+
+    risk_mode = getattr(args, "risk_admission_mode", "off") or "off"
+    runtime_gate = None
+    if risk_mode != "off":
+        print(
+            f"[risk_admission_mode={risk_mode}] contract runtime gate enabled "
+            "(off mode remains baseline path)."
+        )
+        runtime_gate = PaperAlignedRuntimeGate(args)
+        atexit.register(runtime_gate.flush_trace)
+        def _flush_chosen_kfs_resolution_events():
+            events = pop_chosen_kfs_resolution_events()
+            out = Path(args.model_path) / "chosen_kfs_resolution_events.json"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(events, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        atexit.register(_flush_chosen_kfs_resolution_events)
 
     # 根据输入路径类型选择数据集加载器
     # - 流式数据集：URL格式（如rtsp://），用于实时视频流
@@ -125,6 +148,7 @@ if __name__ == "__main__":
     needs_reboot = False
     bootstrap_keyframe_dicts = []
     bootstrap_desc_kpts = []
+    recent_pose_success = deque(maxlen=50)
 
     # Dict of runtimes for each step
     runtimes = ["Load", "BAB", "tri", "BAI", "Add", "Init", "Opt", "anc"]
@@ -133,8 +157,168 @@ if __name__ == "__main__":
     runtimes = {key: [0, 0] for key in runtimes}
     ## 场景重建主循环
     print(f"Starting reconstruction for {args.source_path}")
-    pbar = tqdm(range(0, len(dataset)))
+    total_frames = len(dataset) if args.max_frames is None or args.max_frames < 0 else min(len(dataset), int(args.max_frames))
+    pbar = tqdm(range(0, total_frames))
     reconstruction_start_time = time.time()
+
+    def _commit_true_source_frame(recovered: dict, control_decision: dict[str, Any] | None = None) -> None:
+        global n_keyframes
+        if runtime_gate is None:
+            return
+        source_payload = recovered.get("source_payload", {}) or {}
+        source_frame_id = int(recovered.get("source_frame_id", -1))
+        source_image = source_payload.get("image_tensor", None)
+        source_info = source_payload.get("source_info", None)
+        source_desc = source_payload.get("desc_kpts", None)
+        recovery_trace = {
+            "recovery_event_id": int(len(runtime_gate.true_recovery_commit_events) + 1),
+            "source_frame_id": source_frame_id,
+            "source_input_index": int(source_payload.get("source_input_index", source_frame_id)),
+            "source_image_name": str(source_payload.get("source_image_name", "")),
+            "current_tick_frame_id": int(recovered.get("current_tick_frame_id", -1)),
+            "current_tick_image_name": str(recovered.get("current_tick_image_name", "")),
+            "source_equals_current_frame": bool(
+                int(recovered.get("current_tick_frame_id", -1)) == source_frame_id
+            ),
+            "pool_enter_tick": int(recovered.get("pool_enter_tick", -1)),
+            "recovery_attempt_tick": int(recovered.get("recovery_attempt_tick", -1)),
+            "recovery_attempt_count": int(recovered.get("recovery_attempt_count", 0)),
+            "recovery_success": True,
+            "recovery_success_reason": "semantic_policy_success",
+            "materialized_source_keyframe": False,
+            "materialization_failure_reason": "",
+            "add_keyframe_called": False,
+            "add_keyframe_success": False,
+            "scene_keyframe_appended": False,
+            "final_keyframe_incremented": False,
+            "representation_update_called": False,
+            "representation_update_success": False,
+            "gaussian_update_called": False,
+            "gaussian_update_success": False,
+            "anchor_update_called": False,
+            "anchor_update_success": False,
+            "active_set_update_called": False,
+            "active_set_update_success": False,
+            "optimizer_received": False,
+            "final_model_contains_source_frame": False,
+            "failure_stage": "",
+            "failure_reason": "",
+            "commit_control_mode": str(getattr(args, "paper_aligned_recovery_commit_control", "off")),
+            "commit_control_decision": "commit",
+            "commit_control_reason": "",
+        }
+        if isinstance(control_decision, dict):
+            recovery_trace["commit_control_decision"] = str(control_decision.get("decision", "commit"))
+            recovery_trace["commit_control_reason"] = str(control_decision.get("decision_reason", ""))
+            recovery_trace["commit_control_debug"] = dict(control_decision.get("debug", {}))
+        runtime_gate.mark_true_source_recovery_attempt(
+            source_frame_id=source_frame_id,
+            current_tick_frame_id=int(recovered.get("current_tick_frame_id", -1)),
+            current_tick_image_name=str(recovered.get("current_tick_image_name", "")),
+            pool_enter_tick=int(recovered.get("pool_enter_tick", -1)),
+            recovery_attempt_tick=int(recovered.get("recovery_attempt_tick", -1)),
+        )
+        event = runtime_gate._get_event(source_frame_id)
+        if event is not None and bool(event.get("final_keyframe_incremented", False)):
+            recovery_trace["failure_stage"] = "duplicate_gate"
+            recovery_trace["failure_reason"] = "source_already_final_keyframe"
+            runtime_gate.mark_true_source_recovery_result(
+                source_frame_id, committed=False, reason="source_already_final_keyframe"
+            )
+            runtime_gate.append_true_recovery_commit_event(recovery_trace)
+            return
+        if n_keyframes < args.num_keyframes_miniba_bootstrap:
+            recovery_trace["failure_stage"] = "bootstrap_gate"
+            recovery_trace["failure_reason"] = "bootstrap_not_ready"
+            runtime_gate.mark_true_source_recovery_result(
+                source_frame_id, committed=False, reason="bootstrap_not_ready"
+            )
+            runtime_gate.append_true_recovery_commit_event(recovery_trace)
+            return
+        if source_image is None or source_desc is None:
+            recovery_trace["failure_stage"] = "source_payload"
+            recovery_trace["failure_reason"] = "missing_source_image_or_features"
+            recovery_trace["materialization_failure_reason"] = "missing_source_image_or_features"
+            runtime_gate.mark_true_source_recovery_result(
+                source_frame_id, committed=False, reason="missing_source_image_or_features"
+            )
+            runtime_gate.append_true_recovery_commit_event(recovery_trace)
+            return
+        if source_info is None:
+            source_info = {
+                "is_test": False,
+                "image_name": str(source_payload.get("source_image_name", "")),
+                "image_path": str(source_payload.get("image_path", "")),
+            }
+        source_info["_paper_aligned_insertion_type"] = "true_recovery_commit"
+        runtime_gate.mark_pose_attempt(source_frame_id)
+        prev_keyframes_src = scene_model.get_prev_keyframes(
+            args.num_prev_keyframes_miniba_incr,
+            True,
+            source_desc,
+            resolution_mode="paper_aligned_true_recovery",
+        )
+        Rt_src = pose_initializer.initialize_incremental(
+            prev_keyframes_src, source_desc, n_keyframes, bool(source_info.get("is_test", False)), source_image
+        )
+        runtime_gate.annotate_pose_debug(
+            source_frame_id, getattr(pose_initializer, "last_incremental_debug", {})
+        )
+        runtime_gate.mark_pose_result(source_frame_id, Rt_src is not None)
+        if Rt_src is None:
+            pose_debug = getattr(pose_initializer, "last_incremental_debug", {})
+            fail_reason = str(pose_debug.get("failure_reason", "") or "source_pose_init_failed")
+            recovery_trace["failure_stage"] = "pose"
+            recovery_trace["failure_reason"] = fail_reason
+            runtime_gate.mark_true_source_recovery_result(
+                source_frame_id, committed=False, reason=fail_reason
+            )
+            runtime_gate.append_true_recovery_commit_event(recovery_trace)
+            return
+        if args.use_colmap_poses and "Rt" in source_info:
+            Rt_src = source_info["Rt"]
+        source_kf = Keyframe(
+            source_image,
+            source_info,
+            source_desc,
+            Rt_src,
+            n_keyframes,
+            f,
+            dense_extractor,
+            depth_estimator,
+            triangulator,
+            args,
+        )
+        recovery_trace["materialized_source_keyframe"] = True
+        scene_model.add_keyframe(source_kf)
+        runtime_gate.mark_keyframe_add(source_frame_id)
+        recovery_trace["add_keyframe_called"] = True
+        recovery_trace["add_keyframe_success"] = True
+        recovery_trace["scene_keyframe_appended"] = True
+        recovery_trace["active_set_update_called"] = True
+        recovery_trace["active_set_update_success"] = True
+        scene_model.add_new_gaussians()
+        runtime_gate.mark_gaussian_update(source_frame_id)
+        recovery_trace["representation_update_called"] = True
+        recovery_trace["representation_update_success"] = True
+        recovery_trace["gaussian_update_called"] = True
+        recovery_trace["gaussian_update_success"] = True
+        if is_stream:
+            scene_model.optimize_async(args.num_iterations)
+        else:
+            scene_model.optimization_loop(args.num_iterations)
+        recovery_trace["optimizer_received"] = True
+        scene_model.place_anchor_if_needed()
+        runtime_gate.mark_anchor_update(source_frame_id)
+        recovery_trace["anchor_update_called"] = True
+        recovery_trace["anchor_update_success"] = True
+        n_keyframes += 1
+        runtime_gate.mark_final_keyframe_increment(source_frame_id)
+        runtime_gate.mark_true_source_recovery_result(source_frame_id, committed=True, reason="")
+        recovery_trace["final_keyframe_incremented"] = True
+        recovery_trace["final_model_contains_source_frame"] = True
+        runtime_gate.append_true_recovery_commit_event(recovery_trace)
+
     for frameID in pbar:
         start_time = time.time()
 
@@ -181,6 +365,140 @@ if __name__ == "__main__":
         )
         # 测试帧始终加入，用于姿态估计和评估（但不参与训练）
         should_add_keyframe |= info["is_test"]
+        baseline_should_add = should_add_keyframe
+        if runtime_gate is not None:
+            phase = (
+                "bootstrap"
+                if n_keyframes < args.num_keyframes_miniba_bootstrap
+                else "incremental"
+            )
+            info["_image_tensor"] = image
+            info["_desc_kpts"] = desc_kpts
+            info["_inlier_evidence"] = {"num_matches": int(len(curr_prev_matches.kpts))}
+            info["_local_context"] = {"phase": phase}
+            evidence = {
+                "median_displacement": float(dist.median().item()) if len(dist) > 0 else 0.0,
+                "displacement_threshold": float(min_displacement),
+                "num_matches": int(len(curr_prev_matches.kpts)),
+                "min_num_inliers_threshold": int(args.min_num_inliers),
+                "is_test": bool(info.get("is_test", False)),
+                "recent_pose_fail_rate": (
+                    1.0 - (sum(recent_pose_success) / max(len(recent_pose_success), 1))
+                    if len(recent_pose_success) > 0
+                    else 0.0
+                ),
+            }
+            should_add_keyframe, _ = runtime_gate.decide(
+                frameID, info, bool(baseline_should_add), phase=phase, evidence=evidence
+            )
+            if (
+                risk_mode == "paper_aligned_semantic_v1"
+                and getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit")
+                == "true_source_commit"
+            ):
+                for recovered in runtime_gate.pop_pending_true_source_commits(current_tick_frame_id=frameID):
+                    control = runtime_gate.decide_recovered_commit(recovered, current_tick_frame_id=frameID)
+                    source_frame_id = int(recovered.get("source_frame_id", -1))
+                    if str(control.get("decision")) == "commit":
+                        _commit_true_source_frame(recovered, control_decision=control)
+                    elif str(control.get("decision")) == "hold":
+                        runtime_gate.hold_recovered_source(
+                            recovered, current_tick_frame_id=frameID, reason=str(control.get("decision_reason", "hold"))
+                        )
+                        runtime_gate.mark_true_source_recovery_result(
+                            source_frame_id, committed=False, reason=str(control.get("decision_reason", "hold"))
+                        )
+                        runtime_gate.append_true_recovery_commit_event(
+                            {
+                                "recovery_event_id": int(len(runtime_gate.true_recovery_commit_events) + 1),
+                                "source_frame_id": source_frame_id,
+                                "source_input_index": int(
+                                    recovered.get("source_input_index", source_frame_id)
+                                ),
+                                "source_image_name": str(
+                                    (recovered.get("source_payload", {}) or {}).get("source_image_name", "")
+                                ),
+                                "current_tick_frame_id": int(frameID),
+                                "current_tick_image_name": str(info.get("image_name", "")),
+                                "source_equals_current_frame": bool(source_frame_id == int(frameID)),
+                                "pool_enter_tick": int(recovered.get("pool_enter_tick", -1)),
+                                "recovery_attempt_tick": int(recovered.get("recovery_attempt_tick", -1)),
+                                "recovery_attempt_count": int(recovered.get("recovery_attempt_count", 0)),
+                                "recovery_success": True,
+                                "recovery_success_reason": "semantic_policy_success",
+                                "materialized_source_keyframe": False,
+                                "materialization_failure_reason": "commit_control_hold",
+                                "add_keyframe_called": False,
+                                "add_keyframe_success": False,
+                                "scene_keyframe_appended": False,
+                                "final_keyframe_incremented": False,
+                                "representation_update_called": False,
+                                "representation_update_success": False,
+                                "gaussian_update_called": False,
+                                "gaussian_update_success": False,
+                                "anchor_update_called": False,
+                                "anchor_update_success": False,
+                                "active_set_update_called": False,
+                                "active_set_update_success": False,
+                                "optimizer_received": False,
+                                "final_model_contains_source_frame": False,
+                                "failure_stage": "commit_control",
+                                "failure_reason": str(control.get("decision_reason", "hold")),
+                                "commit_control_mode": str(
+                                    getattr(args, "paper_aligned_recovery_commit_control", "off")
+                                ),
+                                "commit_control_decision": "hold",
+                            }
+                        )
+                    else:
+                        runtime_gate.reject_recovered_source(
+                            recovered, reason=str(control.get("decision_reason", "reject"))
+                        )
+                        runtime_gate.mark_true_source_recovery_result(
+                            source_frame_id, committed=False, reason=str(control.get("decision_reason", "reject"))
+                        )
+                        runtime_gate.append_true_recovery_commit_event(
+                            {
+                                "recovery_event_id": int(len(runtime_gate.true_recovery_commit_events) + 1),
+                                "source_frame_id": source_frame_id,
+                                "source_input_index": int(
+                                    recovered.get("source_input_index", source_frame_id)
+                                ),
+                                "source_image_name": str(
+                                    (recovered.get("source_payload", {}) or {}).get("source_image_name", "")
+                                ),
+                                "current_tick_frame_id": int(frameID),
+                                "current_tick_image_name": str(info.get("image_name", "")),
+                                "source_equals_current_frame": bool(source_frame_id == int(frameID)),
+                                "pool_enter_tick": int(recovered.get("pool_enter_tick", -1)),
+                                "recovery_attempt_tick": int(recovered.get("recovery_attempt_tick", -1)),
+                                "recovery_attempt_count": int(recovered.get("recovery_attempt_count", 0)),
+                                "recovery_success": True,
+                                "recovery_success_reason": "semantic_policy_success",
+                                "materialized_source_keyframe": False,
+                                "materialization_failure_reason": "commit_control_reject",
+                                "add_keyframe_called": False,
+                                "add_keyframe_success": False,
+                                "scene_keyframe_appended": False,
+                                "final_keyframe_incremented": False,
+                                "representation_update_called": False,
+                                "representation_update_success": False,
+                                "gaussian_update_called": False,
+                                "gaussian_update_success": False,
+                                "anchor_update_called": False,
+                                "anchor_update_success": False,
+                                "active_set_update_called": False,
+                                "active_set_update_success": False,
+                                "optimizer_received": False,
+                                "final_model_contains_source_frame": False,
+                                "failure_stage": "commit_control",
+                                "failure_reason": str(control.get("decision_reason", "reject")),
+                                "commit_control_mode": str(
+                                    getattr(args, "paper_aligned_recovery_commit_control", "off")
+                                ),
+                                "commit_control_decision": "reject",
+                            }
+                        )
         increment_runtime(runtimes["Load"], start_time)
 
         if should_add_keyframe:
@@ -194,7 +512,11 @@ if __name__ == "__main__":
             if n_keyframes == args.num_keyframes_miniba_bootstrap - 1:
                 start_time = time.time()
                 # 【姿态估计模块】使用Mini-BA同时估计所有初始帧的位姿和焦距
+                if runtime_gate is not None:
+                    runtime_gate.mark_pose_attempt(frameID)
                 Rts, f, _ = pose_initializer.initialize_bootstrap(bootstrap_desc_kpts)
+                if runtime_gate is not None:
+                    runtime_gate.mark_pose_result(frameID, True)
                 focal = f.cpu().item()
                 increment_runtime(runtimes["BAB"], start_time)
                 
@@ -221,6 +543,8 @@ if __name__ == "__main__":
                         args,
                     )
                     scene_model.add_keyframe(keyframe, f)
+                    if runtime_gate is not None:
+                        runtime_gate.mark_keyframe_add(frameID)
                     increment_runtime(runtimes["Add"], start_time)
                 
                 if args.viewer_mode not in ["none", "web"]:
@@ -231,6 +555,8 @@ if __name__ == "__main__":
                 for index in range(args.num_keyframes_miniba_bootstrap):
                     start_time = time.time()
                     scene_model.add_new_gaussians(index)
+                    if runtime_gate is not None:
+                        runtime_gate.mark_gaussian_update(frameID)
                     increment_runtime(runtimes["Init"], start_time)
                 
                 start_time = time.time()
@@ -295,9 +621,17 @@ if __name__ == "__main__":
                 
                 start_time = time.time()
                 # 【姿态估计模块】增量姿态初始化：使用PnP-RANSAC和Mini-BA估计新帧位姿
+                if runtime_gate is not None:
+                    runtime_gate.mark_pose_attempt(frameID)
                 Rt = pose_initializer.initialize_incremental(
                     prev_keyframes, desc_kpts, n_keyframes, info["is_test"], image
                 )
+                if runtime_gate is not None:
+                    runtime_gate.annotate_pose_debug(
+                        frameID, getattr(pose_initializer, "last_incremental_debug", {})
+                    )
+                    runtime_gate.mark_pose_result(frameID, Rt is not None)
+                recent_pose_success.append(1 if Rt is not None else 0)
                 increment_runtime(runtimes["BAI"], start_time)
                 
                 start_time = time.time()
@@ -319,6 +653,8 @@ if __name__ == "__main__":
                         args,
                     )
                     scene_model.add_keyframe(keyframe)
+                    if runtime_gate is not None:
+                        runtime_gate.mark_keyframe_add(frameID)
                     prev_keyframe = keyframe
                     increment_runtime(runtimes["Add"], start_time)
                     
@@ -326,6 +662,8 @@ if __name__ == "__main__":
                     # 使用Laplacian概率采样 + 引导MVS深度估计
                     start_time = time.time()
                     scene_model.add_new_gaussians()
+                    if runtime_gate is not None:
+                        runtime_gate.mark_gaussian_update(frameID)
                     increment_runtime(runtimes["Init"], start_time)
                     
                     start_time = time.time()
@@ -338,6 +676,10 @@ if __name__ == "__main__":
                 else:
                     # 姿态估计失败，跳过该帧
                     should_add_keyframe = False
+                    if runtime_gate is not None:
+                        pose_debug = getattr(pose_initializer, "last_incremental_debug", {})
+                        fail_reason = str(pose_debug.get("failure_reason", "") or "pose_init_failed")
+                        runtime_gate.mark_drop_reason(frameID, fail_reason)
 
         if should_add_keyframe:
             # ========== 锚点管理：处理大尺度场景 ==========
@@ -345,9 +687,13 @@ if __name__ == "__main__":
             # 当高斯点在屏幕上变得过小时，创建新锚点并合并细粒度高斯点
             start_time = time.time()
             scene_model.place_anchor_if_needed()
+            if runtime_gate is not None:
+                runtime_gate.mark_anchor_update(frameID)
             increment_runtime(runtimes["anc"], start_time)
 
             n_keyframes += 1
+            if runtime_gate is not None:
+                runtime_gate.mark_final_keyframe_increment(frameID)
             # 更新上一帧的描述子（用于下一帧的匹配）
             if not info["is_test"]:
                 prev_desc_kpts = desc_kpts
@@ -391,6 +737,8 @@ if __name__ == "__main__":
             pbar.set_postfix_str(",".join(bar_postfix), refresh=False)
 
     reconstruction_time = time.time() - reconstruction_start_time
+    if runtime_gate is not None:
+        runtime_gate.flush_trace()
 
     # ========== 重建完成后的处理 ==========
     # 【场景表示模块】切换为推理模式（停止优化，启用锚点融合，准备渲染）

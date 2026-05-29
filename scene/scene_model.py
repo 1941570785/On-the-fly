@@ -867,7 +867,13 @@ class SceneModel:
         return closest_anchors, closest_anchors_ids
 
     @torch.no_grad()
-    def get_prev_keyframes(self, n: int, update_3dpts: bool, desc_kpts: DescribedKeypoints = None):
+    def get_prev_keyframes(
+        self,
+        n: int,
+        update_3dpts: bool,
+        desc_kpts: DescribedKeypoints = None,
+        resolution_mode: str = "baseline",
+    ):
         """
         【场景表示模块】获取最近的n个关键帧
         
@@ -910,7 +916,7 @@ class SceneModel:
         # 如果需要，重新三角化关键帧的3D点（用于深度对齐）
         if update_3dpts:
             for keyframe in prev_keyframes:
-                keyframe.update_3dpts(self.keyframes)
+                keyframe.update_3dpts(self.keyframes, resolution_mode=resolution_mode)
         return prev_keyframes
 
     def get_Rts(self):
@@ -1006,7 +1012,12 @@ class SceneModel:
         # ========== 深度对齐 ==========
         # 如果关键点还没有3D点，先进行三角化
         if keyframe.desc_kpts.has_pt3d.sum() == 0:
-            keyframe.update_3dpts(self.keyframes)
+            resolution_mode = (
+                "paper_aligned_true_recovery"
+                if bool(keyframe.info.get("_paper_aligned_insertion_type") == "true_recovery_commit")
+                else "baseline"
+            )
+            keyframe.update_3dpts(self.keyframes, resolution_mode=resolution_mode)
         # 【场景表示模块】对齐单目深度到三角化深度（通过缩放和偏移）
         keyframe.align_depth()
 

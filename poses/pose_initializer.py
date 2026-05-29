@@ -78,6 +78,7 @@ class PoseInitializer():
             make_cuda_graph=True, iters=args.iters_miniba_incr)
         
         self.PnPRANSAC = RANSACEstimator(args.pnpransac_samples, self.max_pnp_error, EstimatorType.P4P)
+        self.last_incremental_debug: dict[str, object] = {}
 
     def build_problem(self,
                       desc_kpts_list: list[DescribedKeypoints],
@@ -249,7 +250,13 @@ class PoseInitializer():
         Returns:
             Rt: 估计的位姿矩阵 [4, 4]，如果失败返回None
         """
-        
+        self.last_incremental_debug = {
+            "failure_reason": "",
+            "num_2d3d_correspondences": 0,
+            "num_pnp_inliers": 0,
+            "num_miniba_inliers": 0,
+        }
+
         # Match the current frame with previous keyframes
         # 收集可用于 PnP 的 2D-3D 对应
         xyz = []
@@ -266,10 +273,14 @@ class PoseInitializer():
             confs.append(keyframe.desc_kpts.pts_conf[matches.idx_other[mask]])
             match_indices.append(matches.idx[mask])
 
+        if len(xyz) == 0:
+            self.last_incremental_debug["failure_reason"] = "no_2d3d_correspondences"
+            return None
         xyz = torch.cat(xyz, dim=0)
         uvs = torch.cat(uvs, dim=0)
         confs = torch.cat(confs, dim=0)
         match_indices = torch.cat(match_indices, dim=0)
+        self.last_incremental_debug["num_2d3d_correspondences"] = int(len(xyz))
 
         # Subsample the points if there are too many
         # 先按置信度采样控制 PnP 输入规模
@@ -285,12 +296,23 @@ class PoseInitializer():
         # 使用上一关键帧作为初始位姿
         Rs6D_init = keyframes[0].rW2C
         ts_init = keyframes[0].tW2C
-        Rt, inliers = self.PnPRANSAC(uvs, xyz, self.f, self.centre, Rs6D_init, ts_init, confs)
+        if len(xyz) < 4:
+            self.last_incremental_debug["failure_reason"] = "insufficient_correspondences_for_pnp"
+            return None
+        try:
+            Rt, inliers = self.PnPRANSAC(uvs, xyz, self.f, self.centre, Rs6D_init, ts_init, confs)
+        except Exception:
+            self.last_incremental_debug["failure_reason"] = "pnp_ransac_exception"
+            return None
 
         xyz = xyz[inliers]
         uvs = uvs[inliers]
         confs = confs[inliers]
         match_indices = match_indices[inliers]
+        self.last_incremental_debug["num_pnp_inliers"] = int(len(xyz))
+        if len(xyz) < 4:
+            self.last_incremental_debug["failure_reason"] = "pnp_inliers_too_few"
+            return None
 
         # Subsample the points if there are too many
         # 为 miniBA 填充固定数量的点
@@ -306,6 +328,7 @@ class PoseInitializer():
         # 以 PnP 结果为初始化，执行小规模 BA 微调
         Rs6D, ts = Rt[:3, :2][None], Rt[:3, 3][None]
         Rs6D, ts, _, _, r, r_init, mask = self.miniBA_incr(Rs6D, ts, self.f, xyz_ba, self.centre, uvs_ba.view(-1))
+        self.last_incremental_debug["num_miniba_inliers"] = int(mask.sum().item())
         Rt = torch.eye(4, device="cuda")
         Rt[:3, :3] = sixD2mtx(Rs6D)[0]
         Rt[:3, 3] = ts[0]
@@ -314,9 +337,11 @@ class PoseInitializer():
         # 训练阶段要求足够内点以避免错误注册
         if is_test or mask.sum() > self.min_num_inliers:
             # Return the pose of the current frame
+            self.last_incremental_debug["failure_reason"] = ""
             return Rt
         else:
             print("Too few inliers for pose initialization")
+            self.last_incremental_debug["failure_reason"] = "miniba_inliers_too_few"
             # Remove matches as we prevent the current frame from being registered
             for keyframe in keyframes:
                 keyframe.desc_kpts.matches.pop(index, None)

@@ -24,6 +24,74 @@ from scene.optimizers import BaseAdam
 from utils import sample, sixD2mtx, make_torch_sampler, depth2points
 from dataloaders.read_write_model import Camera, BaseImage, rotmat2qvec
 
+_CHOSEN_KFS_RESOLUTION_EVENTS: list[dict] = []
+
+
+def pop_chosen_kfs_resolution_events() -> list[dict]:
+    events = list(_CHOSEN_KFS_RESOLUTION_EVENTS)
+    _CHOSEN_KFS_RESOLUTION_EVENTS.clear()
+    return events
+
+
+def resolve_chosen_keyframes(
+    chosen_kfs_ids: list[int],
+    scene_keyframes: list["Keyframe"],
+    mode: str = "baseline",
+) -> tuple[list[int], list[dict], list[str], bool, list[tuple[int, int]]]:
+    """
+    Resolve chosen_kfs_ids to scene list indices with explicit semantics.
+    Returns: (resolved_indices, invalid_items, chosen_id_types, fallback_used)
+    """
+    keyframe_id_to_list_index = {int(kf.index): i for i, kf in enumerate(scene_keyframes)}
+    resolved_indices: list[int] = []
+    invalid_items: list[dict] = []
+    chosen_id_types: list[str] = []
+    fallback_used = False
+    row_to_resolved: list[tuple[int, int]] = []
+    scene_n = len(scene_keyframes)
+
+    for row_idx, raw in enumerate(chosen_kfs_ids):
+        try:
+            cid = int(raw)
+        except Exception:
+            chosen_id_types.append("unknown")
+            invalid_items.append({"id": raw, "reason": "non_integer_id", "id_type": "unknown"})
+            continue
+
+        if 0 <= cid < scene_n and scene_keyframes[cid].index == cid:
+            chosen_id_types.append("list_index")
+            resolved_indices.append(cid)
+            row_to_resolved.append((int(row_idx), int(cid)))
+            continue
+
+        if cid in keyframe_id_to_list_index:
+            chosen_id_types.append("keyframe_id")
+            resolved_idx = int(keyframe_id_to_list_index[cid])
+            resolved_indices.append(resolved_idx)
+            row_to_resolved.append((int(row_idx), resolved_idx))
+            continue
+
+        chosen_id_types.append("keyframe_id")
+        invalid_items.append({"id": cid, "reason": "id_not_found_in_scene", "id_type": "keyframe_id"})
+
+    # Keep insertion order but remove duplicates.
+    seen = set()
+    uniq = []
+    for idx in resolved_indices:
+        if idx in seen:
+            continue
+        seen.add(idx)
+        uniq.append(idx)
+    resolved_indices = uniq
+
+    # paper_aligned path: best-effort fallback, never crash.
+    if mode.startswith("paper_aligned") and len(resolved_indices) == 0 and scene_n > 0:
+        fallback_used = True
+        fallback_count = min(2, scene_n)
+        resolved_indices = list(range(scene_n - fallback_count, scene_n))
+        row_to_resolved = [(i, idx) for i, idx in enumerate(resolved_indices)]
+    return resolved_indices, invalid_items, chosen_id_types, fallback_used, row_to_resolved
+
 
 class Keyframe:
     """
@@ -187,7 +255,7 @@ class Keyframe:
             return -self.get_R().T @ self.get_t()
 
     @torch.no_grad()
-    def update_3dpts(self, all_keyframes: list[Keyframe]):
+    def update_3dpts(self, all_keyframes: list[Keyframe], resolution_mode: str = "baseline"):
         """
         【场景表示模块】更新关键点的3D位置
         
@@ -235,11 +303,58 @@ class Keyframe:
         uv, uvs_others, chosen_kfs_ids = self.triangulator.prepare_matches(
             self.desc_kpts
         )
-        Rts_others = torch.stack(
-            [all_keyframes[index].get_Rt() for i, index in enumerate(chosen_kfs_ids)],
-            dim=0,
+        (
+            resolved_indices,
+            invalid_ids,
+            chosen_id_types,
+            fallback_used,
+            row_to_resolved,
+        ) = resolve_chosen_keyframes(
+            chosen_kfs_ids, all_keyframes, mode=resolution_mode
         )
-        if len(Rts_others < self.triangulator.n_cams):
+        resolved_uvs_others = -torch.ones_like(uvs_others)
+        for dst_row, (src_row, _) in enumerate(row_to_resolved):
+            if src_row < len(uvs_others) and dst_row < len(resolved_uvs_others):
+                resolved_uvs_others[dst_row] = uvs_others[src_row]
+
+        resolution_event = {
+            "event_id": int(len(_CHOSEN_KFS_RESOLUTION_EVENTS) + 1),
+            "action_type": str(resolution_mode),
+            "image_name": str(self.info.get("image_name", self.info.get("name", ""))),
+            "chosen_kfs_ids_raw": [int(x) if isinstance(x, (int, float)) else str(x) for x in chosen_kfs_ids],
+            "resolved_keyframe_list_indices": [int(x) for x in resolved_indices],
+            "resolved_keyframe_image_names": [
+                str(all_keyframes[idx].info.get("image_name", all_keyframes[idx].info.get("name", "")))
+                for idx in resolved_indices
+                if 0 <= idx < len(all_keyframes)
+            ],
+            "invalid_chosen_kfs_ids": [x.get("id") for x in invalid_ids],
+            "invalid_reason": ";".join(sorted({str(x.get("reason", "")) for x in invalid_ids})),
+            "fallback_used": bool(fallback_used),
+            "fallback_neighbor_count": int(len(resolved_indices) if fallback_used else 0),
+            "gaussian_update_attempted": False,
+            "gaussian_update_success": False,
+            "recovery_commit_success_final": False,
+            "crash_prevented": bool(len(invalid_ids) > 0 and resolution_mode.startswith("paper_aligned")),
+            "chosen_kfs_id_types": chosen_id_types,
+        }
+
+        if len(resolved_indices) == 0:
+            resolution_event["invalid_reason"] = (
+                resolution_event["invalid_reason"] + ";chosen_kfs_neighbor_insufficient"
+            ).strip(";")
+            _CHOSEN_KFS_RESOLUTION_EVENTS.append(resolution_event)
+            self.last_chosen_kfs_resolution = resolution_event
+            if resolution_mode.startswith("paper_aligned"):
+                # Keep runtime alive in paper_aligned late-commit path.
+                return
+            raise IndexError(
+                f"chosen_kfs_ids cannot resolve in baseline mode, raw={chosen_kfs_ids}, "
+                f"scene_size={len(all_keyframes)}"
+            )
+
+        Rts_others = torch.stack([all_keyframes[index].get_Rt() for index in resolved_indices], dim=0)
+        if len(Rts_others) < self.triangulator.n_cams:
             Rts_others = torch.cat(
                 [
                     Rts_others,
@@ -252,11 +367,16 @@ class Keyframe:
 
         # Run the triangulator and update the 3D points
         new_pts, depth, best_dis, valid_matches = self.triangulator(
-            uv, uvs_others, self.get_Rt(), Rts_others, self.f, self.centre
+            uv, resolved_uvs_others, self.get_Rt(), Rts_others, self.f, self.centre
         )
         self.desc_kpts.update_3D_pts(
             new_pts[valid_matches], depth[valid_matches], 1, valid_matches
         )
+        resolution_event["gaussian_update_attempted"] = True
+        resolution_event["gaussian_update_success"] = True
+        resolution_event["recovery_commit_success_final"] = True
+        _CHOSEN_KFS_RESOLUTION_EVENTS.append(resolution_event)
+        self.last_chosen_kfs_resolution = resolution_event
 
         if unload_desc_kpts:
             self.desc_kpts.to("cpu")
