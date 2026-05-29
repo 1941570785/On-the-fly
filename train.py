@@ -204,13 +204,52 @@ if __name__ == "__main__":
             "failure_stage": "",
             "failure_reason": "",
             "commit_control_mode": str(getattr(args, "paper_aligned_recovery_commit_control", "off")),
-            "commit_control_decision": "commit",
+            "commit_control_decision": "allow_commit",
             "commit_control_reason": "",
+            "control_decision": "allow_commit",
+            "runtime_commit_attempted": True,
+            "runtime_commit_success": False,
+            "source_resolution_success": False,
+            "add_keyframe_attempted": False,
+            "add_keyframe_success": False,
+            "materialized": False,
+            "final_timeline_recorded": False,
+            "keyframe_count_at_failure": int(n_keyframes),
         }
         if isinstance(control_decision, dict):
-            recovery_trace["commit_control_decision"] = str(control_decision.get("decision", "commit"))
+            recovery_trace["commit_control_decision"] = str(
+                control_decision.get("control_decision", "allow_commit")
+            )
             recovery_trace["commit_control_reason"] = str(control_decision.get("decision_reason", ""))
             recovery_trace["commit_control_debug"] = dict(control_decision.get("debug", {}))
+            control_decision["control_decision"] = "allow_commit"
+            control_decision["runtime_commit_attempted"] = True
+
+        def _finish_materialization(committed: bool, failure_reason: str = "") -> None:
+            reason = str(failure_reason or "")
+            recovery_trace["runtime_commit_success"] = bool(committed)
+            recovery_trace["materialized"] = bool(committed)
+            recovery_trace["final_timeline_recorded"] = bool(committed)
+            recovery_trace["materialization_failure_reason"] = reason
+            if not committed:
+                recovery_trace["keyframe_count_at_failure"] = int(n_keyframes)
+            if isinstance(control_decision, dict):
+                control_decision["runtime_commit_attempted"] = True
+                control_decision["runtime_commit_success"] = bool(committed)
+                control_decision["source_resolution_success"] = bool(
+                    recovery_trace.get("source_resolution_success", False)
+                )
+                control_decision["add_keyframe_attempted"] = bool(
+                    recovery_trace.get("add_keyframe_attempted", False)
+                )
+                control_decision["add_keyframe_success"] = bool(
+                    recovery_trace.get("add_keyframe_success", False)
+                )
+                control_decision["materialized"] = bool(committed)
+                control_decision["final_timeline_recorded"] = bool(committed)
+                control_decision["materialization_failure_reason"] = reason
+            runtime_gate.append_recovery_commit_materialization_event(recovery_trace)
+
         runtime_gate.mark_true_source_recovery_attempt(
             source_frame_id=source_frame_id,
             current_tick_frame_id=int(recovered.get("current_tick_frame_id", -1)),
@@ -219,12 +258,23 @@ if __name__ == "__main__":
             recovery_attempt_tick=int(recovered.get("recovery_attempt_tick", -1)),
         )
         event = runtime_gate._get_event(source_frame_id)
+        if event is None:
+            recovery_trace["failure_stage"] = "source_resolution"
+            recovery_trace["failure_reason"] = "source_mapping_failed"
+            runtime_gate.mark_true_source_recovery_result(
+                source_frame_id, committed=False, reason="source_mapping_failed"
+            )
+            _finish_materialization(False, "source_mapping_failed")
+            runtime_gate.append_true_recovery_commit_event(recovery_trace)
+            return
+        recovery_trace["source_resolution_success"] = True
         if event is not None and bool(event.get("final_keyframe_incremented", False)):
             recovery_trace["failure_stage"] = "duplicate_gate"
-            recovery_trace["failure_reason"] = "source_already_final_keyframe"
+            recovery_trace["failure_reason"] = "already_existing_keyframe"
             runtime_gate.mark_true_source_recovery_result(
-                source_frame_id, committed=False, reason="source_already_final_keyframe"
+                source_frame_id, committed=False, reason="already_existing_keyframe"
             )
+            _finish_materialization(False, "already_existing_keyframe")
             runtime_gate.append_true_recovery_commit_event(recovery_trace)
             return
         if n_keyframes < args.num_keyframes_miniba_bootstrap:
@@ -233,15 +283,16 @@ if __name__ == "__main__":
             runtime_gate.mark_true_source_recovery_result(
                 source_frame_id, committed=False, reason="bootstrap_not_ready"
             )
+            _finish_materialization(False, "add_keyframe_internal_skip")
             runtime_gate.append_true_recovery_commit_event(recovery_trace)
             return
         if source_image is None or source_desc is None:
             recovery_trace["failure_stage"] = "source_payload"
-            recovery_trace["failure_reason"] = "missing_source_image_or_features"
-            recovery_trace["materialization_failure_reason"] = "missing_source_image_or_features"
+            recovery_trace["failure_reason"] = "source_mapping_failed"
             runtime_gate.mark_true_source_recovery_result(
-                source_frame_id, committed=False, reason="missing_source_image_or_features"
+                source_frame_id, committed=False, reason="source_mapping_failed"
             )
+            _finish_materialization(False, "source_mapping_failed")
             runtime_gate.append_true_recovery_commit_event(recovery_trace)
             return
         if source_info is None:
@@ -252,15 +303,25 @@ if __name__ == "__main__":
             }
         source_info["_paper_aligned_insertion_type"] = "true_recovery_commit"
         runtime_gate.mark_pose_attempt(source_frame_id)
-        prev_keyframes_src = scene_model.get_prev_keyframes(
-            args.num_prev_keyframes_miniba_incr,
-            True,
-            source_desc,
-            resolution_mode="paper_aligned_true_recovery",
-        )
-        Rt_src = pose_initializer.initialize_incremental(
-            prev_keyframes_src, source_desc, n_keyframes, bool(source_info.get("is_test", False)), source_image
-        )
+        try:
+            prev_keyframes_src = scene_model.get_prev_keyframes(
+                args.num_prev_keyframes_miniba_incr,
+                True,
+                source_desc,
+                resolution_mode="paper_aligned_true_recovery",
+            )
+            Rt_src = pose_initializer.initialize_incremental(
+                prev_keyframes_src, source_desc, n_keyframes, bool(source_info.get("is_test", False)), source_image
+            )
+        except Exception as exc:
+            recovery_trace["failure_stage"] = "source_resolution"
+            recovery_trace["failure_reason"] = f"chosen_kfs_invalid:{type(exc).__name__}"
+            runtime_gate.mark_true_source_recovery_result(
+                source_frame_id, committed=False, reason="chosen_kfs_invalid"
+            )
+            _finish_materialization(False, "chosen_kfs_invalid")
+            runtime_gate.append_true_recovery_commit_event(recovery_trace)
+            return
         runtime_gate.annotate_pose_debug(
             source_frame_id, getattr(pose_initializer, "last_incremental_debug", {})
         )
@@ -273,28 +334,50 @@ if __name__ == "__main__":
             runtime_gate.mark_true_source_recovery_result(
                 source_frame_id, committed=False, reason=fail_reason
             )
+            _finish_materialization(False, "add_keyframe_internal_skip")
             runtime_gate.append_true_recovery_commit_event(recovery_trace)
             return
         if args.use_colmap_poses and "Rt" in source_info:
             Rt_src = source_info["Rt"]
-        source_kf = Keyframe(
-            source_image,
-            source_info,
-            source_desc,
-            Rt_src,
-            n_keyframes,
-            f,
-            dense_extractor,
-            depth_estimator,
-            triangulator,
-            args,
-        )
-        recovery_trace["materialized_source_keyframe"] = True
-        scene_model.add_keyframe(source_kf)
+        before_scene_keyframes = len(scene_model.keyframes)
+        try:
+            source_kf = Keyframe(
+                source_image,
+                source_info,
+                source_desc,
+                Rt_src,
+                n_keyframes,
+                f,
+                dense_extractor,
+                depth_estimator,
+                triangulator,
+                args,
+            )
+            recovery_trace["materialized_source_keyframe"] = True
+            recovery_trace["add_keyframe_attempted"] = True
+            scene_model.add_keyframe(source_kf)
+        except Exception as exc:
+            recovery_trace["failure_stage"] = "add_keyframe"
+            recovery_trace["failure_reason"] = f"add_keyframe_exception:{type(exc).__name__}"
+            runtime_gate.mark_true_source_recovery_result(
+                source_frame_id, committed=False, reason="add_keyframe_exception"
+            )
+            _finish_materialization(False, "add_keyframe_exception")
+            runtime_gate.append_true_recovery_commit_event(recovery_trace)
+            return
         runtime_gate.mark_keyframe_add(source_frame_id)
         recovery_trace["add_keyframe_called"] = True
-        recovery_trace["add_keyframe_success"] = True
-        recovery_trace["scene_keyframe_appended"] = True
+        recovery_trace["add_keyframe_success"] = bool(len(scene_model.keyframes) > before_scene_keyframes)
+        recovery_trace["scene_keyframe_appended"] = bool(len(scene_model.keyframes) > before_scene_keyframes)
+        if not recovery_trace["add_keyframe_success"]:
+            recovery_trace["failure_stage"] = "add_keyframe"
+            recovery_trace["failure_reason"] = "add_keyframe_internal_skip"
+            runtime_gate.mark_true_source_recovery_result(
+                source_frame_id, committed=False, reason="add_keyframe_internal_skip"
+            )
+            _finish_materialization(False, "add_keyframe_internal_skip")
+            runtime_gate.append_true_recovery_commit_event(recovery_trace)
+            return
         recovery_trace["active_set_update_called"] = True
         recovery_trace["active_set_update_success"] = True
         scene_model.add_new_gaussians()
@@ -317,6 +400,7 @@ if __name__ == "__main__":
         runtime_gate.mark_true_source_recovery_result(source_frame_id, committed=True, reason="")
         recovery_trace["final_keyframe_incremented"] = True
         recovery_trace["final_model_contains_source_frame"] = True
+        _finish_materialization(True, "")
         runtime_gate.append_true_recovery_commit_event(recovery_trace)
 
     for frameID in pbar:
@@ -448,6 +532,14 @@ if __name__ == "__main__":
                                     getattr(args, "paper_aligned_recovery_commit_control", "off")
                                 ),
                                 "commit_control_decision": "hold",
+                                "control_decision": "hold",
+                                "runtime_commit_attempted": False,
+                                "runtime_commit_success": False,
+                                "source_resolution_success": False,
+                                "add_keyframe_attempted": False,
+                                "add_keyframe_success": False,
+                                "materialized": False,
+                                "final_timeline_recorded": False,
                             }
                         )
                     else:
@@ -497,6 +589,14 @@ if __name__ == "__main__":
                                     getattr(args, "paper_aligned_recovery_commit_control", "off")
                                 ),
                                 "commit_control_decision": "reject",
+                                "control_decision": "reject",
+                                "runtime_commit_attempted": False,
+                                "runtime_commit_success": False,
+                                "source_resolution_success": False,
+                                "add_keyframe_attempted": False,
+                                "add_keyframe_success": False,
+                                "materialized": False,
+                                "final_timeline_recorded": False,
                             }
                         )
         increment_runtime(runtimes["Load"], start_time)

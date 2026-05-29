@@ -221,6 +221,33 @@ class RecoveryCommitController:
         self.v5_retry_extension_for_coverage = _b(
             getattr(args, "paper_aligned_recovery_v5_retry_extension_for_coverage", True), True
         )
+        self.v6_min_feasibility_normal = float(
+            getattr(args, "paper_aligned_recovery_v6_min_feasibility_normal", 0.58) or 0.58
+        )
+        self.v6_min_feasibility_rescue = float(
+            getattr(args, "paper_aligned_recovery_v6_min_feasibility_rescue", 0.52) or 0.52
+        )
+        self.v6_min_matches_rescue = int(
+            getattr(args, "paper_aligned_recovery_v6_min_matches_rescue", 450) or 450
+        )
+        self.v6_pose_fail_cooldown_keyframes = int(
+            getattr(args, "paper_aligned_recovery_v6_pose_fail_cooldown_keyframes", 3) or 3
+        )
+        self.v6_attempt_budget_per_window = int(
+            getattr(args, "paper_aligned_recovery_v6_attempt_budget_per_window", 8) or 8
+        )
+        self.v6_materialized_budget_per_window = int(
+            getattr(args, "paper_aligned_recovery_v6_materialized_budget_per_window", 4) or 4
+        )
+        self.v6_early_coverage_margin = float(
+            getattr(args, "paper_aligned_recovery_v6_early_coverage_margin", 4.0) or 4.0
+        )
+        self.v6_pose_fail_rate_trigger = float(
+            getattr(args, "paper_aligned_recovery_v6_pose_fail_rate_trigger", 0.50) or 0.50
+        )
+        self.v6_materialization_rate_trigger = float(
+            getattr(args, "paper_aligned_recovery_v6_materialization_rate_trigger", 0.35) or 0.35
+        )
         self._gap_interval_index = 0
         self._in_gap_interval = False
         self._gap_interval_override_count = 0
@@ -230,6 +257,7 @@ class RecoveryCommitController:
         self._v4_episode_rescue_counts: dict[int, int] = {}
         self._v5_windows: dict[int, dict[str, Any]] = {}
         self._v5_episode_rescue_counts: dict[int, int] = {}
+        self._v6_windows: dict[int, dict[str, Any]] = {}
 
     def _adaptive_budget(self, main_chain_gap_p90: float, keyframe_density_per_100: float) -> int:
         if main_chain_gap_p90 >= 6.0:
@@ -803,6 +831,285 @@ class RecoveryCommitController:
         debug["window_budget_used"] = int(ws["normal_commits"] + ws["rescue_commits"])
         return RecoveryCommitDecision("commit", "v5_support_ranked_sparse_commit", debug)
 
+    def _materialization_feasibility_score(
+        self,
+        *,
+        num_matches: int,
+        num_inliers: int,
+        v_t: float,
+        q_t: float,
+        r_t: float,
+        source_gap_to_last_committed: int,
+        predicted_gap_if_hold: int,
+        pose_fail_count: int,
+    ) -> tuple[float, list[str]]:
+        missing: list[str] = []
+        score = 0.0
+        if num_matches >= 0:
+            score += 0.42 * min(float(num_matches) / 2500.0, 1.0)
+        else:
+            missing.append("num_matches")
+        if num_inliers >= 0:
+            score += 0.12 * min(float(num_inliers) / 120.0, 1.0)
+        else:
+            missing.append("num_inliers")
+        score += 0.14 * min(max(v_t, 0.0), 1.0)
+        score += 0.14 * min(max(q_t, 0.0), 1.0)
+        score += 0.10 * min(max(self.v5_max_r - r_t, 0.0) / max(self.v5_max_r, 1e-6), 1.0)
+        gap_penalty = min(max(float(source_gap_to_last_committed - self.v5_gap_trigger), 0.0) / 80.0, 1.0)
+        pred_penalty = min(max(float(predicted_gap_if_hold - self.v5_gap_hard_limit), 0.0) / 100.0, 1.0)
+        fail_penalty = min(float(max(pose_fail_count, 0)) * 0.10, 0.30)
+        score -= 0.05 * gap_penalty + 0.05 * pred_penalty + fail_penalty
+        return max(0.0, min(1.0, score)), missing
+
+    def _decide_materialization_aware_v6(
+        self,
+        candidate: dict[str, Any],
+        context: dict[str, Any],
+        base_debug: dict[str, Any],
+    ) -> RecoveryCommitDecision:
+        scores = candidate.get("scores", {}) or {}
+        source_payload = candidate.get("source_payload", {}) or {}
+        inlier_evidence = source_payload.get("inlier_evidence", {}) or {}
+        current_tick = int(context.get("current_tick_frame_id", -1))
+        source_input = int(candidate.get("source_input_index", candidate.get("source_frame_id", -1)))
+        age = max(0, current_tick - source_input)
+        density_before = _f(context.get("keyframe_density_per_100", 0.0))
+        density_after = density_before + (100.0 / float(max(current_tick, 1)))
+        source_gap_to_last_committed = int(context.get("source_gap_to_last_committed", 0))
+        predicted_gap_if_hold = int(context.get("predicted_gap_if_hold", source_gap_to_last_committed))
+        keyframe_growth_recent = int(context.get("keyframe_growth_recent", 0))
+        recent_materialization_rate = _f(context.get("recent_materialization_rate", 1.0), 1.0)
+        recent_pose_fail_rate = _f(context.get("recent_pose_fail_rate", 0.0), 0.0)
+        recent_runtime_attempt_count = int(context.get("recent_runtime_attempt_count", 0) or 0)
+        recent_materialized_count = int(context.get("recent_materialized_count", 0) or 0)
+        recent_failed_no_materialization_count = int(
+            context.get("recent_failed_no_materialization_count", 0) or 0
+        )
+        pose_fail_count = int(context.get("source_pose_fail_count", 0) or 0)
+        last_pose_fail_reason = str(context.get("source_last_pose_fail_reason", ""))
+        keyframes_since_fail = int(context.get("keyframes_since_last_pose_fail", 999) or 999)
+
+        v_t = _f(scores.get("V_t"))
+        q_t = _f(scores.get("Q_t"))
+        r_t = _f(scores.get("R_t"))
+        num_matches = int(_f(inlier_evidence.get("num_matches", -1), -1.0))
+        num_inliers = int(_f(context.get("source_num_inliers", -1), -1.0))
+        is_duplicate = bool(context.get("source_already_committed", False))
+        is_surrogate = bool(context.get("is_surrogate", False))
+        is_contamination_risk = bool(context.get("is_contamination_risk", False))
+        anchor_count_available = bool(context.get("anchor_count_available", False))
+        anchor_count_before_raw = context.get("anchor_count_before", None)
+        anchor_count_before = int(anchor_count_before_raw) if anchor_count_before_raw is not None else -1
+        if not anchor_count_available:
+            anchor_target_state = "unavailable"
+        elif anchor_count_before < self.v5_anchor_target_min:
+            anchor_target_state = "below_band"
+        elif anchor_count_before <= self.v5_anchor_target_max:
+            anchor_target_state = "in_band"
+        else:
+            anchor_target_state = "above_band"
+
+        if density_after > self.v5_density_hard_upper:
+            density_state = "above_hard"
+        elif density_after > self.v5_density_upper:
+            density_state = "above_upper"
+        elif density_after < self.v5_density_lower:
+            density_state = "below_lower"
+        else:
+            density_state = "in_band"
+
+        gap_rescue_triggered = bool(
+            source_gap_to_last_committed >= self.v5_gap_trigger
+            or predicted_gap_if_hold > self.v5_gap_hard_limit
+            or bool(context.get("open_gap_unclosed", False))
+        )
+        early_coverage_rescue = bool(
+            density_before <= (self.v5_density_lower + self.v6_early_coverage_margin)
+            or keyframe_growth_recent <= self.v5_growth_plateau_min_short
+            or recent_materialization_rate < self.v6_materialization_rate_trigger
+            or recent_pose_fail_rate > self.v6_pose_fail_rate_trigger
+        )
+        coverage_rescue_triggered = bool(density_state == "below_lower" or early_coverage_rescue)
+        feasibility, feature_missing = self._materialization_feasibility_score(
+            num_matches=num_matches,
+            num_inliers=num_inliers,
+            v_t=v_t,
+            q_t=q_t,
+            r_t=r_t,
+            source_gap_to_last_committed=source_gap_to_last_committed,
+            predicted_gap_if_hold=predicted_gap_if_hold,
+            pose_fail_count=pose_fail_count,
+        )
+        cooldown_active = bool(
+            pose_fail_count > 0 and keyframes_since_fail < self.v6_pose_fail_cooldown_keyframes
+        )
+        cooldown_release_reason = ""
+        if pose_fail_count > 0 and not cooldown_active:
+            cooldown_release_reason = "new_keyframe_support_since_pose_fail"
+
+        window_id = max(0, int(current_tick // max(self.v5_window_size, 1)))
+        ws = self._v6_windows.setdefault(
+            window_id,
+            {"attempts": 0, "support_scores": {}},
+        )
+        support_score = self._v5_support_score(
+            num_matches=max(num_matches, 0),
+            num_inliers=max(num_inliers, 0),
+            v_t=v_t,
+            q_t=q_t,
+            r_t=r_t,
+        )
+        score_for_rank = support_score + 2000.0 * feasibility
+        ws["support_scores"][int(source_input)] = float(score_for_rank)
+        ranked = sorted(
+            ((int(k), float(v)) for k, v in ws["support_scores"].items()),
+            key=lambda x: (-x[1], x[0]),
+        )
+        rank_map = {sid: idx + 1 for idx, (sid, _score) in enumerate(ranked)}
+        window_candidate_rank = int(rank_map.get(int(source_input), len(ranked) + 1))
+        normal_topk = self.v5_topk_below if density_state == "below_lower" else self.v5_topk_in
+        is_support_topk = window_candidate_rank <= max(normal_topk, 1)
+        is_rescue_topk = window_candidate_rank <= max(self.v5_coverage_topk, 3)
+        feature_missing_str = ",".join(feature_missing)
+
+        debug = dict(base_debug)
+        debug.update(
+            {
+                "commit_channel": "",
+                "rescue_channel": "",
+                "R_t": r_t,
+                "V_t": v_t,
+                "Q_t": q_t,
+                "num_matches": num_matches,
+                "num_inliers": num_inliers,
+                "support_count": num_inliers,
+                "support_score": support_score,
+                "materialization_feasibility_score": feasibility,
+                "feature_missing": feature_missing_str,
+                "source_gap_to_last_committed": source_gap_to_last_committed,
+                "predicted_gap_if_hold": predicted_gap_if_hold,
+                "density_before": density_before,
+                "density_after": density_after,
+                "density_state": density_state,
+                "window_id": window_id,
+                "window_candidate_rank": window_candidate_rank,
+                "window_support_score": score_for_rank,
+                "attempt_budget_used": recent_runtime_attempt_count,
+                "materialized_budget_used": recent_materialized_count,
+                "attempt_failed_no_materialization": recent_failed_no_materialization_count,
+                "recent_materialization_rate": recent_materialization_rate,
+                "recent_pose_fail_rate": recent_pose_fail_rate,
+                "recent_failed_no_materialization_count": recent_failed_no_materialization_count,
+                "pose_fail_count": pose_fail_count,
+                "last_pose_fail_reason": last_pose_fail_reason,
+                "cooldown_active": cooldown_active,
+                "cooldown_release_reason": cooldown_release_reason,
+                "coverage_rescue_triggered": coverage_rescue_triggered,
+                "gap_rescue_triggered": gap_rescue_triggered,
+                "gap_candidate_pose_infeasible": False,
+                "gap_unfillable_due_to_pose_support": False,
+                "early_coverage_rescue": early_coverage_rescue,
+                "keyframe_growth_recent": keyframe_growth_recent,
+                "anchor_count_before": anchor_count_before,
+                "anchor_target_state": anchor_target_state,
+                "anchor_soft_guard_triggered": bool(anchor_count_available and anchor_count_before > self.v5_anchor_target_max),
+                "blocked_reason": "",
+                "is_gap_critical": gap_rescue_triggered,
+                "is_coverage_floor": coverage_rescue_triggered,
+                "is_support_topk": is_support_topk,
+                "is_duplicate": is_duplicate,
+                "is_surrogate": is_surrogate,
+                "is_contamination_risk": is_contamination_risk,
+            }
+        )
+
+        hard_ok = bool(
+            (not is_duplicate)
+            and (not is_surrogate)
+            and (not is_contamination_risk)
+            and source_input >= 0
+            and r_t < self.v5_max_r
+            and v_t >= self.v5_min_v
+            and q_t >= self.v5_min_q
+            and num_matches >= self.min_geom_matches
+            and density_after <= self.v5_density_hard_upper
+        )
+        if not hard_ok:
+            debug["blocked_reason"] = "hard_semantics"
+            return RecoveryCommitDecision("reject", "v6_reject_invalid_semantics", debug)
+        if age > self.max_candidate_age:
+            debug["blocked_reason"] = "reject_age"
+            return RecoveryCommitDecision("reject", "v6_reject_age", debug)
+        if cooldown_active:
+            debug["blocked_reason"] = "pose_fail_cooldown"
+            return RecoveryCommitDecision("hold", "v6_hold_pose_fail_cooldown", debug)
+        if recent_failed_no_materialization_count >= self.v6_attempt_budget_per_window and feasibility < 0.75:
+            debug["blocked_reason"] = "attempt_budget"
+            return RecoveryCommitDecision("hold", "v6_hold_attempt_budget", debug)
+
+        if gap_rescue_triggered:
+            debug["commit_channel"] = "gap_rescue"
+            debug["rescue_channel"] = "gap_rescue"
+            medium_support_probe = bool(
+                (density_state == "below_lower" or keyframe_growth_recent <= self.v5_growth_plateau_min_short)
+                and recent_failed_no_materialization_count == 0
+                and feasibility >= 0.38
+                and num_matches >= max(300, self.min_geom_matches)
+            )
+            debug["medium_support_probe"] = medium_support_probe
+            if (
+                not medium_support_probe
+                and (feasibility < self.v6_min_feasibility_rescue or num_matches < self.v6_min_matches_rescue)
+            ):
+                debug["blocked_reason"] = "gap_candidate_pose_infeasible"
+                debug["gap_candidate_pose_infeasible"] = True
+                debug["gap_unfillable_due_to_pose_support"] = True
+                return RecoveryCommitDecision("hold", "v6_hold_gap_candidate_pose_infeasible", debug)
+            if not is_rescue_topk and density_state != "below_lower":
+                debug["blocked_reason"] = "not_rescue_topk"
+                return RecoveryCommitDecision("hold", "v6_hold_not_topk", debug)
+            ws["attempts"] = int(ws["attempts"]) + 1
+            return RecoveryCommitDecision("commit", "v6_gap_rescue_commit", debug)
+
+        if coverage_rescue_triggered:
+            debug["commit_channel"] = "coverage_rescue"
+            debug["rescue_channel"] = "coverage_rescue"
+            medium_support_probe = bool(
+                (density_state == "below_lower" or keyframe_growth_recent <= self.v5_growth_plateau_min_short)
+                and recent_failed_no_materialization_count == 0
+                and feasibility >= 0.38
+                and num_matches >= max(300, self.min_geom_matches)
+            )
+            debug["medium_support_probe"] = medium_support_probe
+            if (
+                not medium_support_probe
+                and (feasibility < self.v6_min_feasibility_rescue or num_matches < self.v6_min_matches_rescue)
+            ):
+                debug["blocked_reason"] = "coverage_candidate_pose_infeasible"
+                return RecoveryCommitDecision("hold", "v6_hold_coverage_candidate_pose_infeasible", debug)
+            if not is_rescue_topk:
+                debug["blocked_reason"] = "not_rescue_topk"
+                return RecoveryCommitDecision("hold", "v6_hold_not_topk", debug)
+            ws["attempts"] = int(ws["attempts"]) + 1
+            return RecoveryCommitDecision("commit", "v6_coverage_rescue_commit", debug)
+
+        debug["commit_channel"] = "target_band_normal"
+        if density_state == "above_upper":
+            debug["blocked_reason"] = "density_above_upper"
+            return RecoveryCommitDecision("hold", "v6_hold_density_above_upper", debug)
+        if feasibility < self.v6_min_feasibility_normal:
+            debug["blocked_reason"] = "normal_candidate_pose_infeasible"
+            return RecoveryCommitDecision("hold", "v6_hold_normal_candidate_pose_infeasible", debug)
+        if not is_support_topk:
+            debug["blocked_reason"] = "not_topk"
+            return RecoveryCommitDecision("hold", "v6_hold_not_topk", debug)
+        if source_gap_to_last_committed < self.v5_min_source_gap:
+            debug["blocked_reason"] = "too_close"
+            return RecoveryCommitDecision("hold", "v6_hold_too_close", debug)
+        ws["attempts"] = int(ws["attempts"]) + 1
+        return RecoveryCommitDecision("commit", "v6_support_ranked_sparse_commit", debug)
+
     def _decide_strict_v3(
         self,
         candidate: dict[str, Any],
@@ -1062,6 +1369,8 @@ class RecoveryCommitController:
             return self._decide_balanced_v4(candidate, context, debug)
         if self.mode == "recovery_commit_rescue_v5":
             return self._decide_rescue_v5(candidate, context, debug)
+        if self.mode == "recovery_commit_materialization_aware_v6":
+            return self._decide_materialization_aware_v6(candidate, context, debug)
         if not age_ok:
             debug["blocked_reason"] = "reject_age"
             return RecoveryCommitDecision("reject", "reject_age", debug)

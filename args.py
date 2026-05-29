@@ -168,6 +168,7 @@ def get_args():
             'recovery_commit_strict_v3',
             'recovery_commit_balanced_v4',
             'recovery_commit_rescue_v5',
+            'recovery_commit_materialization_aware_v6',
         ],
         help='Post-success recovery commit control mode. off keeps prior behavior.',
     )
@@ -602,6 +603,60 @@ def get_args():
         type=lambda x: str(x).strip().lower() in {'1', 'true', 'yes', 'y', 't'},
         default=True,
         help='Allow retry extension for coverage rescue in v5.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v6_min_feasibility_normal',
+        type=float,
+        default=0.58,
+        help='Materialization-aware v6 minimum feasibility for normal sparse commits.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v6_min_feasibility_rescue',
+        type=float,
+        default=0.52,
+        help='Materialization-aware v6 minimum feasibility for coverage/gap rescue commits.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v6_min_matches_rescue',
+        type=int,
+        default=450,
+        help='Materialization-aware v6 minimum match support for rescue commits.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v6_pose_fail_cooldown_keyframes',
+        type=int,
+        default=3,
+        help='Materialization-aware v6 keyframes needed before retrying pose-failed source.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v6_attempt_budget_per_window',
+        type=int,
+        default=8,
+        help='Materialization-aware v6 maximum non-materialized attempts per window.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v6_materialized_budget_per_window',
+        type=int,
+        default=4,
+        help='Materialization-aware v6 materialized-success budget reference per window.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v6_early_coverage_margin',
+        type=float,
+        default=4.0,
+        help='Trigger early coverage rescue when density is within this margin above lower bound.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v6_pose_fail_rate_trigger',
+        type=float,
+        default=0.50,
+        help='Trigger early coverage rescue when recent pose-fail rate exceeds this value.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v6_materialization_rate_trigger',
+        type=float,
+        default=0.35,
+        help='Trigger early coverage rescue when recent materialization rate drops below this value.',
     )
     parser.add_argument(
         '--paper_aligned_contract_trace_path',

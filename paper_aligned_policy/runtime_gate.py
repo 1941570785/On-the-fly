@@ -35,6 +35,7 @@ class PaperAlignedRuntimeGate:
         self._held_true_source_commits: list[dict[str, Any]] = []
         self.true_recovery_commit_events: list[dict[str, Any]] = []
         self.recovery_commit_control_events: list[dict[str, Any]] = []
+        self.recovery_commit_materialization_events: list[dict[str, Any]] = []
         self.semantic_policy: SemanticV1RuntimePolicy | None = None
         self.recovery_commit_controller = RecoveryCommitController(args)
         if self.mode == "paper_aligned_semantic_v1":
@@ -167,6 +168,58 @@ class PaperAlignedRuntimeGate:
         # Do not reinterpret anchor_update call count as anchor count.
         return None
 
+    def _recent_materialization_stats(self, current_tick_frame_id: int, window: int = 80) -> dict[str, Any]:
+        lo = max(1, int(current_tick_frame_id) - int(window) + 1)
+        attempts = [
+            e
+            for e in self.recovery_commit_materialization_events
+            if lo <= int(e.get("current_tick_frame_id", e.get("recovery_attempt_tick", -1)) or -1)
+            <= int(current_tick_frame_id)
+        ]
+        materialized = [
+            e
+            for e in attempts
+            if bool(e.get("materialized", e.get("final_keyframe_incremented", False)))
+        ]
+        pose_failed = [
+            e
+            for e in attempts
+            if "inliers_too_few" in str(e.get("failure_reason", ""))
+            or "inliers_too_few" in str(e.get("materialization_failure_reason", ""))
+        ]
+        return {
+            "recent_runtime_attempt_count": len(attempts),
+            "recent_materialized_count": len(materialized),
+            "recent_pose_fail_count": len(pose_failed),
+            "recent_failed_no_materialization_count": max(0, len(attempts) - len(materialized)),
+            "recent_materialization_rate": float(len(materialized)) / float(max(len(attempts), 1)),
+            "recent_pose_fail_rate": float(len(pose_failed)) / float(max(len(attempts), 1)),
+        }
+
+    def _source_pose_fail_context(self, source_frame_id: int) -> dict[str, Any]:
+        failures = [
+            e
+            for e in self.recovery_commit_materialization_events
+            if int(e.get("source_frame_id", -1) or -1) == int(source_frame_id)
+            and (
+                "inliers_too_few" in str(e.get("failure_reason", ""))
+                or "inliers_too_few" in str(e.get("materialization_failure_reason", ""))
+            )
+        ]
+        if not failures:
+            return {
+                "source_pose_fail_count": 0,
+                "source_last_pose_fail_reason": "",
+                "keyframes_since_last_pose_fail": 999,
+            }
+        last = failures[-1]
+        last_kf_count = int(last.get("keyframe_count_at_failure", self._current_keyframe_count()) or 0)
+        return {
+            "source_pose_fail_count": len(failures),
+            "source_last_pose_fail_reason": str(last.get("failure_reason", "") or last.get("materialization_failure_reason", "")),
+            "keyframes_since_last_pose_fail": max(0, self._current_keyframe_count() - last_kf_count),
+        }
+
     def decide_recovered_commit(
         self,
         recovered: dict[str, Any],
@@ -209,6 +262,8 @@ class PaperAlignedRuntimeGate:
             window=int(getattr(self.recovery_commit_controller, "v5_growth_window_long", 200)),
         )
         density_now = self._current_keyframe_density(current_tick_frame_id)
+        mat_stats = self._recent_materialization_stats(current_tick_frame_id, window=80)
+        source_pose_fail = self._source_pose_fail_context(source_frame_id)
         context = {
             "current_tick_frame_id": int(current_tick_frame_id),
             "recent_recovery_commit_count": self._recent_recovery_commit_count(current_tick_frame_id),
@@ -237,6 +292,8 @@ class PaperAlignedRuntimeGate:
             "is_surrogate": is_surrogate,
             "is_contamination_risk": is_contamination_risk,
             "open_gap_unclosed": bool(current_open_gap > int(episode_trigger)),
+            **mat_stats,
+            **source_pose_fail,
         }
         decision = self.recovery_commit_controller.decide(recovered, context)
         payload = {
@@ -250,6 +307,7 @@ class PaperAlignedRuntimeGate:
             "control_mode": self.recovery_commit_control_mode,
             "decision": decision.action,
             "decision_reason": decision.reason,
+            "control_decision": "allow_commit" if decision.action == "commit" else decision.action,
             "source_gap_to_last_committed": source_gap_to_last_committed,
             "predicted_gap_if_hold": predicted_gap_if_hold,
             "long_gap_episode_id": long_gap_episode_id,
@@ -267,6 +325,10 @@ class PaperAlignedRuntimeGate:
             "window_candidate_rank": int(decision.debug.get("window_candidate_rank", 0) or 0),
             "window_support_score": float(decision.debug.get("window_support_score", 0.0) or 0.0),
             "support_score": float(decision.debug.get("support_score", 0.0) or 0.0),
+            "materialization_feasibility_score": float(
+                decision.debug.get("materialization_feasibility_score", 0.0) or 0.0
+            ),
+            "feature_missing": str(decision.debug.get("feature_missing", "")),
             "window_normal_commit_count": int(decision.debug.get("window_normal_commit_count", 0) or 0),
             "window_gap_critical_commit_count": int(
                 decision.debug.get("window_gap_critical_commit_count", 0) or 0
@@ -292,6 +354,26 @@ class PaperAlignedRuntimeGate:
             "coverage_rescue_triggered": bool(decision.debug.get("coverage_rescue_triggered", False)),
             "gap_rescue_triggered": bool(decision.debug.get("gap_rescue_triggered", False)),
             "blocked_by_hard_semantics": bool(decision.debug.get("blocked_by_hard_semantics", False)),
+            "attempt_budget_used": int(decision.debug.get("attempt_budget_used", 0) or 0),
+            "materialized_budget_used": int(decision.debug.get("materialized_budget_used", 0) or 0),
+            "attempt_failed_no_materialization": bool(
+                decision.debug.get("attempt_failed_no_materialization", False)
+            ),
+            "pose_fail_count": int(decision.debug.get("pose_fail_count", 0) or 0),
+            "last_pose_fail_reason": str(decision.debug.get("last_pose_fail_reason", "")),
+            "cooldown_active": bool(decision.debug.get("cooldown_active", False)),
+            "cooldown_release_reason": str(decision.debug.get("cooldown_release_reason", "")),
+            "gap_candidate_pose_infeasible": bool(
+                decision.debug.get("gap_candidate_pose_infeasible", False)
+            ),
+            "gap_unfillable_due_to_pose_support": bool(
+                decision.debug.get("gap_unfillable_due_to_pose_support", False)
+            ),
+            "early_coverage_rescue": bool(decision.debug.get("early_coverage_rescue", False)),
+            "recent_materialization_rate": float(
+                decision.debug.get("recent_materialization_rate", 0.0) or 0.0
+            ),
+            "recent_pose_fail_rate": float(decision.debug.get("recent_pose_fail_rate", 0.0) or 0.0),
             "keyframe_growth_recent": int(decision.debug.get("keyframe_growth_recent", 0) or 0),
             "starvation_risk": bool(decision.debug.get("starvation_risk", False)),
             "is_gap_critical": bool(decision.debug.get("is_gap_critical", False)),
@@ -302,6 +384,14 @@ class PaperAlignedRuntimeGate:
             "is_surrogate": bool(decision.debug.get("is_surrogate", False)),
             "is_contamination_risk": bool(decision.debug.get("is_contamination_risk", False)),
             "blocked_reason": str(decision.debug.get("blocked_reason", "")),
+            "runtime_commit_attempted": False,
+            "runtime_commit_success": False,
+            "source_resolution_success": False,
+            "add_keyframe_attempted": False,
+            "add_keyframe_success": False,
+            "materialized": False,
+            "final_timeline_recorded": False,
+            "materialization_failure_reason": "",
             "debug": decision.debug,
         }
         self.recovery_commit_control_events.append(payload)
@@ -493,6 +583,9 @@ class PaperAlignedRuntimeGate:
     def append_true_recovery_commit_event(self, payload: dict[str, Any]) -> None:
         self.true_recovery_commit_events.append(dict(payload))
 
+    def append_recovery_commit_materialization_event(self, payload: dict[str, Any]) -> None:
+        self.recovery_commit_materialization_events.append(dict(payload))
+
     def flush_trace(self) -> None:
         if not self.trace_path:
             return
@@ -520,6 +613,7 @@ class PaperAlignedRuntimeGate:
             "true_recovery_commit_events": self.true_recovery_commit_events,
             "recovery_commit_control_mode": self.recovery_commit_control_mode,
             "recovery_commit_control_events": self.recovery_commit_control_events,
+            "recovery_commit_materialization_events": self.recovery_commit_materialization_events,
         }
         if self.semantic_policy is not None:
             payload["semantic_summary"] = self.semantic_policy.summary()
