@@ -160,6 +160,8 @@ if __name__ == "__main__":
     total_frames = len(dataset) if args.max_frames is None or args.max_frames < 0 else min(len(dataset), int(args.max_frames))
     pbar = tqdm(range(0, total_frames))
     reconstruction_start_time = time.time()
+    recovery_pose_attempt_state: dict[int, dict[str, Any]] = {}
+    recovery_pose_attempt_cache: dict[int, dict[str, Any]] = {}
 
     def _kf_source_frame_id(kf: Keyframe) -> int:
         return int(kf.info.get("_paper_aligned_source_frame_id", kf.index))
@@ -326,6 +328,225 @@ if __name__ == "__main__":
             }
         )
 
+    def _append_frame_stage_trace(frame_id: int, stage: str, reason: str = "") -> None:
+        if runtime_gate is None:
+            return
+        event = runtime_gate._get_event(int(frame_id))
+        runtime_gate.append_frame_stage_reachability_event(
+            {
+                "frame_id": int(frame_id),
+                "processed": bool(event is not None),
+                "candidate_evaluated": bool(event is not None),
+                "pose_path_requested": False,
+                "pose_path_allowed": False,
+                "chosen_kfs_built": False,
+                "matching_executed": False,
+                "pnp_attempted": False,
+                "miniba_attempted": False,
+                "recovery_success": False,
+                "commit_control_reached": False,
+                "runtime_attempted": False,
+                "materialized": False,
+                "final_stage": str(stage),
+                "blocking_stage": str(stage),
+                "blocking_reason": str(reason or ""),
+            }
+        )
+
+    def _attempt_recovery_pose_path(
+        recovered: dict[str, Any],
+        current_frame_id: int,
+        attempt_reason: str,
+    ) -> dict[str, Any]:
+        if runtime_gate is None:
+            return {"allowed": False, "success": False, "block_reason": "runtime_gate_disabled"}
+        source_payload = recovered.get("source_payload", {}) or {}
+        source_frame_id = int(recovered.get("source_frame_id", -1))
+        source_info = source_payload.get("source_info", None) or {}
+        source_desc = source_payload.get("desc_kpts", None)
+        source_image = source_payload.get("image_tensor", None)
+        source_event = runtime_gate._get_event(source_frame_id) or {}
+        lifecycle_state_before = str(source_event.get("action", "unknown"))
+        state = recovery_pose_attempt_state.setdefault(
+            source_frame_id, {"attempt_count": 0, "last_attempt_frame": -10_000, "last_success": False}
+        )
+        is_defer_recoverable = lifecycle_state_before == "defer_recoverable"
+        is_duplicate = bool(source_event.get("final_keyframe_incremented", False)) or runtime_gate._source_already_committed(source_frame_id)
+        is_surrogate = bool(int(source_frame_id) == int(current_frame_id))
+        missing_source = bool(source_frame_id < 0 or source_desc is None or source_image is None)
+        cooldown_active = bool(
+            int(state.get("attempt_count", 0)) > 0
+            and int(current_frame_id) - int(state.get("last_attempt_frame", -10_000)) < 8
+            and not bool(state.get("last_success", False))
+        )
+        retry_budget_exceeded = bool(int(state.get("attempt_count", 0)) >= 2 and not bool(state.get("last_success", False)))
+        support_refs_available = bool(len(scene_model.keyframes) >= args.num_keyframes_miniba_bootstrap)
+        if lifecycle_state_before == "discard":
+            block_reason = "discard_semantics"
+        elif lifecycle_state_before not in {"defer_recoverable", "direct_admit"}:
+            block_reason = "unknown"
+        elif is_duplicate:
+            block_reason = "duplicate_source"
+        elif missing_source:
+            block_reason = "missing_source_frame"
+        elif not support_refs_available:
+            block_reason = "no_support_reference"
+        elif cooldown_active:
+            block_reason = "cooldown_active"
+        elif retry_budget_exceeded:
+            block_reason = "retry_budget_exceeded"
+        else:
+            block_reason = ""
+        allowed = bool(
+            risk_mode != "off"
+            and getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit") == "true_source_commit"
+            and is_defer_recoverable
+            and not block_reason
+        )
+        lifecycle_event = {
+            "frame_id": int(current_frame_id),
+            "source_frame_id": int(source_frame_id),
+            "lifecycle_state_before": lifecycle_state_before,
+            "lifecycle_state_after": lifecycle_state_before,
+            "is_defer_recoverable": bool(is_defer_recoverable),
+            "is_defer_only": bool(is_defer_recoverable),
+            "in_recovery_pool": True,
+            "pose_path_requested": True,
+            "pose_path_allowed": bool(allowed),
+            "pose_path_request_reason": str(attempt_reason),
+            "pose_path_block_reason": block_reason if not allowed else "",
+            "recovery_pose_attempted": False,
+            "recovery_pose_attempt_result": "",
+            "recovery_success": False,
+            "control_allow_commit": False,
+            "runtime_commit_attempted": False,
+            "materialized": False,
+        }
+        if not allowed:
+            runtime_gate.append_lifecycle_gate_event(lifecycle_event)
+            return {"allowed": False, "success": False, "block_reason": block_reason}
+
+        state["attempt_count"] = int(state.get("attempt_count", 0)) + 1
+        state["last_attempt_frame"] = int(current_frame_id)
+        attempt_id = int(state["attempt_count"])
+        lifecycle_event["recovery_pose_attempted"] = True
+        runtime_gate.mark_pose_attempt(source_frame_id)
+        pose_debug: dict[str, Any] = {}
+        prev_keyframes_src: list[Keyframe] = []
+        Rt_src = None
+        failure_reason = ""
+        try:
+            recovery_ref_count = min(
+                int(args.num_prev_keyframes_check),
+                max(int(args.num_prev_keyframes_miniba_incr), 12),
+            )
+            prev_keyframes_src = scene_model.get_prev_keyframes(
+                recovery_ref_count,
+                True,
+                source_desc,
+                resolution_mode="paper_aligned_true_recovery",
+            )
+            _append_candidate_trace(int(current_frame_id))
+            _append_chosen_reference_trace(int(current_frame_id), source_frame_id, prev_keyframes_src)
+            Rt_src = pose_initializer.initialize_incremental_recovery(
+                prev_keyframes_src,
+                source_desc,
+                n_keyframes,
+                bool(source_info.get("is_test", False)),
+                source_image,
+            )
+            pose_debug = dict(getattr(pose_initializer, "last_incremental_debug", {}) or {})
+            fix_trace = dict(getattr(pose_initializer, "last_recovery_pose_outcome_fix", {}) or {})
+            if fix_trace:
+                runtime_gate.append_recovery_pose_outcome_fix_event(
+                    {
+                        "attempt_id": attempt_id,
+                        "source_frame_id": int(source_frame_id),
+                        "current_frame_id": int(current_frame_id),
+                        "pnp_success": bool(int(pose_debug.get("num_pnp_inliers", 0) or 0) >= 4),
+                        "pnp_inliers": int(pose_debug.get("num_pnp_inliers", 0) or 0),
+                        "pnp_ref_ids": list(pose_debug.get("pnp_ref_keyframe_ids", []) or []),
+                        "pnp_seed_ref_count": sum(
+                            1 for flag in (pose_debug.get("ref_is_seed", []) or []) if bool(flag)
+                        ),
+                        "miniba_attempted": True,
+                        "miniba_success_before_fix": bool(fix_trace.get("miniba_success_before_fix", False)),
+                        "miniba_inliers_before_fix": int(fix_trace.get("miniba_inliers_before_fix", 0) or 0),
+                        "miniba_ref_ids_before_fix": list(pose_debug.get("miniba_ref_keyframe_ids", []) or []),
+                        "handoff_fix_applied": bool(fix_trace.get("handoff_fix_applied", False)),
+                        "reference_consistency_fix_applied": bool(
+                            fix_trace.get("reference_consistency_fix_applied", False)
+                        ),
+                        "correspondence_flow_fix_applied": bool(
+                            fix_trace.get("correspondence_flow_fix_applied", False)
+                        ),
+                        "recovery_miniba_retry_applied": bool(fix_trace.get("recovery_miniba_retry_applied", False)),
+                        "miniba_success_after_fix": bool(fix_trace.get("miniba_success_after_fix", False)),
+                        "miniba_inliers_after_fix": int(fix_trace.get("miniba_inliers_after_fix", 0) or 0),
+                        "miniba_ref_ids_after_fix": list(pose_debug.get("miniba_ref_keyframe_ids", []) or []),
+                        "recovery_success_after_fix": bool(Rt_src is not None),
+                        "failure_reason_after_fix": str(
+                            fix_trace.get("failure_reason_after_fix", pose_debug.get("failure_reason", ""))
+                            or ""
+                        ),
+                        "triangulation_augmented_correspondence_count": int(
+                            fix_trace.get("triangulation_augmented_correspondence_count", 0) or 0
+                        ),
+                    }
+                )
+            failure_reason = str(pose_debug.get("failure_reason", "") or "")
+        except Exception as exc:
+            failure_reason = f"recovery_pose_exception:{type(exc).__name__}"
+            pose_debug = {"failure_reason": failure_reason}
+
+        success = bool(Rt_src is not None)
+        state["last_success"] = success
+        runtime_gate.annotate_pose_debug(source_frame_id, pose_debug)
+        runtime_gate.mark_pose_result(source_frame_id, success)
+        _append_pose_and_matching_traces(int(current_frame_id), pose_debug)
+        lifecycle_event["recovery_pose_attempt_result"] = "success" if success else "failure"
+        lifecycle_event["recovery_success"] = success
+        lifecycle_event["pose_path_block_reason"] = "" if success else (failure_reason or "pose_init_failed")
+        runtime_gate.append_lifecycle_gate_event(lifecycle_event)
+        runtime_gate.append_recovery_pose_path_event(
+            {
+                "source_frame_id": int(source_frame_id),
+                "current_frame_id": int(current_frame_id),
+                "attempt_id": attempt_id,
+                "attempt_reason": str(attempt_reason),
+                "chosen_kfs_built": bool(prev_keyframes_src),
+                "chosen_kfs_ids": [int(kf.index) for kf in prev_keyframes_src],
+                "chosen_kfs_source_frame_ids": [_kf_source_frame_id(kf) for kf in prev_keyframes_src],
+                "chosen_kfs_contains_recovery_seed": any(_kf_is_seed(kf) for kf in prev_keyframes_src),
+                "matching_executed": bool(pose_debug.get("ref_keyframe_ids", [])),
+                "matching_candidate_count": len(pose_debug.get("ref_keyframe_ids", []) or []),
+                "matching_seed_candidate_count": sum(1 for x in pose_debug.get("ref_is_seed", []) or [] if bool(x)),
+                "pnp_attempted": bool(pose_debug.get("num_pnp_inliers", 0) is not None),
+                "pnp_inliers": int(pose_debug.get("num_pnp_inliers", 0) or 0),
+                "pnp_success": bool(int(pose_debug.get("num_pnp_inliers", 0) or 0) >= 4),
+                "miniba_attempted": bool(pose_debug.get("num_miniba_inliers", 0) is not None),
+                "miniba_inliers": int(pose_debug.get("num_miniba_inliers", 0) or 0),
+                "miniba_success": bool(success),
+                "pose_failure_reason": "" if success else (failure_reason or "pose_init_failed"),
+            }
+        )
+        if success:
+            recovered["_recovery_pose_attempt_success"] = True
+            recovered["_recovery_pose_Rt"] = Rt_src
+            recovered["_recovery_pose_debug"] = pose_debug
+            recovery_pose_attempt_cache[source_frame_id] = {
+                "Rt": Rt_src,
+                "debug": pose_debug,
+                "attempt_frame": int(current_frame_id),
+                "attempt_reason": str(attempt_reason),
+            }
+        return {
+            "allowed": True,
+            "success": success,
+            "block_reason": "" if success else (failure_reason or "pose_init_failed"),
+            "lifecycle_event": lifecycle_event,
+        }
+
     def _commit_true_source_frame(recovered: dict, control_decision: dict[str, Any] | None = None) -> None:
         global n_keyframes, prev_desc_kpts, prev_keyframe
         if runtime_gate is None:
@@ -480,39 +701,46 @@ if __name__ == "__main__":
         )
         source_info["_paper_aligned_seed_runtime_frame_id"] = int(recovered.get("current_tick_frame_id", -1))
         source_info["_paper_aligned_insertion_type"] = "true_recovery_commit"
-        runtime_gate.mark_pose_attempt(source_frame_id)
-        try:
-            prev_keyframes_src = scene_model.get_prev_keyframes(
-                args.num_prev_keyframes_miniba_incr,
-                True,
-                source_desc,
-                resolution_mode="paper_aligned_true_recovery",
+        if bool(recovered.get("_recovery_pose_attempt_success", False)) and recovered.get("_recovery_pose_Rt") is not None:
+            Rt_src = recovered.get("_recovery_pose_Rt")
+            runtime_gate.mark_pose_attempt(source_frame_id)
+            pose_debug = dict(recovered.get("_recovery_pose_debug", {}) or {})
+            runtime_gate.annotate_pose_debug(source_frame_id, pose_debug)
+            runtime_gate.mark_pose_result(source_frame_id, True)
+        else:
+            runtime_gate.mark_pose_attempt(source_frame_id)
+            try:
+                prev_keyframes_src = scene_model.get_prev_keyframes(
+                    args.num_prev_keyframes_miniba_incr,
+                    True,
+                    source_desc,
+                    resolution_mode="paper_aligned_true_recovery",
+                )
+                _append_candidate_trace(int(recovered.get("current_tick_frame_id", source_frame_id)))
+                _append_chosen_reference_trace(
+                    int(recovered.get("current_tick_frame_id", source_frame_id)),
+                    source_frame_id,
+                    prev_keyframes_src,
+                )
+                Rt_src = pose_initializer.initialize_incremental(
+                    prev_keyframes_src, source_desc, n_keyframes, bool(source_info.get("is_test", False)), source_image
+                )
+            except Exception as exc:
+                recovery_trace["failure_stage"] = "source_resolution"
+                recovery_trace["failure_reason"] = f"chosen_kfs_invalid:{type(exc).__name__}"
+                runtime_gate.mark_true_source_recovery_result(
+                    source_frame_id, committed=False, reason="chosen_kfs_invalid"
+                )
+                _finish_materialization(False, "chosen_kfs_invalid")
+                runtime_gate.append_true_recovery_commit_event(recovery_trace)
+                return
+            runtime_gate.annotate_pose_debug(
+                source_frame_id, getattr(pose_initializer, "last_incremental_debug", {})
             )
-            _append_candidate_trace(int(recovered.get("current_tick_frame_id", source_frame_id)))
-            _append_chosen_reference_trace(
+            _append_pose_and_matching_traces(
                 int(recovered.get("current_tick_frame_id", source_frame_id)),
-                source_frame_id,
-                prev_keyframes_src,
+                getattr(pose_initializer, "last_incremental_debug", {}),
             )
-            Rt_src = pose_initializer.initialize_incremental(
-                prev_keyframes_src, source_desc, n_keyframes, bool(source_info.get("is_test", False)), source_image
-            )
-        except Exception as exc:
-            recovery_trace["failure_stage"] = "source_resolution"
-            recovery_trace["failure_reason"] = f"chosen_kfs_invalid:{type(exc).__name__}"
-            runtime_gate.mark_true_source_recovery_result(
-                source_frame_id, committed=False, reason="chosen_kfs_invalid"
-            )
-            _finish_materialization(False, "chosen_kfs_invalid")
-            runtime_gate.append_true_recovery_commit_event(recovery_trace)
-            return
-        runtime_gate.annotate_pose_debug(
-            source_frame_id, getattr(pose_initializer, "last_incremental_debug", {})
-        )
-        _append_pose_and_matching_traces(
-            int(recovered.get("current_tick_frame_id", source_frame_id)),
-            getattr(pose_initializer, "last_incremental_debug", {}),
-        )
         runtime_gate.mark_pose_result(source_frame_id, Rt_src is not None)
         if Rt_src is None:
             pose_debug = getattr(pose_initializer, "last_incremental_debug", {})
@@ -781,17 +1009,144 @@ if __name__ == "__main__":
                     else 0.0
                 ),
             }
-            should_add_keyframe, _ = runtime_gate.decide(
+            should_add_keyframe, runtime_action = runtime_gate.decide(
                 frameID, info, bool(baseline_should_add), phase=phase, evidence=evidence
             )
             if (
                 risk_mode == "paper_aligned_semantic_v1"
                 and getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit")
                 == "true_source_commit"
+                and str(runtime_action) == "defer_recoverable"
+            ):
+                _attempt_recovery_pose_path(
+                    {
+                        "source_frame_id": int(frameID),
+                        "source_input_index": int(frameID),
+                        "current_tick_frame_id": int(frameID),
+                        "current_tick_image_name": str(info.get("image_name", "")),
+                        "bridge_type": "true_source_commit",
+                        "source_payload": runtime_gate._source_payload(frameID, info, evidence),
+                    },
+                    current_frame_id=frameID,
+                    attempt_reason="deferred_recovery_retry",
+                )
+            if (
+                risk_mode == "paper_aligned_semantic_v1"
+                and getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit")
+                == "true_source_commit"
             ):
                 for recovered in runtime_gate.pop_pending_true_source_commits(current_tick_frame_id=frameID):
-                    control = runtime_gate.decide_recovered_commit(recovered, current_tick_frame_id=frameID)
                     source_frame_id = int(recovered.get("source_frame_id", -1))
+                    cached_pose = recovery_pose_attempt_cache.get(source_frame_id, {})
+                    if cached_pose.get("Rt") is not None:
+                        recovered["_recovery_pose_attempt_success"] = True
+                        recovered["_recovery_pose_Rt"] = cached_pose.get("Rt")
+                        recovered["_recovery_pose_debug"] = dict(cached_pose.get("debug", {}) or {})
+                        pose_probe = {"allowed": True, "success": True, "block_reason": ""}
+                        runtime_gate.append_lifecycle_gate_event(
+                            {
+                                "frame_id": int(frameID),
+                                "source_frame_id": int(source_frame_id),
+                                "lifecycle_state_before": str((runtime_gate._get_event(source_frame_id) or {}).get("action", "")),
+                                "lifecycle_state_after": str((runtime_gate._get_event(source_frame_id) or {}).get("action", "")),
+                                "is_defer_recoverable": True,
+                                "is_defer_only": True,
+                                "in_recovery_pool": True,
+                                "pose_path_requested": True,
+                                "pose_path_allowed": True,
+                                "pose_path_request_reason": "recovery_pool_candidate",
+                                "pose_path_block_reason": "",
+                                "recovery_pose_attempted": False,
+                                "recovery_pose_attempt_result": "cached_success",
+                                "recovery_success": True,
+                                "control_allow_commit": False,
+                                "runtime_commit_attempted": False,
+                                "materialized": False,
+                            }
+                        )
+                    else:
+                        pose_probe = _attempt_recovery_pose_path(
+                            recovered,
+                            current_frame_id=frameID,
+                            attempt_reason="recovery_pool_candidate",
+                        )
+                    if not bool(pose_probe.get("allowed", False)) or not bool(pose_probe.get("success", False)):
+                        hold_reason = str(pose_probe.get("block_reason", "recovery_pose_attempt_failed") or "recovery_pose_attempt_failed")
+                        runtime_gate.hold_recovered_source(
+                            recovered,
+                            current_tick_frame_id=frameID,
+                            reason=hold_reason,
+                        )
+                        runtime_gate.mark_true_source_recovery_result(
+                            source_frame_id, committed=False, reason=hold_reason
+                        )
+                        runtime_gate.append_true_recovery_commit_event(
+                            {
+                                "recovery_event_id": int(len(runtime_gate.true_recovery_commit_events) + 1),
+                                "source_frame_id": source_frame_id,
+                                "source_input_index": int(recovered.get("source_input_index", source_frame_id)),
+                                "source_image_name": str((recovered.get("source_payload", {}) or {}).get("source_image_name", "")),
+                                "current_tick_frame_id": int(frameID),
+                                "current_tick_image_name": str(info.get("image_name", "")),
+                                "source_equals_current_frame": bool(source_frame_id == int(frameID)),
+                                "pool_enter_tick": int(recovered.get("pool_enter_tick", -1)),
+                                "recovery_attempt_tick": int(recovered.get("recovery_attempt_tick", -1)),
+                                "recovery_attempt_count": int(recovered.get("recovery_attempt_count", 0)),
+                                "recovery_success": True,
+                                "recovery_success_reason": "semantic_policy_success",
+                                "materialized_source_keyframe": False,
+                                "materialization_failure_reason": "recovery_pose_attempt_not_ready",
+                                "add_keyframe_called": False,
+                                "add_keyframe_success": False,
+                                "scene_keyframe_appended": False,
+                                "final_keyframe_incremented": False,
+                                "representation_update_called": False,
+                                "representation_update_success": False,
+                                "gaussian_update_called": False,
+                                "gaussian_update_success": False,
+                                "anchor_update_called": False,
+                                "anchor_update_success": False,
+                                "active_set_update_called": False,
+                                "active_set_update_success": False,
+                                "optimizer_received": False,
+                                "final_model_contains_source_frame": False,
+                                "failure_stage": "recovery_pose_path",
+                                "failure_reason": hold_reason,
+                                "commit_control_mode": str(getattr(args, "paper_aligned_recovery_commit_control", "off")),
+                                "commit_control_decision": "not_reached",
+                                "control_decision": "not_reached",
+                                "runtime_commit_attempted": False,
+                                "runtime_commit_success": False,
+                                "source_resolution_success": False,
+                                "add_keyframe_attempted": False,
+                                "add_keyframe_success": False,
+                                "materialized": False,
+                                "final_timeline_recorded": False,
+                            }
+                        )
+                        continue
+                    control = runtime_gate.decide_recovered_commit(recovered, current_tick_frame_id=frameID)
+                    runtime_gate.append_lifecycle_gate_event(
+                        {
+                            "frame_id": int(frameID),
+                            "source_frame_id": int(source_frame_id),
+                            "lifecycle_state_before": str((runtime_gate._get_event(source_frame_id) or {}).get("action", "")),
+                            "lifecycle_state_after": str((runtime_gate._get_event(source_frame_id) or {}).get("action", "")),
+                            "is_defer_recoverable": True,
+                            "is_defer_only": True,
+                            "in_recovery_pool": True,
+                            "pose_path_requested": True,
+                            "pose_path_allowed": True,
+                            "pose_path_request_reason": "recovery_pool_candidate",
+                            "pose_path_block_reason": "",
+                            "recovery_pose_attempted": True,
+                            "recovery_pose_attempt_result": "success",
+                            "recovery_success": True,
+                            "control_allow_commit": bool(str(control.get("decision")) == "commit" or str(control.get("control_decision")) == "allow_commit"),
+                            "runtime_commit_attempted": False,
+                            "materialized": False,
+                        }
+                    )
                     if str(control.get("decision")) == "commit":
                         _commit_true_source_frame(recovered, control_decision=control)
                     elif str(control.get("decision")) == "hold":

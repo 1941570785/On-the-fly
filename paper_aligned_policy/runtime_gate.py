@@ -45,6 +45,10 @@ class PaperAlignedRuntimeGate:
         self.chosen_kfs_candidate_events: list[dict[str, Any]] = []
         self.pose_reference_pool_events: list[dict[str, Any]] = []
         self.matching_to_pose_path_bridge_events: list[dict[str, Any]] = []
+        self.lifecycle_gate_events: list[dict[str, Any]] = []
+        self.recovery_pose_path_events: list[dict[str, Any]] = []
+        self.frame_stage_reachability_events: list[dict[str, Any]] = []
+        self.recovery_pose_outcome_fix_events: list[dict[str, Any]] = []
         self.trace_unavailable_reasons: dict[str, str] = {
             "match_graph_neighbor_ids": "No persistent match graph object is exposed; pairwise matches live on DescribedKeypoints.matches.",
             "match_graph_id": "No stable match graph id exists for keyframes in the current runtime.",
@@ -626,6 +630,18 @@ class PaperAlignedRuntimeGate:
     def append_matching_to_pose_path_bridge_event(self, payload: dict[str, Any]) -> None:
         self.matching_to_pose_path_bridge_events.append(dict(payload))
 
+    def append_lifecycle_gate_event(self, payload: dict[str, Any]) -> None:
+        self.lifecycle_gate_events.append(dict(payload))
+
+    def append_recovery_pose_path_event(self, payload: dict[str, Any]) -> None:
+        self.recovery_pose_path_events.append(dict(payload))
+
+    def append_frame_stage_reachability_event(self, payload: dict[str, Any]) -> None:
+        self.frame_stage_reachability_events.append(dict(payload))
+
+    def append_recovery_pose_outcome_fix_event(self, payload: dict[str, Any]) -> None:
+        self.recovery_pose_outcome_fix_events.append(dict(payload))
+
     def flush_trace(self) -> None:
         if not self.trace_path:
             return
@@ -663,6 +679,10 @@ class PaperAlignedRuntimeGate:
             "chosen_kfs_candidate_events": self.chosen_kfs_candidate_events,
             "pose_reference_pool_events": self.pose_reference_pool_events,
             "matching_to_pose_path_bridge_events": self.matching_to_pose_path_bridge_events,
+            "lifecycle_gate_events": self.lifecycle_gate_events,
+            "recovery_pose_path_events": self.recovery_pose_path_events,
+            "frame_stage_reachability_events": self.frame_stage_reachability_events,
+            "recovery_pose_outcome_fix_events": self.recovery_pose_outcome_fix_events,
             "trace_unavailable_reasons": self.trace_unavailable_reasons,
         }
         if self.semantic_policy is not None:
