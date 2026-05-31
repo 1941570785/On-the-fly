@@ -36,6 +36,19 @@ class PaperAlignedRuntimeGate:
         self.true_recovery_commit_events: list[dict[str, Any]] = []
         self.recovery_commit_control_events: list[dict[str, Any]] = []
         self.recovery_commit_materialization_events: list[dict[str, Any]] = []
+        self.keyframe_timeline_events: list[dict[str, Any]] = []
+        self.chosen_kfs_reference_events: list[dict[str, Any]] = []
+        self.matching_support_events: list[dict[str, Any]] = []
+        self.pnp_miniba_reference_events: list[dict[str, Any]] = []
+        self.local_map_anchor_events: list[dict[str, Any]] = []
+        self.support_integration_events: list[dict[str, Any]] = []
+        self.chosen_kfs_candidate_events: list[dict[str, Any]] = []
+        self.pose_reference_pool_events: list[dict[str, Any]] = []
+        self.matching_to_pose_path_bridge_events: list[dict[str, Any]] = []
+        self.trace_unavailable_reasons: dict[str, str] = {
+            "match_graph_neighbor_ids": "No persistent match graph object is exposed; pairwise matches live on DescribedKeypoints.matches.",
+            "match_graph_id": "No stable match graph id exists for keyframes in the current runtime.",
+        }
         self.semantic_policy: SemanticV1RuntimePolicy | None = None
         self.recovery_commit_controller = RecoveryCommitController(args)
         if self.mode == "paper_aligned_semantic_v1":
@@ -586,6 +599,33 @@ class PaperAlignedRuntimeGate:
     def append_recovery_commit_materialization_event(self, payload: dict[str, Any]) -> None:
         self.recovery_commit_materialization_events.append(dict(payload))
 
+    def append_keyframe_timeline_event(self, payload: dict[str, Any]) -> None:
+        self.keyframe_timeline_events.append(dict(payload))
+
+    def append_chosen_kfs_reference_event(self, payload: dict[str, Any]) -> None:
+        self.chosen_kfs_reference_events.append(dict(payload))
+
+    def append_matching_support_event(self, payload: dict[str, Any]) -> None:
+        self.matching_support_events.append(dict(payload))
+
+    def append_pnp_miniba_reference_event(self, payload: dict[str, Any]) -> None:
+        self.pnp_miniba_reference_events.append(dict(payload))
+
+    def append_local_map_anchor_event(self, payload: dict[str, Any]) -> None:
+        self.local_map_anchor_events.append(dict(payload))
+
+    def append_support_integration_event(self, payload: dict[str, Any]) -> None:
+        self.support_integration_events.append(dict(payload))
+
+    def append_chosen_kfs_candidate_events(self, payloads: list[dict[str, Any]]) -> None:
+        self.chosen_kfs_candidate_events.extend(dict(p) for p in payloads)
+
+    def append_pose_reference_pool_events(self, payloads: list[dict[str, Any]]) -> None:
+        self.pose_reference_pool_events.extend(dict(p) for p in payloads)
+
+    def append_matching_to_pose_path_bridge_event(self, payload: dict[str, Any]) -> None:
+        self.matching_to_pose_path_bridge_events.append(dict(payload))
+
     def flush_trace(self) -> None:
         if not self.trace_path:
             return
@@ -614,6 +654,16 @@ class PaperAlignedRuntimeGate:
             "recovery_commit_control_mode": self.recovery_commit_control_mode,
             "recovery_commit_control_events": self.recovery_commit_control_events,
             "recovery_commit_materialization_events": self.recovery_commit_materialization_events,
+            "keyframe_timeline_events": self.keyframe_timeline_events,
+            "chosen_kfs_reference_events": self.chosen_kfs_reference_events,
+            "matching_support_events": self.matching_support_events,
+            "pnp_miniba_reference_events": self.pnp_miniba_reference_events,
+            "local_map_anchor_events": self.local_map_anchor_events,
+            "support_integration_events": self.support_integration_events,
+            "chosen_kfs_candidate_events": self.chosen_kfs_candidate_events,
+            "pose_reference_pool_events": self.pose_reference_pool_events,
+            "matching_to_pose_path_bridge_events": self.matching_to_pose_path_bridge_events,
+            "trace_unavailable_reasons": self.trace_unavailable_reasons,
         }
         if self.semantic_policy is not None:
             payload["semantic_summary"] = self.semantic_policy.summary()

@@ -161,8 +161,173 @@ if __name__ == "__main__":
     pbar = tqdm(range(0, total_frames))
     reconstruction_start_time = time.time()
 
+    def _kf_source_frame_id(kf: Keyframe) -> int:
+        return int(kf.info.get("_paper_aligned_source_frame_id", kf.index))
+
+    def _kf_commit_origin(kf: Keyframe) -> str:
+        return str(kf.info.get("_paper_aligned_commit_origin", "unknown"))
+
+    def _kf_is_seed(kf: Keyframe) -> bool:
+        return bool(kf.info.get("_paper_aligned_is_v7_early_seed", False))
+
+    def _support_eligible_recovery_keyframes() -> list[Keyframe]:
+        return [
+            keyframe
+            for keyframe in scene_model.keyframes
+            if bool(keyframe.info.get("_paper_aligned_support_eligible_recovery_keyframe", False))
+            and not bool(keyframe.info.get("is_test", False))
+        ]
+
+    def _active_anchor_keyframe_ids() -> list[int]:
+        active_anchor = getattr(scene_model, "active_anchor", None)
+        if active_anchor is None:
+            return []
+        return [int(x) for x in getattr(active_anchor, "keyframe_ids", [])]
+
+    def _anchor_id_for_keyframe_id(keyframe_id: int) -> int:
+        for anchor_id, anchor in enumerate(getattr(scene_model, "anchors", []) or []):
+            if int(keyframe_id) in [int(x) for x in getattr(anchor, "keyframe_ids", [])]:
+                return int(anchor_id)
+        return -1
+
+    def _append_keyframe_timeline(kf: Keyframe, current_frame_id: int, control_reason: str = "") -> None:
+        if runtime_gate is None:
+            return
+        if any(int(e.get("keyframe_id", -999)) == int(kf.index) for e in runtime_gate.keyframe_timeline_events):
+            return
+        is_seed = _kf_is_seed(kf)
+        source_frame_id = _kf_source_frame_id(kf)
+        runtime_gate.append_keyframe_timeline_event(
+            {
+                "keyframe_id": int(kf.index),
+                "source_frame_id": source_frame_id,
+                "current_frame_id": int(current_frame_id),
+                "image_name": str(kf.info.get("image_name", "")),
+                "commit_origin": "early_seed_recovery_commit" if is_seed else _kf_commit_origin(kf),
+                "commit_channel": str(kf.info.get("_paper_aligned_commit_channel", "")),
+                "control_reason": str(control_reason or kf.info.get("_paper_aligned_control_reason", "")),
+                "materialized": True,
+                "anchor_id": _anchor_id_for_keyframe_id(int(kf.index)),
+                "match_graph_id": "unavailable",
+                "is_v7_early_seed": is_seed,
+                "seed_source_frame_id": source_frame_id if is_seed else "",
+                "seed_runtime_frame_id": int(kf.info.get("_paper_aligned_seed_runtime_frame_id", -1)) if is_seed else "",
+            }
+        )
+
+    def _append_chosen_reference_trace(frame_id: int, source_frame_id: int, chosen: list[Keyframe]) -> None:
+        if runtime_gate is None:
+            return
+        seed_dists = [abs(_kf_source_frame_id(kf) - int(source_frame_id)) for kf in chosen if _kf_is_seed(kf)]
+        runtime_gate.append_chosen_kfs_reference_event(
+            {
+                "frame_id": int(frame_id),
+                "source_frame_id": int(source_frame_id),
+                "chosen_kfs_ids": [int(kf.index) for kf in chosen],
+                "chosen_kfs_source_frame_ids": [_kf_source_frame_id(kf) for kf in chosen],
+                "chosen_kfs_commit_origin": [_kf_commit_origin(kf) for kf in chosen],
+                "chosen_kfs_contains_v7_seed": any(_kf_is_seed(kf) for kf in chosen),
+                "chosen_kfs_seed_count": sum(1 for kf in chosen if _kf_is_seed(kf)),
+                "nearest_seed_source_distance": min(seed_dists) if seed_dists else -1,
+                "reference_ids": [int(kf.index) for kf in chosen],
+                "reference_source_frame_ids": [_kf_source_frame_id(kf) for kf in chosen],
+            }
+        )
+
+    def _append_candidate_trace(frame_id: int) -> None:
+        if runtime_gate is None:
+            return
+        debug = getattr(scene_model, "last_prev_keyframes_debug", {}) or {}
+        rows = []
+        for row in debug.get("candidate_rows", []) or []:
+            rows.append({"frame_id": int(frame_id), **dict(row)})
+        if rows:
+            runtime_gate.append_chosen_kfs_candidate_events(rows)
+
+    def _append_pose_and_matching_traces(frame_id: int, pose_debug: dict[str, Any]) -> None:
+        if runtime_gate is None:
+            return
+        ref_ids = [int(x) for x in pose_debug.get("ref_keyframe_ids", []) or []]
+        ref_sources = [int(x) for x in pose_debug.get("ref_source_frame_ids", []) or []]
+        ref_origins = [str(x) for x in pose_debug.get("ref_commit_origin", []) or []]
+        ref_seed_flags = [bool(x) for x in pose_debug.get("ref_is_seed", []) or []]
+        ref_recovery_flags = [bool(x) for x in pose_debug.get("ref_is_recovery", []) or []]
+        ref_support_flags = [bool(x) for x in pose_debug.get("ref_is_support_eligible", []) or []]
+        match_counts = [int(x) for x in pose_debug.get("match_count_by_ref", []) or []]
+        runtime_gate.append_matching_support_event(
+            {
+                "frame_id": int(frame_id),
+                "matched_keyframe_ids": ref_ids,
+                "matched_keyframe_source_ids": ref_sources,
+                "matched_keyframe_commit_origin": ref_origins,
+                "matched_seed_keyframe_count": sum(1 for x in ref_seed_flags if x),
+                "match_count_total": int(pose_debug.get("match_count_total", 0) or 0),
+                "match_count_to_seed_keyframes": int(pose_debug.get("match_count_to_seed_keyframes", 0) or 0),
+                "best_match_keyframe_id": int(pose_debug.get("best_match_keyframe_id", -1) or -1),
+                "best_match_is_seed": bool(pose_debug.get("best_match_is_seed", False)),
+                "best_match_num_matches": int(pose_debug.get("best_match_num_matches", 0) or 0),
+                "match_count_by_ref": match_counts,
+            }
+        )
+        pnp_ids = [int(x) for x in pose_debug.get("pnp_ref_keyframe_ids", []) or []]
+        miniba_ids = [int(x) for x in pose_debug.get("miniba_ref_keyframe_ids", []) or []]
+        runtime_gate.append_pnp_miniba_reference_event(
+            {
+                "frame_id": int(frame_id),
+                "pnp_ref_keyframe_ids": pnp_ids,
+                "pnp_ref_source_frame_ids": [int(x) for x in pose_debug.get("pnp_ref_source_frame_ids", []) or []],
+                "pnp_ref_contains_seed": bool(pose_debug.get("pnp_ref_contains_seed", False)),
+                "pnp_inlier_count": int(pose_debug.get("num_pnp_inliers", 0) or 0),
+                "pnp_success": int(pose_debug.get("num_pnp_inliers", 0) or 0) >= 4,
+                "miniba_ref_keyframe_ids": miniba_ids,
+                "miniba_ref_source_frame_ids": [int(x) for x in pose_debug.get("miniba_ref_source_frame_ids", []) or []],
+                "miniba_ref_contains_seed": bool(pose_debug.get("miniba_ref_contains_seed", False)),
+                "miniba_inlier_count": int(pose_debug.get("num_miniba_inliers", 0) or 0),
+                "miniba_success": str(pose_debug.get("failure_reason", "") or "") == "",
+                "pose_failure_reason": str(pose_debug.get("failure_reason", "") or ""),
+            }
+        )
+        pool_rows = []
+        for i, ref_id in enumerate(ref_ids):
+            pool_rows.append(
+                {
+                    "frame_id": int(frame_id),
+                    "reference_keyframe_id": ref_id,
+                    "reference_source_frame_id": ref_sources[i] if i < len(ref_sources) else -1,
+                    "reference_commit_origin": ref_origins[i] if i < len(ref_origins) else "",
+                    "reference_is_recovery": ref_recovery_flags[i] if i < len(ref_recovery_flags) else False,
+                    "reference_is_early_seed": ref_seed_flags[i] if i < len(ref_seed_flags) else False,
+                    "reference_is_support_eligible": ref_support_flags[i] if i < len(ref_support_flags) else False,
+                    "reference_used_for_pnp": ref_id in pnp_ids,
+                    "reference_used_for_miniba": ref_id in miniba_ids,
+                    "reference_support_score": match_counts[i] if i < len(match_counts) else 0,
+                }
+            )
+        if pool_rows:
+            runtime_gate.append_pose_reference_pool_events(pool_rows)
+
+    def _append_local_map_anchor_trace(frame_id: int) -> None:
+        if runtime_gate is None:
+            return
+        active_ids = _active_anchor_keyframe_ids()
+        active_set = set(active_ids)
+        active_kfs = [kf for kf in scene_model.keyframes if int(kf.index) in active_set]
+        runtime_gate.append_local_map_anchor_event(
+            {
+                "frame_id": int(frame_id),
+                "local_map_keyframe_ids": active_ids,
+                "local_map_source_frame_ids": [_kf_source_frame_id(kf) for kf in active_kfs],
+                "local_map_contains_seed": any(_kf_is_seed(kf) for kf in active_kfs),
+                "anchor_id": _anchor_id_for_keyframe_id(active_ids[-1]) if active_ids else -1,
+                "anchor_keyframe_ids": active_ids,
+                "anchor_contains_seed": any(_kf_is_seed(kf) for kf in active_kfs),
+                "match_graph_neighbor_ids": "unavailable",
+                "match_graph_neighbor_contains_seed": "unavailable",
+            }
+        )
+
     def _commit_true_source_frame(recovered: dict, control_decision: dict[str, Any] | None = None) -> None:
-        global n_keyframes
+        global n_keyframes, prev_desc_kpts, prev_keyframe
         if runtime_gate is None:
             return
         source_payload = recovered.get("source_payload", {}) or {}
@@ -301,6 +466,19 @@ if __name__ == "__main__":
                 "image_name": str(source_payload.get("source_image_name", "")),
                 "image_path": str(source_payload.get("image_path", "")),
             }
+        source_info["_paper_aligned_source_frame_id"] = source_frame_id
+        source_info["_paper_aligned_commit_origin"] = "true_recovery_commit"
+        source_info["_paper_aligned_commit_channel"] = str(
+            ((control_decision or {}).get("debug", {}) or {}).get("commit_channel", "")
+        )
+        source_info["_paper_aligned_control_reason"] = str(
+            (control_decision or {}).get("decision_reason", "")
+        )
+        source_info["_paper_aligned_is_v7_early_seed"] = bool(
+            source_info["_paper_aligned_commit_channel"] == "pre_collapse_early_seed"
+            or source_info["_paper_aligned_control_reason"] == "v7_early_seed_commit"
+        )
+        source_info["_paper_aligned_seed_runtime_frame_id"] = int(recovered.get("current_tick_frame_id", -1))
         source_info["_paper_aligned_insertion_type"] = "true_recovery_commit"
         runtime_gate.mark_pose_attempt(source_frame_id)
         try:
@@ -309,6 +487,12 @@ if __name__ == "__main__":
                 True,
                 source_desc,
                 resolution_mode="paper_aligned_true_recovery",
+            )
+            _append_candidate_trace(int(recovered.get("current_tick_frame_id", source_frame_id)))
+            _append_chosen_reference_trace(
+                int(recovered.get("current_tick_frame_id", source_frame_id)),
+                source_frame_id,
+                prev_keyframes_src,
             )
             Rt_src = pose_initializer.initialize_incremental(
                 prev_keyframes_src, source_desc, n_keyframes, bool(source_info.get("is_test", False)), source_image
@@ -324,6 +508,10 @@ if __name__ == "__main__":
             return
         runtime_gate.annotate_pose_debug(
             source_frame_id, getattr(pose_initializer, "last_incremental_debug", {})
+        )
+        _append_pose_and_matching_traces(
+            int(recovered.get("current_tick_frame_id", source_frame_id)),
+            getattr(pose_initializer, "last_incremental_debug", {}),
         )
         runtime_gate.mark_pose_result(source_frame_id, Rt_src is not None)
         if Rt_src is None:
@@ -395,6 +583,46 @@ if __name__ == "__main__":
         runtime_gate.mark_anchor_update(source_frame_id)
         recovery_trace["anchor_update_called"] = True
         recovery_trace["anchor_update_success"] = True
+        current_tick_frame_id = int(recovered.get("current_tick_frame_id", -1))
+        source_action = str(event.get("action", ""))
+        support_checks = {
+            "materialized": True,
+            "true_source_frame_id_valid": int(source_frame_id) >= 0,
+            "pose_valid": Rt_src is not None,
+            "features_ready": source_desc is not None,
+            "not_duplicate": bool(len(scene_model.keyframes) > before_scene_keyframes),
+            "not_surrogate": bool(int(source_frame_id) != current_tick_frame_id),
+            "not_contamination": source_action in {"defer_recoverable", "direct_admit"},
+            "not_test": not bool(source_info.get("is_test", False)),
+        }
+        is_support_eligible = all(bool(v) for v in support_checks.values())
+        source_info["_paper_aligned_support_eligible_recovery_keyframe"] = bool(is_support_eligible)
+        if is_support_eligible:
+            prev_desc_kpts = source_desc
+            prev_keyframe = source_kf
+        runtime_gate.append_support_integration_event(
+            {
+                "event_type": "support_reference_registration",
+                "source_frame_id": int(source_frame_id),
+                "current_frame_id": current_tick_frame_id,
+                "keyframe_id": int(source_kf.index),
+                "image_name": str(source_info.get("image_name", "")),
+                "commit_origin": str(source_info.get("_paper_aligned_commit_origin", "")),
+                "commit_channel": str(source_info.get("_paper_aligned_commit_channel", "")),
+                "is_v7_early_seed": bool(source_info.get("_paper_aligned_is_v7_early_seed", False)),
+                "is_support_eligible_recovery_keyframe": bool(is_support_eligible),
+                "prev_desc_kpts_updated": bool(is_support_eligible),
+                "prev_keyframe_updated": bool(is_support_eligible),
+                **support_checks,
+                "failure_reason": "" if is_support_eligible else ";".join(k for k, v in support_checks.items() if not bool(v)),
+            }
+        )
+        _append_keyframe_timeline(
+            source_kf,
+            int(recovered.get("current_tick_frame_id", source_frame_id)),
+            recovery_trace["commit_control_reason"],
+        )
+        _append_local_map_anchor_trace(int(recovered.get("current_tick_frame_id", source_frame_id)))
         n_keyframes += 1
         runtime_gate.mark_final_keyframe_increment(source_frame_id)
         runtime_gate.mark_true_source_recovery_result(source_frame_id, committed=True, reason="")
@@ -426,6 +654,11 @@ if __name__ == "__main__":
         # 第一帧仅用于引导初始化，提取特征但不进行三角化
         if n_keyframes == 0:
             image, info = dataset.getnext()
+            info["_paper_aligned_source_frame_id"] = int(frameID)
+            info["_paper_aligned_commit_origin"] = "direct_admit"
+            info["_paper_aligned_commit_channel"] = ""
+            info["_paper_aligned_control_reason"] = ""
+            info["_paper_aligned_is_v7_early_seed"] = False
             prev_desc_kpts = detector(image)  # 提取关键点和描述子
             bootstrap_keyframe_dicts = [{"image": image, "info": info}]
             bootstrap_desc_kpts = [prev_desc_kpts]
@@ -435,6 +668,11 @@ if __name__ == "__main__":
         # ========== 特征提取与关键帧判断 ==========
         # 读取下一帧图像并提取特征
         image, info = dataset.getnext()
+        info["_paper_aligned_source_frame_id"] = int(frameID)
+        info["_paper_aligned_commit_origin"] = "direct_admit"
+        info["_paper_aligned_commit_channel"] = ""
+        info["_paper_aligned_control_reason"] = ""
+        info["_paper_aligned_is_v7_early_seed"] = False
         desc_kpts = detector(image)  # 【特征提取模块】提取稀疏关键点和描述子
         
         # 【姿态估计模块】当前帧与上一帧做特征匹配
@@ -447,10 +685,81 @@ if __name__ == "__main__":
             dist.median() > min_displacement  # 中位位移超过阈值
             and len(curr_prev_matches.kpts) > args.min_num_inliers  # 匹配点数量足够
         )
+        support_bridge_trace = None
+        if runtime_gate is not None and risk_mode != "off":
+            support_candidates = _support_eligible_recovery_keyframes()
+            best_support = {
+                "keyframe_id": -1,
+                "source_frame_id": -1,
+                "num_matches": 0,
+                "median_displacement": 0.0,
+                "is_seed": False,
+                "should_add": False,
+                "matches": None,
+                "dist": None,
+            }
+            for support_kf in support_candidates:
+                support_matches = matcher(desc_kpts, support_kf.desc_kpts)
+                support_dist = torch.norm(
+                    support_matches.kpts - support_matches.kpts_other, dim=-1
+                )
+                support_num_matches = int(len(support_matches.kpts))
+                support_median = (
+                    float(support_dist.median().item()) if len(support_dist) > 0 else 0.0
+                )
+                support_should_add = bool(
+                    support_median > min_displacement
+                    and support_num_matches > args.min_num_inliers
+                )
+                if (
+                    support_should_add
+                    and (
+                        not bool(best_support["should_add"])
+                        or support_median > float(best_support["median_displacement"])
+                    )
+                ):
+                    best_support = {
+                        "keyframe_id": int(support_kf.index),
+                        "source_frame_id": _kf_source_frame_id(support_kf),
+                        "num_matches": support_num_matches,
+                        "median_displacement": support_median,
+                        "is_seed": _kf_is_seed(support_kf),
+                        "should_add": True,
+                        "matches": support_matches,
+                        "dist": support_dist,
+                    }
+            support_bridge_trace = {
+                "frame_id": int(frameID),
+                "matched_seed_keyframe_count": 1 if bool(best_support["is_seed"]) else 0,
+                "matched_seed_best_score": int(best_support["num_matches"]) if bool(best_support["is_seed"]) else 0,
+                "support_candidate_count": len(support_candidates),
+                "best_support_keyframe_id": int(best_support["keyframe_id"]),
+                "best_support_source_frame_id": int(best_support["source_frame_id"]),
+                "best_support_num_matches": int(best_support["num_matches"]),
+                "best_support_median_displacement": float(best_support["median_displacement"]),
+                "support_triggered_keyframe_gate": bool(best_support["should_add"]),
+                "baseline_prev_num_matches": int(len(curr_prev_matches.kpts)),
+                "baseline_prev_median_displacement": float(dist.median().item()) if len(dist) > 0 else 0.0,
+                "baseline_prev_should_add": bool(should_add_keyframe),
+                "seed_promoted_to_reference_count": 0,
+                "seed_promoted_to_pnp_count": 0,
+                "seed_promoted_to_miniba_count": 0,
+                "bridge_block_reason": "",
+            }
+            if bool(best_support["should_add"]):
+                curr_prev_matches = best_support["matches"]
+                dist = best_support["dist"]
+                should_add_keyframe = True
         # 测试帧始终加入，用于姿态估计和评估（但不参与训练）
         should_add_keyframe |= info["is_test"]
         baseline_should_add = should_add_keyframe
         if runtime_gate is not None:
+            if support_bridge_trace is not None:
+                support_bridge_trace["final_should_add_after_support"] = bool(should_add_keyframe)
+                runtime_gate.append_support_integration_event(
+                    {"event_type": "support_candidate_matching", **support_bridge_trace}
+                )
+                runtime_gate.append_matching_to_pose_path_bridge_event(dict(support_bridge_trace))
             phase = (
                 "bootstrap"
                 if n_keyframes < args.num_keyframes_miniba_bootstrap
@@ -645,6 +954,11 @@ if __name__ == "__main__":
                     scene_model.add_keyframe(keyframe, f)
                     if runtime_gate is not None:
                         runtime_gate.mark_keyframe_add(frameID)
+                        _append_keyframe_timeline(
+                            keyframe,
+                            int(keyframe.info.get("_paper_aligned_source_frame_id", frameID)),
+                            "bootstrap_direct_admit",
+                        )
                     increment_runtime(runtimes["Add"], start_time)
                 
                 if args.viewer_mode not in ["none", "web"]:
@@ -717,6 +1031,9 @@ if __name__ == "__main__":
                 prev_keyframes = scene_model.get_prev_keyframes(
                     args.num_prev_keyframes_miniba_incr, True, desc_kpts
                 )
+                if runtime_gate is not None:
+                    _append_candidate_trace(frameID)
+                    _append_chosen_reference_trace(frameID, frameID, prev_keyframes)
                 increment_runtime(runtimes["tri"], start_time)
                 
                 start_time = time.time()
@@ -730,6 +1047,23 @@ if __name__ == "__main__":
                     runtime_gate.annotate_pose_debug(
                         frameID, getattr(pose_initializer, "last_incremental_debug", {})
                     )
+                    pose_debug = getattr(pose_initializer, "last_incremental_debug", {})
+                    _append_pose_and_matching_traces(frameID, pose_debug)
+                    if support_bridge_trace is not None:
+                        ref_seed_count = sum(
+                            1
+                            for kf in prev_keyframes
+                            if _kf_is_seed(kf)
+                        )
+                        runtime_gate.append_matching_to_pose_path_bridge_event(
+                            {
+                                **support_bridge_trace,
+                                "seed_promoted_to_reference_count": int(ref_seed_count),
+                                "seed_promoted_to_pnp_count": int(bool(pose_debug.get("pnp_ref_contains_seed", False))),
+                                "seed_promoted_to_miniba_count": int(bool(pose_debug.get("miniba_ref_contains_seed", False))),
+                                "bridge_block_reason": "" if ref_seed_count > 0 else "seed_not_selected_as_pose_reference",
+                            }
+                        )
                     runtime_gate.mark_pose_result(frameID, Rt is not None)
                 recent_pose_success.append(1 if Rt is not None else 0)
                 increment_runtime(runtimes["BAI"], start_time)
@@ -789,6 +1123,9 @@ if __name__ == "__main__":
             scene_model.place_anchor_if_needed()
             if runtime_gate is not None:
                 runtime_gate.mark_anchor_update(frameID)
+                if "prev_keyframe" in locals():
+                    _append_keyframe_timeline(prev_keyframe, frameID, "direct_admit")
+                _append_local_map_anchor_trace(frameID)
             increment_runtime(runtimes["anc"], start_time)
 
             n_keyframes += 1

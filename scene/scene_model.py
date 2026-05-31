@@ -94,6 +94,12 @@ class SceneModel:
         self.centre = torch.tensor([(width - 1) / 2, (height - 1) / 2], device="cuda")  # 图像中心点
         self.anchor_overlap = args.anchor_overlap  # 锚点重叠区域大小（用于平滑融合）
         self.optimization_thread = None  # 异步优化线程（流式模式下使用）
+        self.risk_admission_mode = str(getattr(args, "risk_admission_mode", "off") or "off")
+        self.recovery_commit_bridge = str(
+            getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit") or "true_source_commit"
+        )
+        self.min_num_inliers = int(getattr(args, "min_num_inliers", 0) or 0)
+        self.last_prev_keyframes_debug = {}
 
         # ========== LPIPS评估器初始化 ==========
         # 用于评估渲染质量（感知损失）
@@ -897,7 +903,18 @@ class SceneModel:
         if desc_kpts is not None and len(self.keyframes) > n:
             # 在搜索窗口内查找匹配数量最多的关键帧
             n_ckecks = min(self.num_prev_keyframes_check, len(self.keyframes))
-            keyframes_indices_to_check = self.sorted_frame_indices[:n_ckecks]
+            base_indices = [int(x) for x in self.sorted_frame_indices[:n_ckecks]]
+            keyframes_indices_to_check = list(base_indices)
+            support_indices = []
+            if self.risk_admission_mode != "off" and self.recovery_commit_bridge == "true_source_commit":
+                support_indices = [
+                    int(i)
+                    for i, keyframe in enumerate(self.keyframes)
+                    if bool(keyframe.info.get("_paper_aligned_support_eligible_recovery_keyframe", False))
+                ]
+                for index in support_indices:
+                    if index not in keyframes_indices_to_check:
+                        keyframes_indices_to_check.append(index)
             n_matches = torch.zeros(len(keyframes_indices_to_check), device="cuda")
             # 计算每个候选关键帧的匹配数量
             for i, index in enumerate(keyframes_indices_to_check):
@@ -905,11 +922,93 @@ class SceneModel:
                     self.keyframes[index].desc_kpts, desc_kpts
                 )
             # 选择匹配数量最多的n个关键帧
-            _, top_indices = torch.topk(n_matches, n)
-            prev_keyframes_indices = keyframes_indices_to_check[top_indices.cpu()]
+            top_count = min(n, len(keyframes_indices_to_check))
+            _, top_indices = torch.topk(n_matches, top_count)
+            selected_indices = [keyframes_indices_to_check[int(i)] for i in top_indices.cpu()]
+            sorted_match_ids = torch.argsort(n_matches, descending=True).cpu().tolist()
+            rank_by_index = {
+                keyframes_indices_to_check[int(rank_idx)]: rank + 1
+                for rank, rank_idx in enumerate(sorted_match_ids)
+            }
+            promotion_applied = False
+            promotion_reason = ""
+            if self.risk_admission_mode != "off" and self.recovery_commit_bridge == "true_source_commit":
+                selected_set = set(int(x) for x in selected_indices)
+                support_scored = [
+                    (int(index), float(n_matches[i].item()))
+                    for i, index in enumerate(keyframes_indices_to_check)
+                    if int(index) in set(support_indices)
+                ]
+                unselected_support = [
+                    (index, score) for index, score in support_scored if index not in selected_set
+                ]
+                if unselected_support and selected_indices:
+                    best_support_index, best_support_score = max(unselected_support, key=lambda item: item[1])
+                    median_score = float(torch.median(n_matches).item()) if len(n_matches) > 0 else 0.0
+                    selected_scores = {
+                        int(index): float(n_matches[keyframes_indices_to_check.index(int(index))].item())
+                        for index in selected_indices
+                    }
+                    lowest_selected = min(selected_indices, key=lambda index: selected_scores[int(index)])
+                    direct_support_insufficient = selected_scores[int(lowest_selected)] < float(
+                        getattr(self, "min_num_inliers", 0) or 0
+                    )
+                    if best_support_score >= median_score or direct_support_insufficient:
+                        selected_indices = [int(x) for x in selected_indices]
+                        selected_indices[selected_indices.index(int(lowest_selected))] = int(best_support_index)
+                        promotion_applied = True
+                        promotion_reason = (
+                            "support_score_above_candidate_median"
+                            if best_support_score >= median_score
+                            else "direct_reference_support_insufficient"
+                        )
+            prev_keyframes_indices = torch.tensor(selected_indices, device="cpu", dtype=torch.long)
+            final_selected = set(int(x) for x in prev_keyframes_indices.tolist())
+            candidate_rows = []
+            for i, index in enumerate(keyframes_indices_to_check):
+                keyframe = self.keyframes[int(index)]
+                commit_origin = str(keyframe.info.get("_paper_aligned_commit_origin", "unknown"))
+                is_recovery = commit_origin in {"true_recovery_commit", "early_seed_recovery_commit"}
+                candidate_rows.append(
+                    {
+                        "candidate_keyframe_id": int(keyframe.index),
+                        "candidate_source_frame_id": int(
+                            keyframe.info.get("_paper_aligned_source_frame_id", keyframe.index)
+                        ),
+                        "candidate_commit_origin": commit_origin,
+                        "candidate_is_recovery": bool(is_recovery),
+                        "candidate_is_early_seed": bool(keyframe.info.get("_paper_aligned_is_v7_early_seed", False)),
+                        "candidate_is_support_eligible": bool(
+                            keyframe.info.get("_paper_aligned_support_eligible_recovery_keyframe", False)
+                        ),
+                        "candidate_rank_before_filter": int(rank_by_index.get(int(index), 0)),
+                        "candidate_rank_after_filter": int(
+                            list(prev_keyframes_indices.tolist()).index(int(index)) + 1
+                            if int(index) in final_selected
+                            else 0
+                        ),
+                        "candidate_selected": bool(int(index) in final_selected),
+                        "filter_reason": "" if int(index) in final_selected else "topk_not_selected",
+                        "promotion_applied": bool(promotion_applied and int(index) in final_selected),
+                        "promotion_reason": promotion_reason if promotion_applied and int(index) in final_selected else "",
+                        "reference_support_score": float(n_matches[i].item()),
+                    }
+                )
+            self.last_prev_keyframes_debug = {
+                "candidate_rows": candidate_rows,
+                "selected_keyframe_ids": [int(x) for x in prev_keyframes_indices.tolist()],
+                "promotion_applied": bool(promotion_applied),
+                "promotion_reason": promotion_reason,
+            }
         # 如果没有提供特征点描述符，直接选择距离最近的n个关键帧
         else:
             prev_keyframes_indices = self.sorted_frame_indices[:n]
+            self.last_prev_keyframes_debug = {
+                "candidate_rows": [],
+                "selected_keyframe_ids": [int(x) for x in prev_keyframes_indices],
+                "promotion_applied": False,
+                "promotion_reason": "",
+            }
         prev_keyframes = [self.keyframes[i] for i in prev_keyframes_indices]
 
         # ========== 更新3D点 ==========

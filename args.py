@@ -169,6 +169,7 @@ def get_args():
             'recovery_commit_balanced_v4',
             'recovery_commit_rescue_v5',
             'recovery_commit_materialization_aware_v6',
+            'recovery_commit_early_seed_v7',
         ],
         help='Post-success recovery commit control mode. off keeps prior behavior.',
     )
@@ -657,6 +658,36 @@ def get_args():
         type=float,
         default=0.35,
         help='Trigger early coverage rescue when recent materialization rate drops below this value.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v7_early_seed_start',
+        type=int,
+        default=150,
+        help='v7 early seed source-frame window start.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v7_early_seed_end',
+        type=int,
+        default=300,
+        help='v7 early seed source-frame window end.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v7_seed_budget_total_short500',
+        type=int,
+        default=30,
+        help='v7 total early seed budget for short500 audits.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v7_min_seed_feasibility',
+        type=float,
+        default=0.38,
+        help='v7 minimum materialization feasibility for early seed commit.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v7_min_seed_matches',
+        type=int,
+        default=300,
+        help='v7 minimum match support for early seed commit.',
     )
     parser.add_argument(
         '--paper_aligned_contract_trace_path',

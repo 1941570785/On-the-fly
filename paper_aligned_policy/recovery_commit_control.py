@@ -248,6 +248,21 @@ class RecoveryCommitController:
         self.v6_materialization_rate_trigger = float(
             getattr(args, "paper_aligned_recovery_v6_materialization_rate_trigger", 0.35) or 0.35
         )
+        self.v7_early_seed_start = int(
+            getattr(args, "paper_aligned_recovery_v7_early_seed_start", 150) or 150
+        )
+        self.v7_early_seed_end = int(
+            getattr(args, "paper_aligned_recovery_v7_early_seed_end", 300) or 300
+        )
+        self.v7_seed_budget_total_short500 = int(
+            getattr(args, "paper_aligned_recovery_v7_seed_budget_total_short500", 30) or 30
+        )
+        self.v7_min_seed_feasibility = float(
+            getattr(args, "paper_aligned_recovery_v7_min_seed_feasibility", 0.38) or 0.38
+        )
+        self.v7_min_seed_matches = int(
+            getattr(args, "paper_aligned_recovery_v7_min_seed_matches", 300) or 300
+        )
         self._gap_interval_index = 0
         self._in_gap_interval = False
         self._gap_interval_override_count = 0
@@ -258,6 +273,7 @@ class RecoveryCommitController:
         self._v5_windows: dict[int, dict[str, Any]] = {}
         self._v5_episode_rescue_counts: dict[int, int] = {}
         self._v6_windows: dict[int, dict[str, Any]] = {}
+        self._v7_seed_commits = 0
 
     def _adaptive_budget(self, main_chain_gap_p90: float, keyframe_density_per_100: float) -> int:
         if main_chain_gap_p90 >= 6.0:
@@ -1110,6 +1126,105 @@ class RecoveryCommitController:
         ws["attempts"] = int(ws["attempts"]) + 1
         return RecoveryCommitDecision("commit", "v6_support_ranked_sparse_commit", debug)
 
+    def _decide_early_seed_v7(
+        self,
+        candidate: dict[str, Any],
+        context: dict[str, Any],
+        base_debug: dict[str, Any],
+    ) -> RecoveryCommitDecision:
+        scores = candidate.get("scores", {}) or {}
+        source_payload = candidate.get("source_payload", {}) or {}
+        inlier_evidence = source_payload.get("inlier_evidence", {}) or {}
+        source_input = int(candidate.get("source_input_index", candidate.get("source_frame_id", -1)))
+        current_tick = int(context.get("current_tick_frame_id", -1))
+        source_gap_to_last_committed = int(context.get("source_gap_to_last_committed", 0))
+        predicted_gap_if_hold = int(context.get("predicted_gap_if_hold", source_gap_to_last_committed))
+        pose_fail_count = int(context.get("source_pose_fail_count", 0) or 0)
+        v_t = _f(scores.get("V_t"))
+        q_t = _f(scores.get("Q_t"))
+        r_t = _f(scores.get("R_t"))
+        num_matches = int(_f(inlier_evidence.get("num_matches", -1), -1.0))
+        num_inliers = int(_f(context.get("source_num_inliers", -1), -1.0))
+        feasibility, feature_missing = self._materialization_feasibility_score(
+            num_matches=num_matches,
+            num_inliers=num_inliers,
+            v_t=v_t,
+            q_t=q_t,
+            r_t=r_t,
+            source_gap_to_last_committed=source_gap_to_last_committed,
+            predicted_gap_if_hold=predicted_gap_if_hold,
+            pose_fail_count=pose_fail_count,
+        )
+        early_seed_window_active = bool(
+            self.v7_early_seed_start <= source_input < self.v7_early_seed_end
+        )
+        hard_ok = bool(
+            (not bool(context.get("source_already_committed", False)))
+            and (not bool(context.get("is_surrogate", False)))
+            and (not bool(context.get("is_contamination_risk", False)))
+            and source_input >= 0
+            and r_t < self.v5_max_r
+            and v_t >= self.v5_min_v
+            and q_t >= self.v5_min_q
+            and num_matches >= self.min_geom_matches
+        )
+        can_seed = bool(
+            early_seed_window_active
+            and hard_ok
+            and self._v7_seed_commits < self.v7_seed_budget_total_short500
+            and feasibility >= self.v7_min_seed_feasibility
+            and num_matches >= self.v7_min_seed_matches
+        )
+        debug = dict(base_debug)
+        debug.update(
+            {
+                "commit_channel": "pre_collapse_early_seed" if can_seed else "",
+                "rescue_channel": "",
+                "R_t": r_t,
+                "V_t": v_t,
+                "Q_t": q_t,
+                "num_matches": num_matches,
+                "num_inliers": num_inliers,
+                "support_count": num_inliers,
+                "support_score": self._v5_support_score(
+                    num_matches=max(num_matches, 0),
+                    num_inliers=max(num_inliers, 0),
+                    v_t=v_t,
+                    q_t=q_t,
+                    r_t=r_t,
+                ),
+                "materialization_feasibility_score": feasibility,
+                "feature_missing": ",".join(feature_missing),
+                "source_gap_to_last_committed": source_gap_to_last_committed,
+                "predicted_gap_if_hold": predicted_gap_if_hold,
+                "early_seed_window_active": early_seed_window_active,
+                "can_be_early_seed_candidate": can_seed,
+                "seed_budget_used": self._v7_seed_commits,
+                "seed_budget_total": self.v7_seed_budget_total_short500,
+                "invalid_semantics_type": "" if hard_ok else "hard_invalid_semantics",
+                "hard_invalid_reason": "" if hard_ok else "source_or_rvq_semantics",
+                "soft_invalid_reason": "",
+                "support_trend_warning": False,
+                "feasibility_trend_warning": False,
+                "growth_slowdown_warning": False,
+                "blocked_reason": "",
+                "is_surrogate": bool(context.get("is_surrogate", False)),
+                "is_contamination_risk": bool(context.get("is_contamination_risk", False)),
+                "is_duplicate": bool(context.get("source_already_committed", False)),
+            }
+        )
+        if can_seed:
+            self._v7_seed_commits += 1
+            debug["seed_budget_used"] = self._v7_seed_commits
+            return RecoveryCommitDecision("commit", "v7_early_seed_commit", debug)
+        fallback = self._decide_materialization_aware_v6(candidate, context, debug)
+        merged_debug = dict(fallback.debug)
+        merged_debug.setdefault("early_seed_window_active", early_seed_window_active)
+        merged_debug.setdefault("can_be_early_seed_candidate", False)
+        merged_debug.setdefault("seed_budget_used", self._v7_seed_commits)
+        merged_debug.setdefault("seed_budget_total", self.v7_seed_budget_total_short500)
+        return RecoveryCommitDecision(fallback.action, fallback.reason, merged_debug)
+
     def _decide_strict_v3(
         self,
         candidate: dict[str, Any],
@@ -1371,6 +1486,8 @@ class RecoveryCommitController:
             return self._decide_rescue_v5(candidate, context, debug)
         if self.mode == "recovery_commit_materialization_aware_v6":
             return self._decide_materialization_aware_v6(candidate, context, debug)
+        if self.mode == "recovery_commit_early_seed_v7":
+            return self._decide_early_seed_v7(candidate, context, debug)
         if not age_ok:
             debug["blocked_reason"] = "reject_age"
             return RecoveryCommitDecision("reject", "reject_age", debug)

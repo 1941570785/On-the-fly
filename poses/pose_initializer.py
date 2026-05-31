@@ -255,6 +255,24 @@ class PoseInitializer():
             "num_2d3d_correspondences": 0,
             "num_pnp_inliers": 0,
             "num_miniba_inliers": 0,
+            "ref_keyframe_ids": [],
+            "ref_source_frame_ids": [],
+            "ref_commit_origin": [],
+            "ref_is_recovery": [],
+            "ref_is_seed": [],
+            "ref_is_support_eligible": [],
+            "match_count_by_ref": [],
+            "match_count_total": 0,
+            "match_count_to_seed_keyframes": 0,
+            "best_match_keyframe_id": -1,
+            "best_match_is_seed": False,
+            "best_match_num_matches": 0,
+            "pnp_ref_keyframe_ids": [],
+            "pnp_ref_source_frame_ids": [],
+            "pnp_ref_contains_seed": False,
+            "miniba_ref_keyframe_ids": [],
+            "miniba_ref_source_frame_ids": [],
+            "miniba_ref_contains_seed": False,
         }
 
         # Match the current frame with previous keyframes
@@ -263,15 +281,38 @@ class PoseInitializer():
         uvs = []
         confs = []
         match_indices = []
+        corr_ref_ids = []
         for keyframe in keyframes:
             # 匹配当前帧与历史关键帧并过滤外点
             matches = self.matcher(curr_desc_kpts, keyframe.desc_kpts, remove_outliers=True, update_kpts_flag="all", kID=index, kID_other=keyframe.index)
 
             mask = keyframe.desc_kpts.has_pt3d[matches.idx_other]
+            valid_count = int(mask.sum().item())
+            source_frame_id = int(keyframe.info.get("_paper_aligned_source_frame_id", keyframe.index))
+            commit_origin = str(keyframe.info.get("_paper_aligned_commit_origin", "unknown"))
+            is_recovery = commit_origin in {"true_recovery_commit", "early_seed_recovery_commit"}
+            is_seed = bool(keyframe.info.get("_paper_aligned_is_v7_early_seed", False))
+            self.last_incremental_debug["ref_keyframe_ids"].append(int(keyframe.index))
+            self.last_incremental_debug["ref_source_frame_ids"].append(source_frame_id)
+            self.last_incremental_debug["ref_commit_origin"].append(commit_origin)
+            self.last_incremental_debug["ref_is_recovery"].append(is_recovery)
+            self.last_incremental_debug["ref_is_seed"].append(is_seed)
+            self.last_incremental_debug["ref_is_support_eligible"].append(
+                bool(keyframe.info.get("_paper_aligned_support_eligible_recovery_keyframe", False))
+            )
+            self.last_incremental_debug["match_count_by_ref"].append(valid_count)
+            self.last_incremental_debug["match_count_total"] += valid_count
+            if is_seed:
+                self.last_incremental_debug["match_count_to_seed_keyframes"] += valid_count
+            if valid_count > int(self.last_incremental_debug["best_match_num_matches"]):
+                self.last_incremental_debug["best_match_num_matches"] = valid_count
+                self.last_incremental_debug["best_match_keyframe_id"] = int(keyframe.index)
+                self.last_incremental_debug["best_match_is_seed"] = is_seed
             xyz.append(keyframe.desc_kpts.pts3d[matches.idx_other[mask]])
             uvs.append(matches.kpts[mask])
             confs.append(keyframe.desc_kpts.pts_conf[matches.idx_other[mask]])
             match_indices.append(matches.idx[mask])
+            corr_ref_ids.append(torch.full((valid_count,), int(keyframe.index), device="cuda", dtype=torch.long))
 
         if len(xyz) == 0:
             self.last_incremental_debug["failure_reason"] = "no_2d3d_correspondences"
@@ -280,6 +321,7 @@ class PoseInitializer():
         uvs = torch.cat(uvs, dim=0)
         confs = torch.cat(confs, dim=0)
         match_indices = torch.cat(match_indices, dim=0)
+        corr_ref_ids = torch.cat(corr_ref_ids, dim=0)
         self.last_incremental_debug["num_2d3d_correspondences"] = int(len(xyz))
 
         # Subsample the points if there are too many
@@ -291,6 +333,7 @@ class PoseInitializer():
             uvs = uvs[selected_indices]
             confs = confs[selected_indices]
             match_indices = match_indices[selected_indices]
+            corr_ref_ids = corr_ref_ids[selected_indices]
 
         # Estimate an initial camera pose and inliers using PnP RANSAC
         # 使用上一关键帧作为初始位姿
@@ -309,7 +352,20 @@ class PoseInitializer():
         uvs = uvs[inliers]
         confs = confs[inliers]
         match_indices = match_indices[inliers]
+        corr_ref_ids = corr_ref_ids[inliers]
         self.last_incremental_debug["num_pnp_inliers"] = int(len(xyz))
+        pnp_ref_ids = sorted({int(x) for x in corr_ref_ids.detach().cpu().tolist()})
+        self.last_incremental_debug["pnp_ref_keyframe_ids"] = pnp_ref_ids
+        self.last_incremental_debug["pnp_ref_source_frame_ids"] = [
+            int(kf.info.get("_paper_aligned_source_frame_id", kf.index))
+            for kf in keyframes
+            if int(kf.index) in pnp_ref_ids
+        ]
+        self.last_incremental_debug["pnp_ref_contains_seed"] = any(
+            bool(kf.info.get("_paper_aligned_is_v7_early_seed", False))
+            for kf in keyframes
+            if int(kf.index) in pnp_ref_ids
+        )
         if len(xyz) < 4:
             self.last_incremental_debug["failure_reason"] = "pnp_inliers_too_few"
             return None
@@ -320,9 +376,23 @@ class PoseInitializer():
             selected_indices = torch.topk(torch.rand_like(xyz[..., 0]), self.num_pts_miniba_incr, dim=0, largest=False)[1]
             xyz_ba = xyz[selected_indices]
             uvs_ba = uvs[selected_indices]
+            miniba_ref_ids_tensor = corr_ref_ids[selected_indices]
         elif len(xyz) < self.num_pts_miniba_incr:
             xyz_ba = torch.cat([xyz, torch.zeros(self.num_pts_miniba_incr - len(xyz), 3, device="cuda")], dim=0)
             uvs_ba = torch.cat([uvs, -torch.ones(self.num_pts_miniba_incr - len(uvs), 2, device="cuda")], dim=0)
+            miniba_ref_ids_tensor = corr_ref_ids
+        miniba_ref_ids = sorted({int(x) for x in miniba_ref_ids_tensor.detach().cpu().tolist()})
+        self.last_incremental_debug["miniba_ref_keyframe_ids"] = miniba_ref_ids
+        self.last_incremental_debug["miniba_ref_source_frame_ids"] = [
+            int(kf.info.get("_paper_aligned_source_frame_id", kf.index))
+            for kf in keyframes
+            if int(kf.index) in miniba_ref_ids
+        ]
+        self.last_incremental_debug["miniba_ref_contains_seed"] = any(
+            bool(kf.info.get("_paper_aligned_is_v7_early_seed", False))
+            for kf in keyframes
+            if int(kf.index) in miniba_ref_ids
+        )
 
         # Run the initialization
         # 以 PnP 结果为初始化，执行小规模 BA 微调
