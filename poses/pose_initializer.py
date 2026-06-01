@@ -81,7 +81,18 @@ class PoseInitializer():
         self.PnPRANSAC = RANSACEstimator(args.pnpransac_samples, self.max_pnp_error, EstimatorType.P4P)
         self.last_incremental_debug: dict[str, object] = {}
         self.last_recovery_pose_outcome_fix: dict[str, object] = {}
+        self.last_recovery_2d3d_support: dict[str, object] = {}
+        self.last_recovery_pnp_consensus: dict[str, object] = {}
+        self.last_recovery_ref_subset: list[dict[str, object]] = []
+        self.recovery_defer_source_frame_id: int = -1
         self._last_pnp_Rt: torch.Tensor | None = None
+        self.recovery_miniba_retry_min_2d3d = 500
+        self.recovery_miniba_retry_min_pnp_inliers = 20
+        self.recovery_consensus_target_refs = 10
+        self.recovery_consensus_max_refs = 12
+        self.recovery_consensus_min_refs = 6
+        self.recovery_consensus_min_total_valid_2d3d = 120
+        self.recovery_probe_min_inlier_ratio = 0.03
 
     def build_problem(self,
                       desc_kpts_list: list[DescribedKeypoints],
@@ -420,10 +431,13 @@ class PoseInitializer():
                 keyframe.desc_kpts.matches.pop(index, None)
             return None
 
+    def _keyframe_has_pt3d_count(self, keyframe: Keyframe) -> int:
+        return int(keyframe.desc_kpts.has_pt3d.sum().item())
+
     def _sort_recovery_reference_keyframes(
         self, keyframes: list[Keyframe], curr_desc_kpts: DescribedKeypoints, index: int
     ) -> list[Keyframe]:
-        scored: list[tuple[int, int, int, Keyframe]] = []
+        scored: list[tuple[int, int, int, int, Keyframe]] = []
         for keyframe in keyframes:
             matches = self.matcher(
                 curr_desc_kpts,
@@ -435,13 +449,243 @@ class PoseInitializer():
             )
             mask = keyframe.desc_kpts.has_pt3d[matches.idx_other]
             valid_count = int(mask.sum().item())
+            raw_count = int(len(matches.kpts))
+            has_pt3d_total = self._keyframe_has_pt3d_count(keyframe)
             is_seed = int(bool(keyframe.info.get("_paper_aligned_is_v7_early_seed", False)))
             is_support = int(
                 bool(keyframe.info.get("_paper_aligned_support_eligible_recovery_keyframe", False))
             )
-            scored.append((is_support, is_seed, valid_count, keyframe))
-        scored.sort(key=lambda item: (-item[0], -item[1], -item[2]))
-        return [item[3] for item in scored]
+            scored.append((has_pt3d_total, valid_count, is_support, is_seed, raw_count, keyframe))
+        scored.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[3], -item[4]))
+        return [item[5] for item in scored]
+
+    def _ref_conf_weight_from_probe_stat(self, stat: dict[str, object]) -> float:
+        ratio = float(stat.get("ref_pnp_inlier_ratio", 0.0) or 0.0)
+        valid = float(stat.get("ref_valid_2d3d_count", 0) or 0.0)
+        score = float(stat.get("ref_consensus_score", 0.0) or 0.0)
+        return float(
+            max(
+                0.12,
+                min(
+                    1.0,
+                    0.20 + 0.35 * min(score, 2.0) / 2.0 + 0.30 * min(ratio * 12.0, 1.0) + 0.15 * min(valid / 200.0, 1.0),
+                ),
+            )
+        )
+
+    def _per_ref_correspondence_cap(self, stat: dict[str, object]) -> int | None:
+        valid = int(stat.get("ref_valid_2d3d_count", 0) or 0)
+        if valid <= 0:
+            return 0
+        ratio = float(stat.get("ref_pnp_inlier_ratio", 0.0) or 0.0)
+        has_pt3d = int(stat.get("ref_has_pt3d_count", 0) or 0)
+        if has_pt3d > 5000 and ratio < 0.01:
+            return max(16, int(valid * 0.08))
+        if ratio < 0.02:
+            return max(24, int(valid * min(0.35, 0.10 + ratio * 10.0)))
+        return None
+
+    def _collect_recovery_correspondences(
+        self,
+        keyframes: list[Keyframe],
+        curr_desc_kpts: DescribedKeypoints,
+        index: int,
+        Rt_guess_for_triangulation: torch.Tensor | None,
+        ref_conf_weights: dict[int, float] | None = None,
+        ref_correspondence_caps: dict[int, int] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, object]]:
+        support_debug: dict[str, object] = {
+            "raw_2d2d_match_count": 0,
+            "verified_2d2d_match_count": 0,
+            "has_pt3d_match_count": 0,
+            "temporary_3d_support_used": False,
+            "temporary_3d_support_count": 0,
+            "valid_2d3d_from_direct_refs": 0,
+            "valid_2d3d_from_recovery_refs": 0,
+            "valid_2d3d_from_seed_refs": 0,
+            "per_ref_3d_bearing_counts": [],
+            "per_ref_raw_match_counts": [],
+            "selected_refs_by_3d_support": [int(kf.index) for kf in keyframes],
+        }
+        xyz: list[torch.Tensor] = []
+        uvs: list[torch.Tensor] = []
+        confs: list[torch.Tensor] = []
+        corr_ref_ids: list[torch.Tensor] = []
+        for keyframe in keyframes:
+            matches = self.matcher(
+                curr_desc_kpts,
+                keyframe.desc_kpts,
+                remove_outliers=True,
+                update_kpts_flag="all",
+                kID=index,
+                kID_other=keyframe.index,
+            )
+            raw_count = int(len(matches.kpts))
+            mask = keyframe.desc_kpts.has_pt3d[matches.idx_other]
+            valid_count = int(mask.sum().item())
+            commit_origin = str(keyframe.info.get("_paper_aligned_commit_origin", "unknown"))
+            is_recovery = commit_origin in {"true_recovery_commit", "early_seed_recovery_commit"}
+            is_seed = bool(keyframe.info.get("_paper_aligned_is_v7_early_seed", False))
+            support_debug["raw_2d2d_match_count"] = int(support_debug["raw_2d2d_match_count"]) + raw_count
+            support_debug["has_pt3d_match_count"] = int(support_debug["has_pt3d_match_count"]) + valid_count
+            support_debug["per_ref_3d_bearing_counts"].append(valid_count)
+            support_debug["per_ref_raw_match_counts"].append(raw_count)
+            if is_recovery:
+                support_debug["valid_2d3d_from_recovery_refs"] = int(
+                    support_debug["valid_2d3d_from_recovery_refs"]
+                ) + valid_count
+            elif is_seed:
+                support_debug["valid_2d3d_from_seed_refs"] = int(support_debug["valid_2d3d_from_seed_refs"]) + valid_count
+            else:
+                support_debug["valid_2d3d_from_direct_refs"] = int(
+                    support_debug["valid_2d3d_from_direct_refs"]
+                ) + valid_count
+            if valid_count == 0:
+                continue
+            ref_pts_conf = keyframe.desc_kpts.pts_conf[matches.idx_other[mask]]
+            ref_xyz = keyframe.desc_kpts.pts3d[matches.idx_other[mask]]
+            ref_uvs = matches.kpts[mask]
+            kid = int(keyframe.index)
+            if ref_correspondence_caps is not None and kid in ref_correspondence_caps:
+                cap = int(ref_correspondence_caps[kid])
+                if cap <= 0:
+                    continue
+                if valid_count > cap:
+                    top_idx = torch.topk(ref_pts_conf, cap, largest=True).indices
+                    ref_xyz = ref_xyz[top_idx]
+                    ref_uvs = ref_uvs[top_idx]
+                    ref_pts_conf = ref_pts_conf[top_idx]
+                    valid_count = cap
+            if ref_conf_weights is not None:
+                ref_pts_conf = ref_pts_conf * float(ref_conf_weights.get(kid, 0.5))
+            xyz.append(ref_xyz)
+            uvs.append(ref_uvs)
+            confs.append(ref_pts_conf)
+            corr_ref_ids.append(
+                torch.full((valid_count,), kid, device="cuda", dtype=torch.long)
+            )
+        if Rt_guess_for_triangulation is not None:
+            extra_xyz, extra_uvs, extra_confs = self._triangulate_recovery_correspondences(
+                keyframes, curr_desc_kpts, index, Rt_guess_for_triangulation
+            )
+            if len(extra_xyz) > 0:
+                support_debug["temporary_3d_support_used"] = True
+                support_debug["temporary_3d_support_count"] = int(len(extra_xyz))
+                xyz.append(extra_xyz)
+                uvs.append(extra_uvs)
+                confs.append(extra_confs)
+                corr_ref_ids.append(
+                    torch.full((len(extra_xyz),), int(keyframes[0].index), device="cuda", dtype=torch.long)
+                )
+        if not xyz:
+            support_debug["verified_2d2d_match_count"] = 0
+            return (
+                torch.zeros(0, 3, device="cuda"),
+                torch.zeros(0, 2, device="cuda"),
+                torch.zeros(0, device="cuda"),
+                torch.zeros(0, device="cuda", dtype=torch.long),
+                support_debug,
+            )
+        xyz_cat = torch.cat(xyz, dim=0)
+        uvs_cat = torch.cat(uvs, dim=0)
+        confs_cat = torch.cat(confs, dim=0)
+        corr_ref_ids_cat = torch.cat(corr_ref_ids, dim=0)
+        support_debug["verified_2d2d_match_count"] = int(len(xyz_cat))
+        return xyz_cat, uvs_cat, confs_cat, corr_ref_ids_cat, support_debug
+
+    def _run_pose_from_correspondences(
+        self,
+        keyframes: list[Keyframe],
+        xyz_cat: torch.Tensor,
+        uvs_cat: torch.Tensor,
+        confs_cat: torch.Tensor,
+        corr_ref_ids_cat: torch.Tensor,
+        index: int,
+        is_test: bool,
+    ) -> torch.Tensor | None:
+        self.last_incremental_debug["num_2d3d_correspondences"] = int(len(xyz_cat))
+        if len(xyz_cat) < 4:
+            self.last_incremental_debug["failure_reason"] = "insufficient_correspondences_for_pnp"
+            return None
+        if len(xyz_cat) > self.num_pts_pnpransac:
+            selected_indices = torch.multinomial(
+                confs_cat, min(self.num_pts_pnpransac, len(xyz_cat)), replacement=False
+            )
+            xyz_cat = xyz_cat[selected_indices]
+            uvs_cat = uvs_cat[selected_indices]
+            confs_cat = confs_cat[selected_indices]
+            corr_ref_ids_cat = corr_ref_ids_cat[selected_indices]
+        Rs6D_init = keyframes[0].rW2C
+        ts_init = keyframes[0].tW2C
+        try:
+            Rt, inliers = self.PnPRANSAC(uvs_cat, xyz_cat, self.f, self.centre, Rs6D_init, ts_init, confs_cat)
+        except Exception:
+            self.last_incremental_debug["failure_reason"] = "pnp_ransac_exception"
+            return None
+        xyz_cat = xyz_cat[inliers]
+        uvs_cat = uvs_cat[inliers]
+        confs_cat = confs_cat[inliers]
+        corr_ref_ids_cat = corr_ref_ids_cat[inliers]
+        self.last_incremental_debug["num_pnp_inliers"] = int(len(xyz_cat))
+        pnp_ref_ids = sorted({int(x) for x in corr_ref_ids_cat.detach().cpu().tolist()})
+        self.last_incremental_debug["pnp_ref_keyframe_ids"] = pnp_ref_ids
+        self.last_incremental_debug["pnp_ref_source_frame_ids"] = [
+            int(kf.info.get("_paper_aligned_source_frame_id", kf.index))
+            for kf in keyframes
+            if int(kf.index) in pnp_ref_ids
+        ]
+        self.last_incremental_debug["pnp_ref_contains_seed"] = any(
+            bool(kf.info.get("_paper_aligned_is_v7_early_seed", False))
+            for kf in keyframes
+            if int(kf.index) in pnp_ref_ids
+        )
+        if len(xyz_cat) < 4:
+            self.last_incremental_debug["failure_reason"] = "pnp_inliers_too_few"
+            self._last_pnp_Rt = None
+            return None
+        self._last_pnp_Rt = Rt.clone()
+        if len(xyz_cat) >= self.num_pts_miniba_incr:
+            selected_indices = torch.topk(
+                torch.rand_like(xyz_cat[..., 0]), self.num_pts_miniba_incr, dim=0, largest=False
+            )[1]
+            xyz_ba = xyz_cat[selected_indices]
+            uvs_ba = uvs_cat[selected_indices]
+            miniba_ref_ids_tensor = corr_ref_ids_cat[selected_indices]
+        else:
+            xyz_ba = torch.cat(
+                [xyz_cat, torch.zeros(self.num_pts_miniba_incr - len(xyz_cat), 3, device="cuda")], dim=0
+            )
+            uvs_ba = torch.cat(
+                [uvs_cat, -torch.ones(self.num_pts_miniba_incr - len(uvs_cat), 2, device="cuda")], dim=0
+            )
+            miniba_ref_ids_tensor = corr_ref_ids_cat
+        miniba_ref_ids = sorted({int(x) for x in miniba_ref_ids_tensor.detach().cpu().tolist()})
+        self.last_incremental_debug["miniba_ref_keyframe_ids"] = miniba_ref_ids
+        self.last_incremental_debug["miniba_ref_source_frame_ids"] = [
+            int(kf.info.get("_paper_aligned_source_frame_id", kf.index))
+            for kf in keyframes
+            if int(kf.index) in miniba_ref_ids
+        ]
+        self.last_incremental_debug["miniba_ref_contains_seed"] = any(
+            bool(kf.info.get("_paper_aligned_is_v7_early_seed", False))
+            for kf in keyframes
+            if int(kf.index) in miniba_ref_ids
+        )
+        Rs6D, ts = Rt[:3, :2][None], Rt[:3, 3][None]
+        Rs6D, ts, _, _, r, r_init, mask = self.miniBA_incr(
+            Rs6D, ts, self.f, xyz_ba, self.centre, uvs_ba.view(-1)
+        )
+        self.last_incremental_debug["num_miniba_inliers"] = int(mask.sum().item())
+        Rt_out = torch.eye(4, device="cuda")
+        Rt_out[:3, :3] = sixD2mtx(Rs6D)[0]
+        Rt_out[:3, 3] = ts[0]
+        if is_test or mask.sum() > self.min_num_inliers:
+            self.last_incremental_debug["failure_reason"] = ""
+            return Rt_out
+        self.last_incremental_debug["failure_reason"] = "miniba_inliers_too_few"
+        for keyframe in keyframes:
+            keyframe.desc_kpts.matches.pop(index, None)
+        return None
 
     def _triangulate_recovery_correspondences(
         self,
@@ -667,6 +911,222 @@ class PoseInitializer():
             keyframe.desc_kpts.matches.pop(index, None)
         return None
 
+    def _ref_source_frame_id(self, keyframe: Keyframe) -> int:
+        return int(keyframe.info.get("_paper_aligned_source_frame_id", keyframe.index))
+
+    def _ref_anchor_id(self, keyframe: Keyframe) -> int:
+        return int(keyframe.info.get("_paper_aligned_anchor_id", -1))
+
+    @torch.no_grad()
+    def _probe_ref_pnp_inliers(
+        self,
+        keyframe: Keyframe,
+        curr_desc_kpts: DescribedKeypoints,
+        index: int,
+        init_keyframe: Keyframe,
+    ) -> tuple[int, int, float]:
+        matches = self.matcher(
+            curr_desc_kpts,
+            keyframe.desc_kpts,
+            remove_outliers=True,
+            update_kpts_flag="all",
+            kID=index,
+            kID_other=keyframe.index,
+        )
+        mask = keyframe.desc_kpts.has_pt3d[matches.idx_other]
+        valid_count = int(mask.sum().item())
+        if valid_count < 4:
+            return 0, valid_count, 0.0
+        xyz = keyframe.desc_kpts.pts3d[matches.idx_other[mask]]
+        uvs = matches.kpts[mask]
+        confs = keyframe.desc_kpts.pts_conf[matches.idx_other[mask]]
+        try:
+            _, inliers = self.PnPRANSAC(
+                uvs,
+                xyz,
+                self.f,
+                self.centre,
+                init_keyframe.rW2C,
+                init_keyframe.tW2C,
+                confs,
+            )
+            inlier_count = int(inliers.sum().item())
+        except Exception:
+            return 0, valid_count, 0.0
+        ratio = float(inlier_count) / max(valid_count, 1)
+        return inlier_count, valid_count, ratio
+
+    def _recovery_ref_consensus_score(
+        self,
+        keyframe: Keyframe,
+        valid_2d3d: int,
+        pnp_inliers: int,
+        pnp_ratio: float,
+        defer_source_frame_id: int,
+        anchor_mode_id: int,
+    ) -> float:
+        has_pt3d_total = self._keyframe_has_pt3d_count(keyframe)
+        src_dist = abs(self._ref_source_frame_id(keyframe) - int(defer_source_frame_id))
+        dist_weight = 1.0 / (1.0 + float(src_dist) / 50.0)
+        anchor_match = 1.0 if self._ref_anchor_id(keyframe) == anchor_mode_id and anchor_mode_id >= 0 else 0.5
+        is_seed = bool(keyframe.info.get("_paper_aligned_is_v7_early_seed", False))
+        is_support = bool(keyframe.info.get("_paper_aligned_support_eligible_recovery_keyframe", False))
+        seed_bonus = 0.05 if is_seed or is_support else 0.0
+        high_pt3d_penalty = 0.25 if has_pt3d_total > 3000 and pnp_ratio < self.recovery_probe_min_inlier_ratio else 0.0
+        return (
+            0.35 * min(float(valid_2d3d) / 500.0, 2.0)
+            + 0.45 * min(pnp_ratio * 10.0, 2.0)
+            + 0.10 * dist_weight
+            + 0.10 * anchor_match
+            + seed_bonus
+            - high_pt3d_penalty
+        )
+
+    def _select_coherent_ref_subset(
+        self,
+        keyframes: list[Keyframe],
+        ref_stats: list[dict[str, object]],
+        defer_source_frame_id: int,
+    ) -> tuple[list[Keyframe], list[dict[str, object]], list[int], list[str], str]:
+        if not keyframes:
+            return [], [], [], [], "no_candidate_refs"
+        stat_by_kid = {int(s.get("ref_keyframe_id", -1)): s for s in ref_stats}
+        ranked = sorted(
+            zip(keyframes, ref_stats),
+            key=lambda item: -float(item[1].get("consensus_score", 0.0)),
+        )
+        selected: list[Keyframe] = []
+        subset_trace: list[dict[str, object]] = []
+        excluded_ids: list[int] = []
+        excluded_reasons: list[str] = []
+        has_direct_or_support = False
+
+        def is_support_ref(keyframe: Keyframe) -> bool:
+            return bool(keyframe.info.get("_paper_aligned_support_eligible_recovery_keyframe", False)) or str(
+                keyframe.info.get("_paper_aligned_commit_origin", "")
+            ) in {"direct_admit", "direct"}
+
+        for keyframe, stat in ranked:
+            kid = int(keyframe.index)
+            ratio = float(stat.get("ref_pnp_inlier_ratio", 0.0) or 0.0)
+            valid = int(stat.get("ref_valid_2d3d_count", 0) or 0)
+            pnp_inl = int(stat.get("ref_pnp_inlier_count", 0) or 0)
+            has_pt3d = int(stat.get("ref_has_pt3d_count", 0) or 0)
+            is_seed = bool(keyframe.info.get("_paper_aligned_is_v7_early_seed", False))
+            is_support = is_support_ref(keyframe)
+            extreme_noise = has_pt3d > 6000 and ratio < 0.005 and pnp_inl == 0
+            if extreme_noise:
+                excluded_ids.append(kid)
+                excluded_reasons.append("extreme_high_haspt3d_zero_inlier")
+                subset_trace.append(
+                    {**stat, "ref_selected": False, "ref_exclusion_reason": "extreme_high_haspt3d_zero_inlier"}
+                )
+                continue
+            if len(selected) >= self.recovery_consensus_target_refs:
+                excluded_ids.append(kid)
+                excluded_reasons.append("beyond_target_ref_count")
+                subset_trace.append(
+                    {**stat, "ref_selected": False, "ref_exclusion_reason": "beyond_target_ref_count"}
+                )
+                continue
+            soft_ok = valid >= 8 or pnp_inl >= 2 or is_support or is_seed
+            if not soft_ok and valid < 4:
+                excluded_ids.append(kid)
+                excluded_reasons.append("insufficient_probe_support")
+                subset_trace.append(
+                    {**stat, "ref_selected": False, "ref_exclusion_reason": "insufficient_probe_support"}
+                )
+                continue
+            selected.append(keyframe)
+            if is_support or is_seed:
+                has_direct_or_support = True
+            subset_trace.append({**stat, "ref_selected": True, "ref_exclusion_reason": ""})
+
+        if not has_direct_or_support:
+            for keyframe, stat in ranked:
+                if is_support_ref(keyframe):
+                    if keyframe not in selected:
+                        selected.insert(0, keyframe)
+                        subset_trace.append({**stat, "ref_selected": True, "ref_exclusion_reason": "promoted_support_ref"})
+                    break
+
+        if len(selected) < self.recovery_consensus_min_refs:
+            for keyframe, stat in ranked:
+                if keyframe in selected:
+                    continue
+                selected.append(keyframe)
+                subset_trace.append({**stat, "ref_selected": True, "ref_exclusion_reason": "filled_to_min_refs"})
+                if len(selected) >= self.recovery_consensus_min_refs:
+                    break
+
+        selected = selected[: self.recovery_consensus_max_refs]
+        selected_ids = {int(kf.index) for kf in selected}
+        for keyframe, stat in ranked:
+            kid = int(keyframe.index)
+            if kid in selected_ids:
+                continue
+            if len(subset_trace) >= len(keyframes) * 2:
+                break
+        selection_reason = "top_scored_soft_filter_with_probe_weights"
+        return selected, subset_trace, excluded_ids, excluded_reasons, selection_reason
+
+    def _run_pnp_inlier_count_only(
+        self,
+        keyframes: list[Keyframe],
+        xyz_cat: torch.Tensor,
+        uvs_cat: torch.Tensor,
+        confs_cat: torch.Tensor,
+    ) -> int:
+        if len(xyz_cat) < 4:
+            return 0
+        Rs6D_init = keyframes[0].rW2C
+        ts_init = keyframes[0].tW2C
+        try:
+            _, inliers = self.PnPRANSAC(uvs_cat, xyz_cat, self.f, self.centre, Rs6D_init, ts_init, confs_cat)
+            return int(inliers.sum().item())
+        except Exception:
+            return 0
+
+    def _init_recovery_incremental_debug(self, keyframes: list[Keyframe]) -> None:
+        self.last_incremental_debug = {
+            "failure_reason": "",
+            "num_2d3d_correspondences": 0,
+            "num_pnp_inliers": 0,
+            "num_miniba_inliers": 0,
+            "ref_keyframe_ids": [int(kf.index) for kf in keyframes],
+            "ref_source_frame_ids": [
+                int(kf.info.get("_paper_aligned_source_frame_id", kf.index)) for kf in keyframes
+            ],
+            "ref_commit_origin": [str(kf.info.get("_paper_aligned_commit_origin", "unknown")) for kf in keyframes],
+            "ref_is_recovery": [
+                str(kf.info.get("_paper_aligned_commit_origin", ""))
+                in {"true_recovery_commit", "early_seed_recovery_commit"}
+                for kf in keyframes
+            ],
+            "ref_is_seed": [bool(kf.info.get("_paper_aligned_is_v7_early_seed", False)) for kf in keyframes],
+            "ref_is_support_eligible": [
+                bool(kf.info.get("_paper_aligned_support_eligible_recovery_keyframe", False)) for kf in keyframes
+            ],
+            "match_count_by_ref": list(self.last_recovery_2d3d_support.get("per_ref_3d_bearing_counts", []) or []),
+            "match_count_total": int(self.last_recovery_2d3d_support.get("verified_2d2d_match_count", 0) or 0),
+            "match_count_to_seed_keyframes": int(
+                self.last_recovery_2d3d_support.get("valid_2d3d_from_seed_refs", 0) or 0
+            ),
+            "best_match_keyframe_id": int(keyframes[0].index) if keyframes else -1,
+            "best_match_is_seed": bool(keyframes[0].info.get("_paper_aligned_is_v7_early_seed", False))
+            if keyframes
+            else False,
+            "best_match_num_matches": int(
+                max(self.last_recovery_2d3d_support.get("per_ref_3d_bearing_counts", [0]) or [0])
+            ),
+            "pnp_ref_keyframe_ids": [],
+            "pnp_ref_source_frame_ids": [],
+            "pnp_ref_contains_seed": False,
+            "miniba_ref_keyframe_ids": [],
+            "miniba_ref_source_frame_ids": [],
+            "miniba_ref_contains_seed": False,
+        }
+
     @torch.no_grad()
     def initialize_incremental_recovery(
         self,
@@ -677,13 +1137,123 @@ class PoseInitializer():
         curr_img,
     ):
         sorted_keyframes = self._sort_recovery_reference_keyframes(keyframes, curr_desc_kpts, index)
+        defer_sid = int(getattr(self, "recovery_defer_source_frame_id", -1))
+        init_kf = sorted_keyframes[0]
+        anchor_kf = max(sorted_keyframes, key=self._keyframe_has_pt3d_count)
+        anchor_mode_id = self._ref_anchor_id(anchor_kf)
+        Rt_guess = anchor_kf.get_Rt().clone()
+
+        xyz_all, uvs_all, confs_all, _, support_all = self._collect_recovery_correspondences(
+            sorted_keyframes, curr_desc_kpts, index, Rt_guess
+        )
+        pnp_before = self._run_pnp_inlier_count_only(sorted_keyframes, xyz_all, uvs_all, confs_all)
+        valid_before = int(len(xyz_all))
+        ratio_before = float(pnp_before) / max(valid_before, 1)
+
+        ref_stats: list[dict[str, object]] = []
+        for keyframe in sorted_keyframes:
+            pnp_inl, valid_2d3d, pnp_ratio = self._probe_ref_pnp_inliers(
+                keyframe, curr_desc_kpts, index, init_kf
+            )
+            score = self._recovery_ref_consensus_score(
+                keyframe, valid_2d3d, pnp_inl, pnp_ratio, defer_sid, anchor_mode_id
+            )
+            ref_stats.append(
+                {
+                    "ref_keyframe_id": int(keyframe.index),
+                    "ref_source_frame_id": self._ref_source_frame_id(keyframe),
+                    "ref_commit_origin": str(keyframe.info.get("_paper_aligned_commit_origin", "")),
+                    "ref_anchor_id": self._ref_anchor_id(keyframe),
+                    "ref_valid_2d3d_count": valid_2d3d,
+                    "ref_pnp_inlier_count": pnp_inl,
+                    "ref_pnp_inlier_ratio": round(pnp_ratio, 6),
+                    "ref_consensus_score": round(score, 6),
+                    "ref_has_pt3d_count": self._keyframe_has_pt3d_count(keyframe),
+                    "ref_source_distance_to_defer": abs(self._ref_source_frame_id(keyframe) - defer_sid),
+                }
+            )
+
+        selected, subset_trace, excluded_ids, excluded_reasons, subset_selection_reason = (
+            self._select_coherent_ref_subset(sorted_keyframes, ref_stats, defer_sid)
+        )
+        self.last_recovery_ref_subset = list(subset_trace)
+        stat_by_kid = {int(s.get("ref_keyframe_id", -1)): s for s in ref_stats}
+        selected_stats = [stat_by_kid[int(kf.index)] for kf in selected if int(kf.index) in stat_by_kid]
+        selected_valid_sum = sum(int(s.get("ref_valid_2d3d_count", 0) or 0) for s in selected_stats)
+        selected_pnp_sum = sum(int(s.get("ref_pnp_inlier_count", 0) or 0) for s in selected_stats)
+        max_selected_pnp = max((int(s.get("ref_pnp_inlier_count", 0) or 0) for s in selected_stats), default=0)
+        coherent = bool(
+            len(selected) >= self.recovery_consensus_min_refs
+            and selected_valid_sum >= self.recovery_consensus_min_total_valid_2d3d
+            and (selected_pnp_sum >= 8 or max_selected_pnp >= 4)
+        )
+        selection_reason = subset_selection_reason if coherent else "no_coherent_subset"
+
+        self.last_recovery_pnp_consensus = {
+            "candidate_ref_count": len(sorted_keyframes),
+            "candidate_ref_ids": [int(kf.index) for kf in sorted_keyframes],
+            "candidate_ref_valid_2d3d_counts": [int(s["ref_valid_2d3d_count"]) for s in ref_stats],
+            "candidate_ref_pnp_inlier_counts": [int(s["ref_pnp_inlier_count"]) for s in ref_stats],
+            "candidate_ref_pnp_inlier_ratios": [float(s["ref_pnp_inlier_ratio"]) for s in ref_stats],
+            "candidate_ref_anchor_ids": [int(s["ref_anchor_id"]) for s in ref_stats],
+            "candidate_ref_source_distances": [int(s["ref_source_distance_to_defer"]) for s in ref_stats],
+            "selected_consensus_ref_ids": [int(kf.index) for kf in selected],
+            "selected_consensus_ref_count": len(selected),
+            "selection_reason": selection_reason,
+            "excluded_ref_ids": excluded_ids,
+            "excluded_ref_reasons": excluded_reasons,
+            "coherent_subset_found": coherent,
+            "pnp_inliers_before_consensus": pnp_before,
+            "pnp_inlier_ratio_before_consensus": round(ratio_before, 6),
+            "valid_2d3d_before_consensus": valid_before,
+        }
+
+        if not coherent:
+            self.last_recovery_2d3d_support = dict(support_all)
+            self._init_recovery_incremental_debug(sorted_keyframes)
+            self.last_incremental_debug["failure_reason"] = "no_coherent_ref_subset"
+            self.last_recovery_pnp_consensus["failure_reason_after_consensus"] = "no_coherent_ref_subset"
+            self.last_recovery_pose_outcome_fix = {
+                "recovery_pose_mode": True,
+                "correspondence_flow_fix_applied": False,
+                "recovery_miniba_retry_applied": False,
+                "failure_reason_after_fix": "no_coherent_ref_subset",
+            }
+            return None
+
+        ref_conf_weights = {
+            int(kf.index): self._ref_conf_weight_from_probe_stat(stat_by_kid[int(kf.index)])
+            for kf in selected
+            if int(kf.index) in stat_by_kid
+        }
+        ref_correspondence_caps: dict[int, int] = {}
+        for kf in selected:
+            kid = int(kf.index)
+            if kid not in stat_by_kid:
+                continue
+            cap = self._per_ref_correspondence_cap(stat_by_kid[kid])
+            if cap is not None:
+                ref_correspondence_caps[kid] = int(cap)
+        xyz_cat, uvs_cat, confs_cat, corr_ref_ids_cat, support_debug = self._collect_recovery_correspondences(
+            selected,
+            curr_desc_kpts,
+            index,
+            Rt_guess,
+            ref_conf_weights=ref_conf_weights,
+            ref_correspondence_caps=ref_correspondence_caps or None,
+        )
+        self.last_recovery_2d3d_support = dict(support_debug)
+        self._init_recovery_incremental_debug(selected)
         self.last_recovery_pose_outcome_fix = {
             "recovery_pose_mode": True,
             "handoff_fix_applied": True,
             "reference_consistency_fix_applied": True,
-            "correspondence_flow_fix_applied": False,
+            "pnp_geometric_consensus_fix_applied": True,
+            "correspondence_flow_fix_applied": bool(support_debug.get("temporary_3d_support_used", False)),
             "recovery_miniba_retry_applied": False,
-            "triangulation_augmented_correspondence_count": 0,
+            "triangulation_augmented_correspondence_count": int(
+                support_debug.get("temporary_3d_support_count", 0) or 0
+            ),
             "miniba_success_before_fix": False,
             "miniba_inliers_before_fix": 0,
             "miniba_success_after_fix": False,
@@ -691,141 +1261,73 @@ class PoseInitializer():
             "failure_reason_before_fix": "",
             "failure_reason_after_fix": "",
         }
-        Rt = self._run_incremental_pose_core(sorted_keyframes, curr_desc_kpts, index, is_test)
-        before_debug = dict(self.last_incremental_debug)
+        Rt = self._run_pose_from_correspondences(
+            selected, xyz_cat, uvs_cat, confs_cat, corr_ref_ids_cat, index, is_test
+        )
+        after_debug = dict(self.last_incremental_debug)
+        pnp_after = int(after_debug.get("num_pnp_inliers", 0) or 0)
+        valid_after = int(after_debug.get("num_2d3d_correspondences", 0) or 0)
+        ratio_after = float(pnp_after) / max(valid_after, 1)
+        self.last_recovery_pnp_consensus.update(
+            {
+                "pnp_inliers_after_consensus": pnp_after,
+                "pnp_inlier_ratio_after_consensus": round(ratio_after, 6),
+                "miniba_inliers_before_consensus": 0,
+                "miniba_inliers_after_consensus": int(after_debug.get("num_miniba_inliers", 0) or 0),
+                "miniba_success_after_consensus": bool(Rt is not None),
+                "recovery_success_after_consensus": bool(Rt is not None),
+                "failure_reason_after_consensus": str(after_debug.get("failure_reason", "") or ""),
+            }
+        )
         self.last_recovery_pose_outcome_fix["miniba_success_before_fix"] = bool(Rt is not None)
         self.last_recovery_pose_outcome_fix["miniba_inliers_before_fix"] = int(
-            before_debug.get("num_miniba_inliers", 0) or 0
-        )
-        self.last_recovery_pose_outcome_fix["failure_reason_before_fix"] = str(
-            before_debug.get("failure_reason", "") or ""
+            after_debug.get("num_miniba_inliers", 0) or 0
         )
         if Rt is not None:
             self.last_recovery_pose_outcome_fix["miniba_success_after_fix"] = True
             self.last_recovery_pose_outcome_fix["miniba_inliers_after_fix"] = int(
-                before_debug.get("num_miniba_inliers", 0) or 0
+                after_debug.get("num_miniba_inliers", 0) or 0
             )
             self.last_recovery_pose_outcome_fix["failure_reason_after_fix"] = ""
             return Rt
 
-        failure_reason = str(before_debug.get("failure_reason", "") or "")
-        num_pnp = int(before_debug.get("num_pnp_inliers", 0) or 0)
-        if failure_reason != "miniba_inliers_too_few" or num_pnp < 4:
+        failure_reason = str(after_debug.get("failure_reason", "") or "")
+        if (
+            failure_reason != "miniba_inliers_too_few"
+            or pnp_after < self.recovery_miniba_retry_min_pnp_inliers
+            or valid_after < self.recovery_miniba_retry_min_2d3d
+        ):
             self.last_recovery_pose_outcome_fix["failure_reason_after_fix"] = failure_reason
             return None
 
-        # Rebuild correspondences with triangulation using the PnP pose as geometry bridge.
         self.last_recovery_pose_outcome_fix["recovery_miniba_retry_applied"] = True
-        self.last_recovery_pose_outcome_fix["correspondence_flow_fix_applied"] = True
-        xyz: list[torch.Tensor] = []
-        uvs: list[torch.Tensor] = []
-        confs: list[torch.Tensor] = []
-        corr_ref_ids: list[torch.Tensor] = []
-        for keyframe in sorted_keyframes:
-            matches = self.matcher(
-                curr_desc_kpts,
-                keyframe.desc_kpts,
-                remove_outliers=True,
-                update_kpts_flag="all",
-                kID=index,
-                kID_other=keyframe.index,
-            )
-            mask = keyframe.desc_kpts.has_pt3d[matches.idx_other]
-            if int(mask.sum().item()) > 0:
-                xyz.append(keyframe.desc_kpts.pts3d[matches.idx_other[mask]])
-                uvs.append(matches.kpts[mask])
-                confs.append(keyframe.desc_kpts.pts_conf[matches.idx_other[mask]])
-                corr_ref_ids.append(
-                    torch.full((int(mask.sum().item()),), int(keyframe.index), device="cuda", dtype=torch.long)
-                )
-        if not xyz:
-            self.last_recovery_pose_outcome_fix["failure_reason_after_fix"] = "no_2d3d_correspondences"
-            return None
-        xyz_cat = torch.cat(xyz, dim=0)
-        uvs_cat = torch.cat(uvs, dim=0)
-        confs_cat = torch.cat(confs, dim=0)
-        corr_ref_ids_cat = torch.cat(corr_ref_ids, dim=0)
-
         Rt_seed = self._last_pnp_Rt
         if Rt_seed is None:
-            self.last_recovery_pose_outcome_fix["failure_reason_after_fix"] = failure_reason or "pnp_pose_unavailable"
+            self.last_recovery_pose_outcome_fix["failure_reason_after_fix"] = "pnp_pose_unavailable"
             return None
-
-        extra_xyz, extra_uvs, extra_confs = self._triangulate_recovery_correspondences(
-            sorted_keyframes, curr_desc_kpts, index, Rt_seed
+        xyz_retry, uvs_retry, confs_retry, corr_retry, retry_support = self._collect_recovery_correspondences(
+            selected,
+            curr_desc_kpts,
+            index,
+            Rt_seed,
+            ref_conf_weights=ref_conf_weights,
+            ref_correspondence_caps=ref_correspondence_caps or None,
         )
-        self.last_recovery_pose_outcome_fix["triangulation_augmented_correspondence_count"] = int(len(extra_xyz))
-        if len(extra_xyz) > 0:
-            xyz_cat = torch.cat([xyz_cat, extra_xyz], dim=0)
-            uvs_cat = torch.cat([uvs_cat, extra_uvs], dim=0)
-            confs_cat = torch.cat([confs_cat, extra_confs], dim=0)
-            corr_ref_ids_cat = torch.cat(
-                [
-                    corr_ref_ids_cat,
-                    torch.full((len(extra_xyz),), int(sorted_keyframes[0].index), device="cuda", dtype=torch.long),
-                ],
-                dim=0,
-            )
-
-        self.last_incremental_debug["num_2d3d_correspondences"] = int(len(xyz_cat))
-        if len(xyz_cat) > self.num_pts_pnpransac:
-            selected_indices = torch.multinomial(confs_cat, min(self.num_pts_pnpransac, len(xyz_cat)), replacement=False)
-            xyz_cat = xyz_cat[selected_indices]
-            uvs_cat = uvs_cat[selected_indices]
-            confs_cat = confs_cat[selected_indices]
-            corr_ref_ids_cat = corr_ref_ids_cat[selected_indices]
-
-        Rs6D_init = sorted_keyframes[0].rW2C
-        ts_init = sorted_keyframes[0].tW2C
-        try:
-            Rt_retry, inliers = self.PnPRANSAC(uvs_cat, xyz_cat, self.f, self.centre, Rs6D_init, ts_init, confs_cat)
-        except Exception:
-            self.last_recovery_pose_outcome_fix["failure_reason_after_fix"] = "pnp_ransac_exception"
+        if len(xyz_retry) < self.recovery_miniba_retry_min_2d3d or pnp_after < self.recovery_miniba_retry_min_pnp_inliers:
+            self.last_recovery_pose_outcome_fix["failure_reason_after_fix"] = "recovery_retry_gates_not_met"
             return None
-        xyz_cat = xyz_cat[inliers]
-        uvs_cat = uvs_cat[inliers]
-        corr_ref_ids_cat = corr_ref_ids_cat[inliers]
-        self.last_incremental_debug["num_pnp_inliers"] = int(len(xyz_cat))
-        pnp_ref_ids = sorted({int(x) for x in corr_ref_ids_cat.detach().cpu().tolist()})
-        self.last_incremental_debug["pnp_ref_keyframe_ids"] = pnp_ref_ids
-        self.last_incremental_debug["pnp_ref_contains_seed"] = any(
-            bool(kf.info.get("_paper_aligned_is_v7_early_seed", False))
-            for kf in sorted_keyframes
-            if int(kf.index) in pnp_ref_ids
+        self._init_recovery_incremental_debug(selected)
+        Rt_retry = self._run_pose_from_correspondences(
+            selected, xyz_retry, uvs_retry, confs_retry, corr_retry, index, is_test
         )
-        if len(xyz_cat) < 4:
-            self.last_recovery_pose_outcome_fix["failure_reason_after_fix"] = "pnp_inliers_too_few"
-            return None
-
-        if len(xyz_cat) >= self.num_pts_miniba_incr:
-            selected_indices = torch.topk(
-                torch.rand_like(xyz_cat[..., 0]), self.num_pts_miniba_incr, dim=0, largest=False
-            )[1]
-            xyz_ba = xyz_cat[selected_indices]
-            uvs_ba = uvs_cat[selected_indices]
-        else:
-            xyz_ba = torch.cat(
-                [xyz_cat, torch.zeros(self.num_pts_miniba_incr - len(xyz_cat), 3, device="cuda")], dim=0
-            )
-            uvs_ba = torch.cat(
-                [uvs_cat, -torch.ones(self.num_pts_miniba_incr - len(uvs_cat), 2, device="cuda")], dim=0
-            )
-        Rs6D, ts = Rt_retry[:3, :2][None], Rt_retry[:3, 3][None]
-        Rs6D, ts, _, _, r, r_init, mask = self.miniBA_incr(Rs6D, ts, self.f, xyz_ba, self.centre, uvs_ba.view(-1))
-        self.last_incremental_debug["num_miniba_inliers"] = int(mask.sum().item())
-        miniba_ref_ids = sorted({int(x) for x in corr_ref_ids_cat.detach().cpu().tolist()})
-        self.last_incremental_debug["miniba_ref_keyframe_ids"] = miniba_ref_ids
-        self.last_incremental_debug["miniba_ref_contains_seed"] = self.last_incremental_debug["pnp_ref_contains_seed"]
-        Rt_out = torch.eye(4, device="cuda")
-        Rt_out[:3, :3] = sixD2mtx(Rs6D)[0]
-        Rt_out[:3, 3] = ts[0]
-        if is_test or mask.sum() > self.min_num_inliers:
-            self.last_incremental_debug["failure_reason"] = ""
+        if Rt_retry is not None:
             self.last_recovery_pose_outcome_fix["miniba_success_after_fix"] = True
-            self.last_recovery_pose_outcome_fix["miniba_inliers_after_fix"] = int(mask.sum().item())
+            self.last_recovery_pose_outcome_fix["miniba_inliers_after_fix"] = int(
+                self.last_incremental_debug.get("num_miniba_inliers", 0) or 0
+            )
             self.last_recovery_pose_outcome_fix["failure_reason_after_fix"] = ""
-            return Rt_out
-        self.last_incremental_debug["failure_reason"] = "miniba_inliers_too_few"
-        self.last_recovery_pose_outcome_fix["failure_reason_after_fix"] = "miniba_inliers_too_few"
-        self.last_recovery_pose_outcome_fix["miniba_inliers_after_fix"] = int(mask.sum().item())
+            return Rt_retry
+        self.last_recovery_pose_outcome_fix["failure_reason_after_fix"] = str(
+            self.last_incremental_debug.get("failure_reason", "") or "miniba_inliers_too_few"
+        )
         return None

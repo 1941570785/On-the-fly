@@ -436,16 +436,16 @@ if __name__ == "__main__":
         Rt_src = None
         failure_reason = ""
         try:
-            recovery_ref_count = min(
-                int(args.num_prev_keyframes_check),
-                max(int(args.num_prev_keyframes_miniba_incr), 12),
-            )
+            recovery_ref_count = int(args.num_prev_keyframes_check)
             prev_keyframes_src = scene_model.get_prev_keyframes(
                 recovery_ref_count,
                 True,
                 source_desc,
                 resolution_mode="paper_aligned_true_recovery",
             )
+            for kf in prev_keyframes_src:
+                kf.info["_paper_aligned_anchor_id"] = _anchor_id_for_keyframe_id(int(kf.index))
+            pose_initializer.recovery_defer_source_frame_id = int(source_frame_id)
             _append_candidate_trace(int(current_frame_id))
             _append_chosen_reference_trace(int(current_frame_id), source_frame_id, prev_keyframes_src)
             Rt_src = pose_initializer.initialize_incremental_recovery(
@@ -501,6 +501,89 @@ if __name__ == "__main__":
 
         success = bool(Rt_src is not None)
         state["last_success"] = success
+        support_trace = dict(getattr(pose_initializer, "last_recovery_2d3d_support", {}) or {})
+        consensus_trace = dict(getattr(pose_initializer, "last_recovery_pnp_consensus", {}) or {})
+        if consensus_trace and runtime_gate is not None:
+            runtime_gate.append_recovery_pnp_consensus_event(
+                {
+                    "attempt_id": attempt_id,
+                    "source_frame_id": int(source_frame_id),
+                    "current_frame_id": int(current_frame_id),
+                    "valid_2d3d_correspondence_count": int(
+                        pose_debug.get("num_2d3d_correspondences", 0) or 0
+                    ),
+                    **consensus_trace,
+                }
+            )
+            for row in getattr(pose_initializer, "last_recovery_ref_subset", []) or []:
+                runtime_gate.append_recovery_ref_subset_event(
+                    {"attempt_id": attempt_id, "source_frame_id": int(source_frame_id), **dict(row)}
+                )
+        if support_trace and runtime_gate is not None:
+            runtime_gate.append_recovery_2d3d_support_event(
+                {
+                    "attempt_id": attempt_id,
+                    "source_frame_id": int(source_frame_id),
+                    "current_frame_id": int(current_frame_id),
+                    "reference_keyframe_ids": [int(kf.index) for kf in prev_keyframes_src],
+                    "reference_commit_origins": [
+                        str(kf.info.get("_paper_aligned_commit_origin", "")) for kf in prev_keyframes_src
+                    ],
+                    "reference_is_recovery_seed": [
+                        bool(kf.info.get("_paper_aligned_is_v7_early_seed", False))
+                        or str(kf.info.get("_paper_aligned_commit_origin", ""))
+                        in {"true_recovery_commit", "early_seed_recovery_commit"}
+                        for kf in prev_keyframes_src
+                    ],
+                    "raw_2d2d_match_count": int(support_trace.get("raw_2d2d_match_count", 0) or 0),
+                    "verified_2d2d_match_count": int(support_trace.get("verified_2d2d_match_count", 0) or 0),
+                    "has_pt3d_match_count": int(support_trace.get("has_pt3d_match_count", 0) or 0),
+                    "valid_2d3d_correspondence_count": int(pose_debug.get("num_2d3d_correspondences", 0) or 0),
+                    "valid_2d3d_from_direct_refs": int(support_trace.get("valid_2d3d_from_direct_refs", 0) or 0),
+                    "valid_2d3d_from_recovery_refs": int(
+                        support_trace.get("valid_2d3d_from_recovery_refs", 0) or 0
+                    ),
+                    "valid_2d3d_from_seed_refs": int(support_trace.get("valid_2d3d_from_seed_refs", 0) or 0),
+                    "num_3d_observations_refs_total": int(support_trace.get("has_pt3d_match_count", 0) or 0),
+                    "per_ref_3d_bearing_counts": list(support_trace.get("per_ref_3d_bearing_counts", []) or []),
+                    "selected_refs_by_raw_match": "unavailable",
+                    "selected_refs_by_3d_support": list(
+                        support_trace.get("selected_refs_by_3d_support", []) or []
+                    ),
+                    "temporary_3d_support_used": bool(support_trace.get("temporary_3d_support_used", False)),
+                    "temporary_3d_support_count": int(support_trace.get("temporary_3d_support_count", 0) or 0),
+                    "pnp_correspondence_count": int(pose_debug.get("num_pnp_inliers", 0) or 0),
+                    "pnp_inliers": int(pose_debug.get("num_pnp_inliers", 0) or 0),
+                    "miniba_correspondence_count": int(pose_debug.get("num_miniba_inliers", 0) or 0),
+                    "miniba_inliers": int(pose_debug.get("num_miniba_inliers", 0) or 0),
+                    "miniba_success": bool(success),
+                    "recovery_success": bool(success),
+                    "failure_reason": str(pose_debug.get("failure_reason", "") or ""),
+                }
+            )
+            per_ref_counts = list(support_trace.get("per_ref_3d_bearing_counts", []) or [])
+            for i, kf in enumerate(prev_keyframes_src):
+                runtime_gate.append_recovery_reference_3d_association_event(
+                    {
+                        "keyframe_id": int(kf.index),
+                        "source_frame_id": int(_kf_source_frame_id(kf)),
+                        "commit_origin": str(kf.info.get("_paper_aligned_commit_origin", "")),
+                        "is_recovery": str(kf.info.get("_paper_aligned_commit_origin", ""))
+                        in {"true_recovery_commit", "early_seed_recovery_commit"},
+                        "is_early_seed": bool(kf.info.get("_paper_aligned_is_v7_early_seed", False)),
+                        "has_pose": True,
+                        "has_features": True,
+                        "has_descriptors": True,
+                        "has_anchor_id": "unavailable",
+                        "has_match_graph_id": "unavailable",
+                        "has_3d_observations": bool(int(kf.desc_kpts.has_pt3d.sum().item()) > 0),
+                        "num_3d_observations": int(kf.desc_kpts.has_pt3d.sum().item()),
+                        "num_visible_gaussians_if_available": "unavailable",
+                        "num_map_points_if_available": "unavailable",
+                        "used_as_recovery_ref_count": 1,
+                        "contributed_2d3d_count": int(per_ref_counts[i]) if i < len(per_ref_counts) else 0,
+                    }
+                )
         runtime_gate.annotate_pose_debug(source_frame_id, pose_debug)
         runtime_gate.mark_pose_result(source_frame_id, success)
         _append_pose_and_matching_traces(int(current_frame_id), pose_debug)
@@ -859,8 +942,12 @@ if __name__ == "__main__":
         _finish_materialization(True, "")
         runtime_gate.append_true_recovery_commit_event(recovery_trace)
 
+    runtime_action = ""
+    baseline_should_add_frame = False
     for frameID in pbar:
         start_time = time.time()
+        runtime_action = ""
+        baseline_should_add_frame = False
 
         # ========== 网页端交互控制 ==========
         if args.viewer_mode == "web":
@@ -981,6 +1068,7 @@ if __name__ == "__main__":
         # 测试帧始终加入，用于姿态估计和评估（但不参与训练）
         should_add_keyframe |= info["is_test"]
         baseline_should_add = should_add_keyframe
+        baseline_should_add_frame = bool(baseline_should_add)
         if runtime_gate is not None:
             if support_bridge_trace is not None:
                 support_bridge_trace["final_should_add_after_support"] = bool(should_add_keyframe)
@@ -1428,40 +1516,142 @@ if __name__ == "__main__":
                     # 如果使用COLMAP位姿，则覆盖估计的位姿
                     if args.use_colmap_poses:
                         Rt = info["Rt"]
-                    # 【场景表示模块】创建新关键帧对象
-                    keyframe = Keyframe(
-                        image,
-                        info,
-                        desc_kpts,
-                        Rt,
-                        n_keyframes,
-                        f,
-                        dense_extractor,
-                        depth_estimator,
-                        triangulator,
-                        args,
-                    )
-                    scene_model.add_keyframe(keyframe)
-                    if runtime_gate is not None:
-                        runtime_gate.mark_keyframe_add(frameID)
-                    prev_keyframe = keyframe
-                    increment_runtime(runtimes["Add"], start_time)
-                    
-                    # 【场景表示模块】为新关键帧初始化3D高斯点
-                    # 使用Laplacian概率采样 + 引导MVS深度估计
-                    start_time = time.time()
-                    scene_model.add_new_gaussians()
-                    if runtime_gate is not None:
-                        runtime_gate.mark_gaussian_update(frameID)
-                    increment_runtime(runtimes["Init"], start_time)
-                    
-                    start_time = time.time()
-                    # 【优化模块】优化场景：流式使用异步优化，离线直接循环优化
-                    if is_stream:
-                        scene_model.optimize_async(args.num_iterations)
-                    else:
-                        scene_model.optimization_loop(args.num_iterations)
-                    increment_runtime(runtimes["Opt"], start_time)
+                    pose_debug_incr = getattr(
+                        pose_initializer, "last_incremental_debug", {}
+                    ) or {}
+                    direct_keyframe_finalized = True
+                    fin_dec = None
+                    if (
+                        runtime_gate is not None
+                        and risk_mode == "paper_aligned_semantic_v1"
+                        and getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit")
+                        == "true_source_commit"
+                        and str(getattr(args, "paper_aligned_direct_density_control", "off")) != "off"
+                    ):
+                        support_triggered = bool(
+                            (support_bridge_trace or {}).get("support_triggered_keyframe_gate", False)
+                        )
+                        anchor_changed = len(scene_model.anchors) > int(
+                            getattr(runtime_gate, "_anchor_count_at_last_direct_finalize", 0)
+                        )
+                        pose_inliers = int(
+                            pose_debug_incr.get(
+                                "num_miniba_inliers",
+                                pose_debug_incr.get("num_pnp_inliers", 0),
+                            )
+                            or 0
+                        )
+                        fin_dec = runtime_gate.decide_direct_finalization(
+                            frame_id=int(frameID),
+                            runtime_action=str(runtime_action or "direct_admit"),
+                            baseline_should_add=bool(baseline_should_add_frame),
+                            is_test=bool(info.get("is_test", False)),
+                            is_bootstrap_phase=False,
+                            anchor_changed=anchor_changed,
+                            support_triggered=support_triggered,
+                            median_displacement=float(
+                                dist.median().item() if len(dist) > 0 else 0.0
+                            ),
+                            displacement_threshold=float(min_displacement),
+                            num_matches=int(len(curr_prev_matches.kpts)),
+                            min_num_inliers=int(args.min_num_inliers),
+                            pose_inliers=pose_inliers,
+                        )
+                        direct_keyframe_finalized = bool(fin_dec.finalize)
+                        dbg = dict(fin_dec.debug or {})
+                        density_before = float(dbg.get("density_before", 0.0))
+                        density_after = (
+                            100.0
+                            * (runtime_gate._current_keyframe_count() + 1)
+                            / float(max(frameID, 1))
+                            if direct_keyframe_finalized
+                            else density_before
+                        )
+                        trace_ev = runtime_gate._get_event(frameID)
+                        if trace_ev is not None:
+                            trace_ev["direct_admit_candidate"] = True
+                            trace_ev["direct_keyframe_finalized"] = bool(direct_keyframe_finalized)
+                            trace_ev["direct_finalization_decision"] = str(fin_dec.decision)
+                            trace_ev["direct_finalization_reason"] = str(fin_dec.reason)
+                        runtime_gate.append_direct_density_control_event(
+                            {
+                                "frame_id": int(frameID),
+                                "source_frame_id": int(frameID),
+                                "direct_admit_candidate": True,
+                                "direct_keyframe_finalized": bool(direct_keyframe_finalized),
+                                "direct_finalization_decision": str(fin_dec.decision),
+                                "direct_finalization_reason": str(fin_dec.reason),
+                                "density_before": density_before,
+                                "density_after": density_after,
+                                "source_gap_to_last_keyframe": int(
+                                    dbg.get("source_gap_to_last_keyframe", 0)
+                                ),
+                                "local_density_before": density_before,
+                                "main_chain_gap_before": float(dbg.get("main_chain_gap_before", 0.0)),
+                                "main_chain_gap_after_if_hold": float(
+                                    dbg.get("main_chain_gap_after_if_hold", 0.0)
+                                ),
+                                "anchor_id": len(scene_model.anchors) - 1,
+                                "anchor_changed": bool(anchor_changed),
+                                "support_trend_state": (
+                                    "support_triggered"
+                                    if support_triggered
+                                    else "baseline_prev_match"
+                                ),
+                                "novelty_proxy": float(dbg.get("novelty_proxy", 0.0)),
+                                "baseline_would_keep_if_available": bool(baseline_should_add_frame),
+                                "hold_redundant": bool(dbg.get("hold_redundant", False)),
+                                "hold_density_high": bool(dbg.get("hold_density_high", False)),
+                                "finalize_gap_critical": bool(dbg.get("finalize_gap_critical", False)),
+                                "finalize_high_novelty": bool(
+                                    fin_dec.decision == "finalize_high_novelty"
+                                ),
+                                "finalize_support_needed": bool(
+                                    fin_dec.decision == "finalize_support_needed"
+                                    or dbg.get("finalize_support_needed", False)
+                                ),
+                            }
+                        )
+                        if not direct_keyframe_finalized:
+                            should_add_keyframe = False
+                    if direct_keyframe_finalized:
+                        # 【场景表示模块】创建新关键帧对象
+                        keyframe = Keyframe(
+                            image,
+                            info,
+                            desc_kpts,
+                            Rt,
+                            n_keyframes,
+                            f,
+                            dense_extractor,
+                            depth_estimator,
+                            triangulator,
+                            args,
+                        )
+                        scene_model.add_keyframe(keyframe)
+                        if runtime_gate is not None:
+                            runtime_gate.mark_keyframe_add(frameID)
+                            runtime_gate._anchor_count_at_last_direct_finalize = len(
+                                scene_model.anchors
+                            )
+                        prev_keyframe = keyframe
+                        increment_runtime(runtimes["Add"], start_time)
+
+                        # 【场景表示模块】为新关键帧初始化3D高斯点
+                        # 使用Laplacian概率采样 + 引导MVS深度估计
+                        start_time = time.time()
+                        scene_model.add_new_gaussians()
+                        if runtime_gate is not None:
+                            runtime_gate.mark_gaussian_update(frameID)
+                        increment_runtime(runtimes["Init"], start_time)
+
+                        start_time = time.time()
+                        # 【优化模块】优化场景：流式使用异步优化，离线直接循环优化
+                        if is_stream:
+                            scene_model.optimize_async(args.num_iterations)
+                        else:
+                            scene_model.optimization_loop(args.num_iterations)
+                        increment_runtime(runtimes["Opt"], start_time)
                 else:
                     # 姿态估计失败，跳过该帧
                     should_add_keyframe = False

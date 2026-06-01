@@ -174,6 +174,49 @@ def get_args():
         help='Post-success recovery commit control mode. off keeps prior behavior.',
     )
     parser.add_argument(
+        '--paper_aligned_direct_density_control',
+        type=str,
+        default='off',
+        choices=['off', 'conservative', 'target_band_v1'],
+        help='Direct keyframe finalization density guard (not R/V/Q admission).',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_density_lower_per_100',
+        type=float,
+        default=28.0,
+        help='Lower density band for direct finalization (keyframes per 100 frames).',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_density_target_per_100',
+        type=float,
+        default=35.0,
+        help='Target density band for direct finalization.',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_density_upper_per_100',
+        type=float,
+        default=45.0,
+        help='Upper density band; above this only gap/novelty/support finalize.',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_density_hard_upper_per_100',
+        type=float,
+        default=50.0,
+        help='Hard upper density for direct finalization holds.',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_gap_hard_limit',
+        type=int,
+        default=20,
+        help='Force direct finalize if hold would exceed this main-chain gap.',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_redundant_source_gap',
+        type=int,
+        default=3,
+        help='Hold redundant direct finalize when source gap to last keyframe is at most this.',
+    )
+    parser.add_argument(
         '--paper_aligned_recovery_window_size',
         type=int,
         default=30,

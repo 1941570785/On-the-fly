@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .direct_density_control import DirectDensityController
 from .recovery_commit_control import RecoveryCommitController
 from .semantic_runtime import SemanticV1RuntimePolicy
 
@@ -49,12 +50,19 @@ class PaperAlignedRuntimeGate:
         self.recovery_pose_path_events: list[dict[str, Any]] = []
         self.frame_stage_reachability_events: list[dict[str, Any]] = []
         self.recovery_pose_outcome_fix_events: list[dict[str, Any]] = []
+        self.recovery_2d3d_support_events: list[dict[str, Any]] = []
+        self.recovery_reference_3d_association_events: list[dict[str, Any]] = []
+        self.recovery_pnp_consensus_events: list[dict[str, Any]] = []
+        self.recovery_ref_subset_events: list[dict[str, Any]] = []
+        self.direct_density_control_events: list[dict[str, Any]] = []
         self.trace_unavailable_reasons: dict[str, str] = {
             "match_graph_neighbor_ids": "No persistent match graph object is exposed; pairwise matches live on DescribedKeypoints.matches.",
             "match_graph_id": "No stable match graph id exists for keyframes in the current runtime.",
         }
         self.semantic_policy: SemanticV1RuntimePolicy | None = None
         self.recovery_commit_controller = RecoveryCommitController(args)
+        self.direct_density_controller = DirectDensityController(args)
+        self._anchor_count_at_last_direct_finalize = 1
         if self.mode == "paper_aligned_semantic_v1":
             self.semantic_policy = SemanticV1RuntimePolicy()
 
@@ -642,6 +650,66 @@ class PaperAlignedRuntimeGate:
     def append_recovery_pose_outcome_fix_event(self, payload: dict[str, Any]) -> None:
         self.recovery_pose_outcome_fix_events.append(dict(payload))
 
+    def append_recovery_2d3d_support_event(self, payload: dict[str, Any]) -> None:
+        self.recovery_2d3d_support_events.append(dict(payload))
+
+    def append_recovery_reference_3d_association_event(self, payload: dict[str, Any]) -> None:
+        self.recovery_reference_3d_association_events.append(dict(payload))
+
+    def append_recovery_pnp_consensus_event(self, payload: dict[str, Any]) -> None:
+        self.recovery_pnp_consensus_events.append(dict(payload))
+
+    def append_recovery_ref_subset_event(self, payload: dict[str, Any]) -> None:
+        self.recovery_ref_subset_events.append(dict(payload))
+
+    def decide_direct_finalization(
+        self,
+        *,
+        frame_id: int,
+        runtime_action: str,
+        baseline_should_add: bool,
+        is_test: bool,
+        is_bootstrap_phase: bool,
+        anchor_changed: bool,
+        support_triggered: bool,
+        median_displacement: float,
+        displacement_threshold: float,
+        num_matches: int,
+        min_num_inliers: int,
+        pose_inliers: int,
+    ):
+        last_tick, _ = self._last_committed_source_before(frame_id)
+        source_gap = int(frame_id - last_tick) if last_tick >= 0 else int(frame_id)
+        gap_before = float(self._main_chain_gap_p90_recent())
+        density_before = float(self._current_keyframe_density(frame_id))
+        disp_ratio = float(median_displacement / max(displacement_threshold, 1e-6))
+        match_ratio = float(num_matches / max(2.0 * min_num_inliers, 1.0))
+        novelty_proxy = min(1.0, 0.5 * min(disp_ratio, 2.0) + 0.5 * min(match_ratio, 2.0))
+        gap_after_hold = float(max(source_gap, gap_before))
+        decision = self.direct_density_controller.decide(
+            frame_id=int(frame_id),
+            runtime_action=str(runtime_action),
+            baseline_should_add=bool(baseline_should_add),
+            is_test=bool(is_test),
+            is_bootstrap_phase=bool(is_bootstrap_phase),
+            density_before=density_before,
+            source_gap_to_last_keyframe=source_gap,
+            main_chain_gap_before=gap_before,
+            main_chain_gap_after_if_hold=gap_after_hold,
+            anchor_changed=bool(anchor_changed),
+            support_triggered=bool(support_triggered),
+            median_displacement=float(median_displacement),
+            displacement_threshold=float(displacement_threshold),
+            num_matches=int(num_matches),
+            min_num_inliers=int(min_num_inliers),
+            pose_inliers=int(pose_inliers),
+            novelty_proxy=novelty_proxy,
+        )
+        return decision
+
+    def append_direct_density_control_event(self, payload: dict[str, Any]) -> None:
+        self.direct_density_control_events.append(dict(payload))
+
     def flush_trace(self) -> None:
         if not self.trace_path:
             return
@@ -683,6 +751,14 @@ class PaperAlignedRuntimeGate:
             "recovery_pose_path_events": self.recovery_pose_path_events,
             "frame_stage_reachability_events": self.frame_stage_reachability_events,
             "recovery_pose_outcome_fix_events": self.recovery_pose_outcome_fix_events,
+            "recovery_2d3d_support_events": self.recovery_2d3d_support_events,
+            "recovery_reference_3d_association_events": self.recovery_reference_3d_association_events,
+            "recovery_pnp_consensus_events": self.recovery_pnp_consensus_events,
+            "recovery_ref_subset_events": self.recovery_ref_subset_events,
+            "direct_density_control_mode": str(
+                getattr(self.direct_density_controller, "mode", "off")
+            ),
+            "direct_density_control_events": self.direct_density_control_events,
             "trace_unavailable_reasons": self.trace_unavailable_reasons,
         }
         if self.semantic_policy is not None:

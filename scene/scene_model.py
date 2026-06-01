@@ -915,17 +915,35 @@ class SceneModel:
                 for index in support_indices:
                     if index not in keyframes_indices_to_check:
                         keyframes_indices_to_check.append(index)
+            if resolution_mode == "paper_aligned_true_recovery":
+                has_pt3d_ranked = sorted(
+                    [
+                        (int(i), int(self.keyframes[int(i)].desc_kpts.has_pt3d.sum().item()))
+                        for i in range(len(self.keyframes))
+                    ],
+                    key=lambda item: -item[1],
+                )
+                for index, _score in has_pt3d_ranked[: max(n * 2, 12)]:
+                    if index not in keyframes_indices_to_check:
+                        keyframes_indices_to_check.append(index)
             n_matches = torch.zeros(len(keyframes_indices_to_check), device="cuda")
+            has_pt3d_counts = torch.zeros(len(keyframes_indices_to_check), device="cuda")
             # 计算每个候选关键帧的匹配数量
             for i, index in enumerate(keyframes_indices_to_check):
                 n_matches[i] = self.matcher.evaluate_match(
                     self.keyframes[index].desc_kpts, desc_kpts
                 )
+                has_pt3d_counts[i] = float(self.keyframes[int(index)].desc_kpts.has_pt3d.sum().item())
+            selection_scores = n_matches
+            if resolution_mode == "paper_aligned_true_recovery":
+                match_norm = n_matches / n_matches.max().clamp_min(1.0)
+                pt3d_norm = has_pt3d_counts / has_pt3d_counts.max().clamp_min(1.0)
+                selection_scores = match_norm * 0.35 + pt3d_norm * 0.65
             # 选择匹配数量最多的n个关键帧
             top_count = min(n, len(keyframes_indices_to_check))
-            _, top_indices = torch.topk(n_matches, top_count)
+            _, top_indices = torch.topk(selection_scores, top_count)
             selected_indices = [keyframes_indices_to_check[int(i)] for i in top_indices.cpu()]
-            sorted_match_ids = torch.argsort(n_matches, descending=True).cpu().tolist()
+            sorted_match_ids = torch.argsort(selection_scores, descending=True).cpu().tolist()
             rank_by_index = {
                 keyframes_indices_to_check[int(rank_idx)]: rank + 1
                 for rank, rank_idx in enumerate(sorted_match_ids)
@@ -991,7 +1009,13 @@ class SceneModel:
                         "filter_reason": "" if int(index) in final_selected else "topk_not_selected",
                         "promotion_applied": bool(promotion_applied and int(index) in final_selected),
                         "promotion_reason": promotion_reason if promotion_applied and int(index) in final_selected else "",
-                        "reference_support_score": float(n_matches[i].item()),
+                        "reference_support_score": float(
+                            selection_scores[i].item()
+                            if resolution_mode == "paper_aligned_true_recovery"
+                            else n_matches[i].item()
+                        ),
+                        "reference_has_pt3d_count": int(has_pt3d_counts[i].item()),
+                        "reference_raw_match_count": float(n_matches[i].item()),
                     }
                 )
             self.last_prev_keyframes_debug = {
