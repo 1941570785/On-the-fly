@@ -308,6 +308,13 @@ if __name__ == "__main__":
         if pool_rows:
             runtime_gate.append_pose_reference_pool_events(pool_rows)
 
+    def _observe_defer_recovery_anchor_bridge() -> None:
+        bridge = getattr(scene_model, "defer_recovery_bridge", None)
+        if bridge is None or runtime_gate is None:
+            return
+        for ev in bridge.observe_anchor_count(scene_model):
+            runtime_gate.append_anchor_transition_bridge_event(ev)
+
     def _append_local_map_anchor_trace(frame_id: int) -> None:
         if runtime_gate is None:
             return
@@ -446,6 +453,7 @@ if __name__ == "__main__":
             for kf in prev_keyframes_src:
                 kf.info["_paper_aligned_anchor_id"] = _anchor_id_for_keyframe_id(int(kf.index))
             pose_initializer.recovery_defer_source_frame_id = int(source_frame_id)
+            scene_model._recovery_source_frame_id = int(source_frame_id)
             _append_candidate_trace(int(current_frame_id))
             _append_chosen_reference_trace(int(current_frame_id), source_frame_id, prev_keyframes_src)
             Rt_src = pose_initializer.initialize_incremental_recovery(
@@ -591,6 +599,26 @@ if __name__ == "__main__":
         lifecycle_event["recovery_success"] = success
         lifecycle_event["pose_path_block_reason"] = "" if success else (failure_reason or "pose_init_failed")
         runtime_gate.append_lifecycle_gate_event(lifecycle_event)
+        bridge_meta = dict(getattr(scene_model, "_last_recovery_bridge_meta", {}) or {})
+        if scene_model.defer_recovery_bridge is not None and bridge_meta:
+            scene_model.defer_recovery_bridge.log_recovery_support_trace(
+                runtime_gate,
+                int(source_frame_id),
+                int(current_frame_id),
+                pose_debug,
+                support_trace,
+                consensus_trace,
+                bridge_meta,
+            )
+            scene_model.defer_recovery_bridge.log_anchor_bridge_usage(
+                runtime_gate,
+                int(source_frame_id),
+                bridge_meta,
+                pose_debug,
+                int(consensus_trace.get("valid_2d3d_before_consensus", 0) or 0),
+                int(consensus_trace.get("pnp_inliers_before_consensus", 0) or 0),
+                0,
+            )
         runtime_gate.append_recovery_pose_path_event(
             {
                 "source_frame_id": int(source_frame_id),
@@ -700,6 +728,12 @@ if __name__ == "__main__":
             recovery_trace["materialized"] = bool(committed)
             recovery_trace["final_timeline_recorded"] = bool(committed)
             recovery_trace["materialization_failure_reason"] = reason
+            if committed and runtime_gate is not None:
+                for row in reversed(runtime_gate.recovery_support_trace_events):
+                    if int(row.get("source_frame_id", -1)) == int(source_frame_id):
+                        row["true_source_materialized"] = True
+                        row["materialization_fail_reason"] = ""
+                        break
             if not committed:
                 recovery_trace["keyframe_count_at_failure"] = int(n_keyframes)
             if isinstance(control_decision, dict):
@@ -891,6 +925,7 @@ if __name__ == "__main__":
             scene_model.optimization_loop(args.num_iterations)
         recovery_trace["optimizer_received"] = True
         scene_model.place_anchor_if_needed()
+        _observe_defer_recovery_anchor_bridge()
         runtime_gate.mark_anchor_update(source_frame_id)
         recovery_trace["anchor_update_called"] = True
         recovery_trace["anchor_update_success"] = True
@@ -1984,6 +2019,7 @@ if __name__ == "__main__":
             # 当高斯点在屏幕上变得过小时，创建新锚点并合并细粒度高斯点
             start_time = time.time()
             scene_model.place_anchor_if_needed()
+            _observe_defer_recovery_anchor_bridge()
             if runtime_gate is not None:
                 runtime_gate.mark_anchor_update(frameID)
                 if "prev_keyframe" in locals():

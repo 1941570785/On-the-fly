@@ -972,6 +972,8 @@ class PoseInitializer():
         is_seed = bool(keyframe.info.get("_paper_aligned_is_v7_early_seed", False))
         is_support = bool(keyframe.info.get("_paper_aligned_support_eligible_recovery_keyframe", False))
         seed_bonus = 0.05 if is_seed or is_support else 0.0
+        if bool(keyframe.info.get("_paper_aligned_bridge_ref", False)):
+            seed_bonus += 0.30
         high_pt3d_penalty = 0.25 if has_pt3d_total > 3000 and pnp_ratio < self.recovery_probe_min_inlier_ratio else 0.0
         return (
             0.35 * min(float(valid_2d3d) / 500.0, 2.0)
@@ -1029,7 +1031,14 @@ class PoseInitializer():
                     {**stat, "ref_selected": False, "ref_exclusion_reason": "beyond_target_ref_count"}
                 )
                 continue
-            soft_ok = valid >= 8 or pnp_inl >= 2 or is_support or is_seed
+            is_bridge = bool(keyframe.info.get("_paper_aligned_bridge_ref", False))
+            soft_ok = (
+                valid >= 8
+                or pnp_inl >= 2
+                or is_support
+                or is_seed
+                or (is_bridge and (valid >= 4 or pnp_inl >= 1))
+            )
             if not soft_ok and valid < 4:
                 excluded_ids.append(kid)
                 excluded_reasons.append("insufficient_probe_support")

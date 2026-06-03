@@ -54,6 +54,8 @@ class PaperAlignedRuntimeGate:
         self.recovery_reference_3d_association_events: list[dict[str, Any]] = []
         self.recovery_pnp_consensus_events: list[dict[str, Any]] = []
         self.recovery_ref_subset_events: list[dict[str, Any]] = []
+        self.anchor_transition_bridge_events: list[dict[str, Any]] = []
+        self.recovery_support_trace_events: list[dict[str, Any]] = []
         self.direct_density_control_events: list[dict[str, Any]] = []
         self.direct_density_control_v2_events: list[dict[str, Any]] = []
         self.direct_density_control_v2_1_events: list[dict[str, Any]] = []
@@ -703,6 +705,12 @@ class PaperAlignedRuntimeGate:
     def append_recovery_ref_subset_event(self, payload: dict[str, Any]) -> None:
         self.recovery_ref_subset_events.append(dict(payload))
 
+    def append_anchor_transition_bridge_event(self, payload: dict[str, Any]) -> None:
+        self.anchor_transition_bridge_events.append(dict(payload))
+
+    def append_recovery_support_trace_event(self, payload: dict[str, Any]) -> None:
+        self.recovery_support_trace_events.append(dict(payload))
+
     def decide_direct_finalization(
         self,
         *,
@@ -856,6 +864,8 @@ class PaperAlignedRuntimeGate:
             "recovery_reference_3d_association_events": self.recovery_reference_3d_association_events,
             "recovery_pnp_consensus_events": self.recovery_pnp_consensus_events,
             "recovery_ref_subset_events": self.recovery_ref_subset_events,
+            "anchor_transition_bridge_events": self.anchor_transition_bridge_events,
+            "recovery_support_trace_events": self.recovery_support_trace_events,
             "direct_density_control_mode": str(
                 getattr(self.direct_density_controller, "mode", "off")
             ),

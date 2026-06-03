@@ -156,6 +156,25 @@ def get_args():
         help='Recovery commit bridge mode for semantic runtime.',
     )
     parser.add_argument(
+        '--paper_aligned_defer_recovery_support_bridge',
+        type=str,
+        default='off',
+        choices=['off', 'v1'],
+        help='Defer-recoverable recovery support bridge (anchor transition + reference propagation).',
+    )
+    parser.add_argument(
+        '--paper_aligned_bridge_max_refs',
+        type=int,
+        default=4,
+        help='Max cross-anchor bridge references injected per recovery pose attempt.',
+    )
+    parser.add_argument(
+        '--paper_aligned_bridge_top_k_per_anchor',
+        type=int,
+        default=6,
+        help='Top-K materialized keyframes retained per anchor for bridge inventory.',
+    )
+    parser.add_argument(
         '--paper_aligned_recovery_commit_control',
         type=str,
         default='off',

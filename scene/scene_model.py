@@ -98,6 +98,17 @@ class SceneModel:
         self.recovery_commit_bridge = str(
             getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit") or "true_source_commit"
         )
+        self.defer_recovery_bridge = None
+        self._recovery_source_frame_id = -1
+        self._last_recovery_bridge_meta: dict[str, object] = {}
+        if not inference_mode:
+            from paper_aligned_policy.defer_recovery_support_bridge import (
+                DeferRecoverySupportBridge,
+                bridge_enabled,
+            )
+
+            if bridge_enabled(args):
+                self.defer_recovery_bridge = DeferRecoverySupportBridge(args)
         self.min_num_inliers = int(getattr(args, "min_num_inliers", 0) or 0)
         self.last_prev_keyframes_debug = {}
 
@@ -915,6 +926,18 @@ class SceneModel:
                 for index in support_indices:
                     if index not in keyframes_indices_to_check:
                         keyframes_indices_to_check.append(index)
+            bridge_meta: dict[str, object] = {}
+            bridge_ids: list[int] = []
+            bridge = getattr(self, "defer_recovery_bridge", None)
+            if resolution_mode == "paper_aligned_true_recovery" and bridge is not None:
+                bridge_ids, bridge_meta = bridge.extend_recovery_candidates(
+                    self, desc_kpts, keyframes_indices_to_check, int(getattr(self, "_recovery_source_frame_id", -1))
+                )
+                for idx in bridge_ids:
+                    if int(idx) not in keyframes_indices_to_check:
+                        keyframes_indices_to_check.append(int(idx))
+                bridge.mark_bridge_keyframes(self, bridge_ids, bridge_meta)
+                self._last_recovery_bridge_meta = dict(bridge_meta)
             if resolution_mode == "paper_aligned_true_recovery":
                 has_pt3d_ranked = sorted(
                     [
@@ -1023,6 +1046,8 @@ class SceneModel:
                 "selected_keyframe_ids": [int(x) for x in prev_keyframes_indices.tolist()],
                 "promotion_applied": bool(promotion_applied),
                 "promotion_reason": promotion_reason,
+                "bridge_meta": bridge_meta,
+                "bridge_reference_ids": list(bridge_ids),
             }
         # 如果没有提供特征点描述符，直接选择距离最近的n个关键帧
         else:
