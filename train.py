@@ -1568,52 +1568,370 @@ if __name__ == "__main__":
                             else density_before
                         )
                         trace_ev = runtime_gate._get_event(frameID)
+                        density_state = str(dbg.get("density_state", ""))
+                        update_prev_on_hold = runtime_gate.direct_density_controller.should_update_prev_desc_on_hold(
+                            str(fin_dec.decision), density_state
+                        )
+                        held_bridge = bool(
+                            not direct_keyframe_finalized
+                            and update_prev_on_hold
+                            and runtime_gate.direct_density_controller.hold_tracking_bridge_mode != "none"
+                        )
                         if trace_ev is not None:
                             trace_ev["direct_admit_candidate"] = True
                             trace_ev["direct_keyframe_finalized"] = bool(direct_keyframe_finalized)
                             trace_ev["direct_finalization_decision"] = str(fin_dec.decision)
                             trace_ev["direct_finalization_reason"] = str(fin_dec.reason)
-                        runtime_gate.append_direct_density_control_event(
-                            {
-                                "frame_id": int(frameID),
-                                "source_frame_id": int(frameID),
-                                "direct_admit_candidate": True,
-                                "direct_keyframe_finalized": bool(direct_keyframe_finalized),
-                                "direct_finalization_decision": str(fin_dec.decision),
-                                "direct_finalization_reason": str(fin_dec.reason),
-                                "density_before": density_before,
-                                "density_after": density_after,
-                                "source_gap_to_last_keyframe": int(
-                                    dbg.get("source_gap_to_last_keyframe", 0)
-                                ),
-                                "local_density_before": density_before,
-                                "main_chain_gap_before": float(dbg.get("main_chain_gap_before", 0.0)),
-                                "main_chain_gap_after_if_hold": float(
-                                    dbg.get("main_chain_gap_after_if_hold", 0.0)
-                                ),
-                                "anchor_id": len(scene_model.anchors) - 1,
-                                "anchor_changed": bool(anchor_changed),
-                                "support_trend_state": (
-                                    "support_triggered"
-                                    if support_triggered
-                                    else "baseline_prev_match"
-                                ),
-                                "novelty_proxy": float(dbg.get("novelty_proxy", 0.0)),
-                                "baseline_would_keep_if_available": bool(baseline_should_add_frame),
-                                "hold_redundant": bool(dbg.get("hold_redundant", False)),
-                                "hold_density_high": bool(dbg.get("hold_density_high", False)),
-                                "finalize_gap_critical": bool(dbg.get("finalize_gap_critical", False)),
-                                "finalize_high_novelty": bool(
-                                    fin_dec.decision == "finalize_high_novelty"
-                                ),
-                                "finalize_support_needed": bool(
-                                    fin_dec.decision == "finalize_support_needed"
-                                    or dbg.get("finalize_support_needed", False)
-                                ),
-                            }
-                        )
+                            if not direct_keyframe_finalized:
+                                trace_ev["direct_admit_but_held_for_density"] = True
+                        v2_payload = {
+                            "frame_id": int(frameID),
+                            "source_frame_id": int(frameID),
+                            "direct_admit_candidate": True,
+                            "direct_keyframe_finalized": bool(direct_keyframe_finalized),
+                            "direct_finalization_decision": str(fin_dec.decision),
+                            "direct_finalization_reason": str(fin_dec.reason),
+                            "density_state": density_state,
+                            "density_before": density_before,
+                            "density_after": density_after,
+                            "local_density_before": float(dbg.get("local_density_before", density_before)),
+                            "baseline_relative_density": float(
+                                dbg.get("baseline_relative_density", 0.0)
+                            ),
+                            "keyframe_count_current": int(dbg.get("keyframe_count_current", 0)),
+                            "expected_min_keyframes": float(dbg.get("expected_min_keyframes", 0.0)),
+                            "keyframe_debt": float(dbg.get("keyframe_debt", 0.0)),
+                            "recent_keyframe_growth": int(
+                                dbg.get("recent_keyframe_growth", dbg.get("keyframe_growth_recent", 0))
+                            ),
+                            "keyframe_growth_recent": int(dbg.get("keyframe_growth_recent", 0)),
+                            "starvation_risk": bool(dbg.get("starvation_risk", False)),
+                            "starvation_preempts_hold": bool(dbg.get("starvation_preempts_hold", False)),
+                            "hold_density_high_allowed": bool(dbg.get("hold_density_high_allowed", False)),
+                            "hold_density_high_blocked_by_starvation": bool(
+                                dbg.get("hold_density_high_blocked_by_starvation", False)
+                            ),
+                            "hold_redundant_allowed": bool(dbg.get("hold_redundant_allowed", False)),
+                            "source_gap_to_last_keyframe": int(
+                                dbg.get("source_gap_to_last_keyframe", 0)
+                            ),
+                            "main_chain_gap_before": float(dbg.get("main_chain_gap_before", 0.0)),
+                            "main_chain_gap_after_if_hold": float(
+                                dbg.get("main_chain_gap_after_if_hold", 0.0)
+                            ),
+                            "high_novelty_score": float(dbg.get("high_novelty_score", 0.0)),
+                            "support_needed_score": float(dbg.get("support_needed_score", 0.0)),
+                            "high_novelty_budget_used": int(dbg.get("high_novelty_budget_used", 0)),
+                            "support_needed_budget_used": int(dbg.get("support_needed_budget_used", 0)),
+                            "high_novelty_budget_exhausted": bool(
+                                dbg.get("high_novelty_budget_exhausted", False)
+                            ),
+                            "support_needed_budget_exhausted": bool(
+                                dbg.get("support_needed_budget_exhausted", False)
+                            ),
+                            "hold_redundant_allowed": bool(dbg.get("hold_redundant_allowed", False)),
+                            "hold_redundant_blocked_by_lower_guard": bool(
+                                dbg.get("hold_redundant_blocked_by_lower_guard", False)
+                            ),
+                            "hold_density_high": bool(dbg.get("hold_density_high", False)),
+                            "finalize_high_novelty": bool(dbg.get("finalize_high_novelty", False)),
+                            "finalize_support_needed": bool(dbg.get("finalize_support_needed", False)),
+                            "finalize_gap_critical": bool(dbg.get("finalize_gap_critical", False)),
+                            "finalize_growth_rescue": fin_dec.decision == "finalize_growth_rescue",
+                            "prev_desc_updated_on_hold": False,
+                            "held_frame_used_for_tracking_bridge": held_bridge,
+                            "tracking_bridge_mode": str(
+                                runtime_gate.direct_density_controller.hold_tracking_bridge_mode
+                            ),
+                            "keyframe_finalized": bool(direct_keyframe_finalized),
+                            "representation_updated": bool(direct_keyframe_finalized),
+                            "blocked_override_reason": str(dbg.get("blocked_override_reason", "")),
+                        }
+                        if runtime_gate.direct_density_controller.is_v2221:
+                            v2_payload.update(
+                                {
+                                    "local_window_density": float(
+                                        dbg.get("local_window_density", 0.0)
+                                    ),
+                                    "local_window_gap_before": float(
+                                        dbg.get("local_window_gap_before", 0.0)
+                                    ),
+                                    "local_window_gap_after_if_hold": float(
+                                        dbg.get("local_window_gap_after_if_hold", 0.0)
+                                    ),
+                                    "density_cap": float(dbg.get("density_cap", 0.0)),
+                                    "density_cap_exception_for_hard_gap": bool(
+                                        dbg.get("density_cap_exception_for_hard_gap", False)
+                                    ),
+                                    "post500_pre_gap_rescue_triggered": bool(
+                                        dbg.get("post500_pre_gap_rescue_triggered", False)
+                                    ),
+                                    "post500_pre_gap_rescue_finalized": bool(
+                                        dbg.get("post500_pre_gap_rescue_finalized", False)
+                                    )
+                                    or fin_dec.decision
+                                    == "finalize_post500_pre_gap_rescue_v2_2_2_1",
+                                    "post500_gap_rescue_budget_used": int(
+                                        dbg.get("post500_gap_rescue_budget_used", 0)
+                                    ),
+                                    "post500_gap_rescue_budget_exhausted": bool(
+                                        dbg.get("post500_gap_rescue_budget_exhausted", False)
+                                    ),
+                                    "hard_gap_rescue_triggered": bool(
+                                        dbg.get("hard_gap_rescue_triggered", False)
+                                    ),
+                                    "hard_gap_rescue_finalized": bool(
+                                        dbg.get("hard_gap_rescue_finalized", False)
+                                    )
+                                    or fin_dec.decision
+                                    == "finalize_hard_gap_rescue_v2_2_2_1",
+                                    "hard_gap_soft_budget_bypassed": bool(
+                                        dbg.get("hard_gap_soft_budget_bypassed", False)
+                                    ),
+                                    "hard_gap_density_cap_exception": bool(
+                                        dbg.get("hard_gap_density_cap_exception", False)
+                                    ),
+                                    "candidate_missing_context": bool(
+                                        dbg.get("candidate_missing_context", False)
+                                    ),
+                                    "predicted_next_gap_if_no_future_candidate": float(
+                                        dbg.get("predicted_next_gap_if_no_future_candidate", 0.0)
+                                    ),
+                                    "hold_gap_rescue_budget_exhausted": bool(
+                                        dbg.get("gap_rescue_budget_exhausted", False)
+                                    ),
+                                    "hold_density_high_blocked_by_hard_gap": bool(
+                                        dbg.get("hold_density_high_blocked_by_hard_gap", False)
+                                    ),
+                                    "hold_redundant_blocked_by_hard_gap": bool(
+                                        dbg.get("hold_redundant_blocked_by_hard_gap", False)
+                                    ),
+                                    "hold_density_high_blocked_by_pre_gap": bool(
+                                        dbg.get("hold_density_high_blocked_by_pre_gap", False)
+                                    ),
+                                }
+                            )
+                            runtime_gate.append_direct_density_control_v2_2_2_1_event(v2_payload)
+                        elif runtime_gate.direct_density_controller.is_v222:
+                            v2_payload.update(
+                                {
+                                    "local_window_density": float(
+                                        dbg.get("local_window_density", 0.0)
+                                    ),
+                                    "local_window_gap_before": float(
+                                        dbg.get("local_window_gap_before", 0.0)
+                                    ),
+                                    "local_window_gap_after_if_hold": float(
+                                        dbg.get("local_window_gap_after_if_hold", 0.0)
+                                    ),
+                                    "soft_gap_threshold": int(dbg.get("soft_gap_threshold", 6)),
+                                    "preemptive_gap_threshold": int(
+                                        dbg.get("preemptive_gap_threshold", 18)
+                                    ),
+                                    "hard_gap_threshold": int(dbg.get("hard_gap_threshold", 20)),
+                                    "soft_gap_rescue_triggered": bool(
+                                        dbg.get("soft_gap_rescue_triggered", False)
+                                    ),
+                                    "preemptive_gap_rescue_triggered": bool(
+                                        dbg.get("preemptive_gap_rescue_triggered", False)
+                                    ),
+                                    "hard_gap_rescue_triggered": bool(
+                                        dbg.get("hard_gap_rescue_triggered", False)
+                                    ),
+                                    "density_cap_for_gap_rescue": float(
+                                        dbg.get("density_cap_for_gap_rescue", 0.0)
+                                    ),
+                                    "density_cap_exceeded": bool(
+                                        dbg.get("density_cap_exceeded", False)
+                                    ),
+                                    "gap_rescue_budget_used": int(
+                                        dbg.get("gap_rescue_budget_used", 0)
+                                    ),
+                                    "gap_rescue_budget_exhausted": bool(
+                                        dbg.get("gap_rescue_budget_exhausted", False)
+                                    ),
+                                    "finalize_gap_tail_rescue_v2_2_1": bool(
+                                        dbg.get("finalize_gap_tail_rescue_v2_2_1", False)
+                                    )
+                                    or fin_dec.decision == "finalize_gap_tail_rescue_v2_2_1",
+                                    "finalize_gap_tail_preemptive_v2_2_2": bool(
+                                        dbg.get("finalize_gap_tail_preemptive_v2_2_2", False)
+                                    )
+                                    or fin_dec.decision
+                                    == "finalize_gap_tail_preemptive_v2_2_2",
+                                    "finalize_hard_gap_rescue_v2_2_2": bool(
+                                        dbg.get("finalize_hard_gap_rescue_v2_2_2", False)
+                                    )
+                                    or fin_dec.decision == "finalize_hard_gap_rescue_v2_2_2",
+                                    "hold_density_high_blocked_by_gap": bool(
+                                        dbg.get("hold_density_high_blocked_by_gap", False)
+                                    ),
+                                    "hold_redundant_blocked_by_gap": bool(
+                                        dbg.get("hold_redundant_blocked_by_gap", False)
+                                    ),
+                                    "hold_gap_rescue_blocked_by_density_cap": bool(
+                                        dbg.get("hold_gap_rescue_blocked_by_density_cap", False)
+                                    ),
+                                }
+                            )
+                            runtime_gate.append_direct_density_control_v2_2_2_event(v2_payload)
+                        elif runtime_gate.direct_density_controller.is_v221:
+                            v2_payload.update(
+                                {
+                                    "local_window_density": float(
+                                        dbg.get("local_window_density", 0.0)
+                                    ),
+                                    "local_window_gap_before": float(
+                                        dbg.get("local_window_gap_before", 0.0)
+                                    ),
+                                    "local_window_gap_after_if_hold": float(
+                                        dbg.get("local_window_gap_after_if_hold", 0.0)
+                                    ),
+                                    "soft_gap_threshold": int(dbg.get("soft_gap_threshold", 6)),
+                                    "hard_gap_threshold": int(dbg.get("hard_gap_threshold", 20)),
+                                    "gap_tail_rescue_triggered": bool(
+                                        dbg.get("gap_tail_rescue_triggered", False)
+                                    ),
+                                    "hard_gap_rescue_triggered": bool(
+                                        dbg.get("hard_gap_rescue_triggered", False)
+                                    ),
+                                    "gap_rescue_budget_used": int(
+                                        dbg.get("gap_rescue_budget_used", 0)
+                                    ),
+                                    "gap_rescue_budget_exhausted": bool(
+                                        dbg.get("gap_rescue_budget_exhausted", False)
+                                    ),
+                                    "finalize_gap_tail_rescue_v2_2_1": bool(
+                                        dbg.get("finalize_gap_tail_rescue_v2_2_1", False)
+                                    )
+                                    or fin_dec.decision == "finalize_gap_tail_rescue_v2_2_1",
+                                    "finalize_hard_gap_rescue_v2_2_1": bool(
+                                        dbg.get("finalize_hard_gap_rescue_v2_2_1", False)
+                                    )
+                                    or fin_dec.decision == "finalize_hard_gap_rescue_v2_2_1",
+                                    "hold_density_high_blocked_by_gap": bool(
+                                        dbg.get("hold_density_high_blocked_by_gap", False)
+                                    ),
+                                    "hold_redundant_blocked_by_gap": bool(
+                                        dbg.get("hold_redundant_blocked_by_gap", False)
+                                    ),
+                                }
+                            )
+                            runtime_gate.append_direct_density_control_v2_2_1_event(v2_payload)
+                        elif runtime_gate.direct_density_controller.is_v22:
+                            v2_payload.update(
+                                {
+                                    "local_window_density": float(
+                                        dbg.get("local_window_density", 0.0)
+                                    ),
+                                    "local_window_keyframes": int(
+                                        dbg.get("local_window_keyframes", 0)
+                                    ),
+                                    "local_window_gap_max": float(
+                                        dbg.get("local_window_gap_max", 0.0)
+                                    ),
+                                    "local_window_gap_after_if_hold": float(
+                                        dbg.get("local_window_gap_after_if_hold", 0.0)
+                                    ),
+                                    "gap_critical_triggered": bool(
+                                        dbg.get("gap_critical_triggered", False)
+                                    ),
+                                    "gap_critical_finalized": bool(
+                                        dbg.get("gap_critical_finalized", False)
+                                    ),
+                                    "early_rescue_triggered": bool(
+                                        dbg.get("early_rescue_triggered", False)
+                                    ),
+                                    "early_rescue_budget_used": int(
+                                        dbg.get("early_rescue_budget_used", 0)
+                                    ),
+                                    "early_rescue_budget_exhausted": bool(
+                                        dbg.get("early_rescue_budget_exhausted", False)
+                                    ),
+                                    "finalize_early_growth_rescue": bool(
+                                        dbg.get("finalize_early_growth_rescue", False)
+                                    )
+                                    or fin_dec.decision == "finalize_early_growth_rescue",
+                                    "local_density_rescue_triggered": bool(
+                                        dbg.get("local_density_rescue_triggered", False)
+                                    ),
+                                    "local_gap_rescue_triggered": bool(
+                                        dbg.get("local_gap_rescue_triggered", False)
+                                    ),
+                                    "finalize_local_density_rescue": bool(
+                                        dbg.get("finalize_local_density_rescue", False)
+                                    )
+                                    or fin_dec.decision == "finalize_local_density_rescue",
+                                    "finalize_local_gap_rescue": bool(
+                                        dbg.get("finalize_local_gap_rescue", False)
+                                    )
+                                    or fin_dec.decision == "finalize_local_gap_rescue",
+                                    "hold_density_high_blocked_by_gap": bool(
+                                        dbg.get("hold_density_high_blocked_by_gap", False)
+                                    ),
+                                    "hold_density_high_blocked_by_local_under_density": bool(
+                                        dbg.get(
+                                            "hold_density_high_blocked_by_local_under_density",
+                                            False,
+                                        )
+                                    ),
+                                    "hold_redundant_blocked_by_gap": bool(
+                                        dbg.get("hold_redundant_blocked_by_gap", False)
+                                    ),
+                                }
+                            )
+                            runtime_gate.append_direct_density_control_v2_2_event(v2_payload)
+                        elif runtime_gate.direct_density_controller.is_v21:
+                            runtime_gate.append_direct_density_control_v2_1_event(v2_payload)
+                        elif runtime_gate.direct_density_controller.mode == "target_band_v2":
+                            runtime_gate.append_direct_density_control_v2_event(v2_payload)
+                        else:
+                            runtime_gate.append_direct_density_control_event(
+                                {
+                                    **v2_payload,
+                                    "anchor_id": len(scene_model.anchors) - 1,
+                                    "anchor_changed": bool(anchor_changed),
+                                    "support_trend_state": (
+                                        "support_triggered"
+                                        if support_triggered
+                                        else "baseline_prev_match"
+                                    ),
+                                    "novelty_proxy": float(dbg.get("novelty_proxy", 0.0)),
+                                    "baseline_would_keep_if_available": bool(
+                                        baseline_should_add_frame
+                                    ),
+                                    "hold_redundant": bool(dbg.get("hold_redundant", False)),
+                                }
+                            )
                         if not direct_keyframe_finalized:
                             should_add_keyframe = False
+                            if not info["is_test"] and update_prev_on_hold:
+                                prev_desc_kpts = desc_kpts
+                                v2_payload["prev_desc_updated_on_hold"] = True
+                                if runtime_gate.direct_density_controller.is_v2221:
+                                    runtime_gate.direct_density_control_v2_2_2_1_events[-1][
+                                        "prev_desc_updated_on_hold"
+                                    ] = True
+                                elif runtime_gate.direct_density_controller.is_v222:
+                                    runtime_gate.direct_density_control_v2_2_2_events[-1][
+                                        "prev_desc_updated_on_hold"
+                                    ] = True
+                                elif runtime_gate.direct_density_controller.is_v221:
+                                    runtime_gate.direct_density_control_v2_2_1_events[-1][
+                                        "prev_desc_updated_on_hold"
+                                    ] = True
+                                elif runtime_gate.direct_density_controller.is_v22:
+                                    runtime_gate.direct_density_control_v2_2_events[-1][
+                                        "prev_desc_updated_on_hold"
+                                    ] = True
+                                elif runtime_gate.direct_density_controller.is_v21:
+                                    runtime_gate.direct_density_control_v2_1_events[-1][
+                                        "prev_desc_updated_on_hold"
+                                    ] = True
+                                elif runtime_gate.direct_density_controller.mode == "target_band_v2":
+                                    runtime_gate.direct_density_control_v2_events[-1][
+                                        "prev_desc_updated_on_hold"
+                                    ] = True
                     if direct_keyframe_finalized:
                         # 【场景表示模块】创建新关键帧对象
                         keyframe = Keyframe(

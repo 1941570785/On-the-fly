@@ -55,6 +55,12 @@ class PaperAlignedRuntimeGate:
         self.recovery_pnp_consensus_events: list[dict[str, Any]] = []
         self.recovery_ref_subset_events: list[dict[str, Any]] = []
         self.direct_density_control_events: list[dict[str, Any]] = []
+        self.direct_density_control_v2_events: list[dict[str, Any]] = []
+        self.direct_density_control_v2_1_events: list[dict[str, Any]] = []
+        self.direct_density_control_v2_2_events: list[dict[str, Any]] = []
+        self.direct_density_control_v2_2_1_events: list[dict[str, Any]] = []
+        self.direct_density_control_v2_2_2_events: list[dict[str, Any]] = []
+        self.direct_density_control_v2_2_2_1_events: list[dict[str, Any]] = []
         self.trace_unavailable_reasons: dict[str, str] = {
             "match_graph_neighbor_ids": "No persistent match graph object is exposed; pairwise matches live on DescribedKeypoints.matches.",
             "match_graph_id": "No stable match graph id exists for keyframes in the current runtime.",
@@ -122,20 +128,55 @@ class PaperAlignedRuntimeGate:
         return int(sum(1 for e in self.trace_events if bool(e.get("final_keyframe_incremented", False))))
 
     def _main_chain_gap_p90_recent(self) -> float:
+        """Recent main-chain gap estimate; never use a huge sentinel (breaks density guard)."""
         ticks = sorted(
             int(e.get("frame_id", -1))
             for e in self.trace_events
             if bool(e.get("final_keyframe_incremented", False))
         )
-        if len(ticks) < 3:
-            return 999.0
+        if len(ticks) < 2:
+            return 0.0
         gaps = [ticks[i] - ticks[i - 1] for i in range(1, len(ticks))]
         if not gaps:
-            return 999.0
+            return 0.0
+        if len(gaps) < 2:
+            return float(max(gaps))
         gaps.sort()
         idx = int(round((len(gaps) - 1) * 0.9))
         idx = max(0, min(len(gaps) - 1, idx))
         return float(gaps[idx])
+
+    def _finalized_ticks(self) -> list[int]:
+        return sorted(
+            int(e.get("frame_id", -1))
+            for e in self.trace_events
+            if bool(e.get("final_keyframe_incremented", False))
+        )
+
+    def _local_window_stats(self, current_tick_frame_id: int, window_size: int) -> dict[str, float | int]:
+        frame_id = int(current_tick_frame_id)
+        window_size = max(1, int(window_size))
+        lo = max(1, frame_id - window_size + 1)
+        ticks = self._finalized_ticks()
+        in_window = [t for t in ticks if lo <= t <= frame_id]
+        local_kf = len(in_window)
+        local_density = 100.0 * float(local_kf) / float(window_size)
+        gaps: list[int] = []
+        for i in range(1, len(in_window)):
+            gaps.append(in_window[i] - in_window[i - 1])
+        if in_window:
+            gaps.append(frame_id - in_window[-1])
+        elif frame_id > 0:
+            gaps.append(frame_id)
+        local_gap_max = float(max(gaps)) if gaps else 0.0
+        last_tick = ticks[-1] if ticks else 0
+        local_gap_after_hold = float(frame_id - last_tick) if last_tick > 0 else float(frame_id)
+        return {
+            "local_window_density": local_density,
+            "local_window_keyframes": local_kf,
+            "local_window_gap_max": local_gap_max,
+            "local_window_gap_after_if_hold": local_gap_after_hold,
+        }
 
     def _keyframe_growth_recent(self, current_tick_frame_id: int, window: int = 100) -> int:
         if current_tick_frame_id <= 0:
@@ -682,10 +723,35 @@ class PaperAlignedRuntimeGate:
         source_gap = int(frame_id - last_tick) if last_tick >= 0 else int(frame_id)
         gap_before = float(self._main_chain_gap_p90_recent())
         density_before = float(self._current_keyframe_density(frame_id))
+        local_density_before = density_before
+        keyframe_growth_recent = int(self._keyframe_growth_recent(frame_id))
+        ctrl = self.direct_density_controller
+        expected_kf = max(
+            1.0,
+            float(frame_id)
+            * float(getattr(ctrl, "baseline_density_per_100", 27.0))
+            / 100.0,
+        )
+        baseline_relative_density = float(
+            100.0
+            * float(self._current_keyframe_count())
+            / max(
+                float(getattr(ctrl, "baseline_relative_lower_ratio", 0.8)) * expected_kf,
+                1.0,
+            )
+        )
         disp_ratio = float(median_displacement / max(displacement_threshold, 1e-6))
         match_ratio = float(num_matches / max(2.0 * min_num_inliers, 1.0))
         novelty_proxy = min(1.0, 0.5 * min(disp_ratio, 2.0) + 0.5 * min(match_ratio, 2.0))
-        gap_after_hold = float(max(source_gap, gap_before))
+        local_stats = self._local_window_stats(
+            frame_id,
+            int(getattr(ctrl, "local_window_size", 100) or 100),
+        )
+        local_window_density = float(local_stats["local_window_density"])
+        local_window_keyframes = int(local_stats["local_window_keyframes"])
+        local_window_gap_max = float(local_stats["local_window_gap_max"])
+        local_window_gap_after_if_hold = float(local_stats["local_window_gap_after_if_hold"])
+        gap_after_hold = float(max(source_gap, gap_before, local_window_gap_after_if_hold))
         decision = self.direct_density_controller.decide(
             frame_id=int(frame_id),
             runtime_action=str(runtime_action),
@@ -693,6 +759,9 @@ class PaperAlignedRuntimeGate:
             is_test=bool(is_test),
             is_bootstrap_phase=bool(is_bootstrap_phase),
             density_before=density_before,
+            local_density_before=local_window_density,
+            keyframe_growth_recent=keyframe_growth_recent,
+            baseline_relative_density=baseline_relative_density,
             source_gap_to_last_keyframe=source_gap,
             main_chain_gap_before=gap_before,
             main_chain_gap_after_if_hold=gap_after_hold,
@@ -704,11 +773,43 @@ class PaperAlignedRuntimeGate:
             min_num_inliers=int(min_num_inliers),
             pose_inliers=int(pose_inliers),
             novelty_proxy=novelty_proxy,
+            current_keyframe_count=int(self._current_keyframe_count()),
+            local_window_density=local_window_density,
+            local_window_keyframes=local_window_keyframes,
+            local_window_gap_max=local_window_gap_max,
+            local_window_gap_after_if_hold=local_window_gap_after_if_hold,
         )
+        if ctrl.is_v22:
+            decision.debug.update(
+                {
+                    "local_window_density": local_window_density,
+                    "local_window_keyframes": local_window_keyframes,
+                    "local_window_gap_max": local_window_gap_max,
+                    "local_window_gap_after_if_hold": local_window_gap_after_if_hold,
+                }
+            )
         return decision
 
     def append_direct_density_control_event(self, payload: dict[str, Any]) -> None:
         self.direct_density_control_events.append(dict(payload))
+
+    def append_direct_density_control_v2_event(self, payload: dict[str, Any]) -> None:
+        self.direct_density_control_v2_events.append(dict(payload))
+
+    def append_direct_density_control_v2_1_event(self, payload: dict[str, Any]) -> None:
+        self.direct_density_control_v2_1_events.append(dict(payload))
+
+    def append_direct_density_control_v2_2_event(self, payload: dict[str, Any]) -> None:
+        self.direct_density_control_v2_2_events.append(dict(payload))
+
+    def append_direct_density_control_v2_2_1_event(self, payload: dict[str, Any]) -> None:
+        self.direct_density_control_v2_2_1_events.append(dict(payload))
+
+    def append_direct_density_control_v2_2_2_event(self, payload: dict[str, Any]) -> None:
+        self.direct_density_control_v2_2_2_events.append(dict(payload))
+
+    def append_direct_density_control_v2_2_2_1_event(self, payload: dict[str, Any]) -> None:
+        self.direct_density_control_v2_2_2_1_events.append(dict(payload))
 
     def flush_trace(self) -> None:
         if not self.trace_path:
@@ -759,6 +860,12 @@ class PaperAlignedRuntimeGate:
                 getattr(self.direct_density_controller, "mode", "off")
             ),
             "direct_density_control_events": self.direct_density_control_events,
+            "direct_density_control_v2_events": self.direct_density_control_v2_events,
+            "direct_density_control_v2_1_events": self.direct_density_control_v2_1_events,
+            "direct_density_control_v2_2_events": self.direct_density_control_v2_2_events,
+            "direct_density_control_v2_2_1_events": self.direct_density_control_v2_2_1_events,
+            "direct_density_control_v2_2_2_events": self.direct_density_control_v2_2_2_events,
+            "direct_density_control_v2_2_2_1_events": self.direct_density_control_v2_2_2_1_events,
             "trace_unavailable_reasons": self.trace_unavailable_reasons,
         }
         if self.semantic_policy is not None:

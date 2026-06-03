@@ -322,6 +322,36 @@ def export_run_dir(run_dir: Path, label: str, nframes: int) -> None:
     )
 
 
+
+def eval_full_gate(
+    *,
+    density_per_100: float,
+    keyframes: int,
+    baseline_kf_same_length: int,
+    baseline_density_same_length: float,
+    keyframes_short800: int,
+    gap_p90: float,
+    gap_max: float,
+) -> dict[str, Any]:
+    upper_ok = density_per_100 <= 45.0
+    lower_abs_ok = density_per_100 >= 25.0
+    lower_rel_ok = density_per_100 >= 0.8 * baseline_density_same_length
+    baseline_kf_ok = keyframes >= 0.8 * baseline_kf_same_length
+    growth_ok = keyframes >= keyframes_short800
+    gap_ok = gap_p90 <= 5.0 and gap_max <= 20
+    starvation = density_per_100 < 25.0 or not baseline_kf_ok
+    overdense = density_per_100 > 50.0
+    ready = bool(
+        upper_ok and lower_abs_ok and lower_rel_ok and baseline_kf_ok
+        and growth_ok and gap_ok and not starvation and not overdense
+    )
+    return {
+        "ready_for_full_forest1": ready,
+        "starvation_flag": starvation,
+        "overdense_flag": overdense,
+    }
+
+
 def post_run_summary(out: Path) -> None:
     runs = {
         "direct_density_short500": (out / "direct_density_short500", 500),
@@ -351,11 +381,25 @@ def post_run_summary(out: Path) -> None:
     write_csv(out / "direct_density_short_comparison.csv", rows)
     write_json(out / "direct_density_short_comparison.json", {"rows": rows})
     d1000 = next((x for x in rows if x["run"] == "direct_density_short1000"), {})
+    b1000 = analyze_run("baseline_short1000", EXT / "baseline_short1000", 1000, False)
+    d800r = analyze_run("direct_density_short800", out / "direct_density_short800", 800, True)
+    gate_eval = eval_full_gate(
+        density_per_100=float(d1000.get("keyframes_per_100", 99)),
+        keyframes=int(d1000.get("final_keyframe_count", 0)),
+        baseline_kf_same_length=int(b1000["final_keyframe_count"]),
+        baseline_density_same_length=float(b1000["keyframes_per_100"]),
+        keyframes_short800=int(d800r["final_keyframe_count"]),
+        gap_p90=float(d1000.get("gap_p90", 99)),
+        gap_max=float(d1000.get("gap_max", 99)),
+    )
     ready = {
-        "ready_for_full_forest1": bool(d1000.get("keyframes_per_100", 99) <= 45),
-        "recommend_full_run": bool(d1000.get("keyframes_per_100", 99) <= 45),
-        "density_target_met": bool(d1000.get("keyframes_per_100", 99) <= 45),
+        **gate_eval,
+        "recommend_full_run": bool(gate_eval.get("ready_for_full_forest1")),
+        "density_target_met": bool(
+            gate_eval.get("ready_for_full_forest1") and not gate_eval.get("starvation_flag")
+        ),
         "keep_RVQ_tau_frozen": True,
+        "gate_version": "stability_audit_v1_corrected",
     }
     write_json(out / "ready_for_full_gate_after_direct_density_rebalance.json", ready)
     write_md(

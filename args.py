@@ -177,13 +177,89 @@ def get_args():
         '--paper_aligned_direct_density_control',
         type=str,
         default='off',
-        choices=['off', 'conservative', 'target_band_v1'],
+        choices=[
+            'off',
+            'conservative',
+            'target_band_v1',
+            'target_band_v2',
+            'target_band_v2_1',
+            'target_band_v2_2',
+            'target_band_v2_2_1',
+            'target_band_v2_2_2',
+            'target_band_v2_2_2_1',
+        ],
         help='Direct keyframe finalization density guard (not R/V/Q admission).',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_v2_2_2_1_post500_gap_rescue_budget_per_100',
+        type=int,
+        default=4,
+        help='v2.2.2.1 post-500 pre-gap rescue budget per 100 frames.',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_v2_2_2_preemptive_gap_threshold',
+        type=int,
+        default=18,
+        help='v2.2.2 preemptive hard gap rescue when gap_after_if_hold >= this.',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_v2_2_1_soft_gap_threshold',
+        type=int,
+        default=6,
+        help='v2.2.1 soft gap tail threshold for budgeted gap rescue.',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_v2_2_1_hard_gap_threshold',
+        type=int,
+        default=20,
+        help='v2.2.1 hard gap threshold (must finalize).',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_v2_2_1_gap_rescue_budget_per_100',
+        type=int,
+        default=4,
+        help='v2.2.1 max gap-tail rescues per 100 frames.',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_v2_2_1_gap_rescue_density_upper_500',
+        type=float,
+        default=50.0,
+        help='v2.2.1 gap rescue density cap for frames <=500.',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_v2_2_1_gap_rescue_density_upper_later',
+        type=float,
+        default=45.0,
+        help='v2.2.1 gap rescue density cap for frames >500.',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_v2_2_early_rescue_budget_per_100',
+        type=int,
+        default=8,
+        help='v2.2 early lower-bound rescue budget per 100 frames.',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_v2_2_early_rescue_density_stop',
+        type=float,
+        default=32.0,
+        help='v2.2 stop aggressive early rescue when density reaches this per-100.',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_local_window_size',
+        type=int,
+        default=100,
+        help='v2.2 sliding frame window for local density/gap guards.',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_local_density_lower_per_100',
+        type=float,
+        default=20.0,
+        help='v2.2 local window density lower trigger per 100 frames.',
     )
     parser.add_argument(
         '--paper_aligned_direct_density_lower_per_100',
         type=float,
-        default=28.0,
+        default=25.0,
         help='Lower density band for direct finalization (keyframes per 100 frames).',
     )
     parser.add_argument(
@@ -215,6 +291,56 @@ def get_args():
         type=int,
         default=3,
         help='Hold redundant direct finalize when source gap to last keyframe is at most this.',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_high_novelty_budget_per_100',
+        type=int,
+        default=8,
+        help='Max finalize_high_novelty per 100 frames (v2).',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_support_needed_budget_per_100',
+        type=int,
+        default=6,
+        help='Max finalize_support_needed per 100 frames (v2).',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_density_hysteresis_margin',
+        type=float,
+        default=3.0,
+        help='Density band hysteresis margin (v2).',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_min_growth_per_100',
+        type=float,
+        default=20.0,
+        help='Minimum recent keyframe growth per 100 frames (v2 anti-starvation).',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_baseline_relative_lower_ratio',
+        type=float,
+        default=0.8,
+        help='Min keyframe count ratio vs baseline-at-same-length (v2).',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_baseline_density_per_100',
+        type=float,
+        default=27.0,
+        help='Reference baseline density per 100 frames for v2 lower guard.',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_update_prev_desc_on_hold',
+        type=str,
+        default='off',
+        choices=['off', 'on', 'light'],
+        help='Whether to update prev_desc_kpts when direct finalize is held.',
+    )
+    parser.add_argument(
+        '--paper_aligned_direct_hold_tracking_bridge_mode',
+        type=str,
+        default='light',
+        choices=['none', 'light', 'full'],
+        help='Tracking bridge mode when hold uses light prev_desc update.',
     )
     parser.add_argument(
         '--paper_aligned_recovery_window_size',
