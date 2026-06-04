@@ -44,12 +44,16 @@ QUALITY_ALIASES = {
     "absolute_relative_translation_error": (
         "absolute_relative_translation_error",
         "abs_rel_translation_error",
+        "abs_trans_error",
+        "rel_trans_error",
         "translation_error",
         "t",
     ),
     "absolute_relative_rotation_error": (
         "absolute_relative_rotation_error",
         "abs_rel_rotation_error",
+        "abs_rot_error_deg",
+        "rel_rot_error_deg",
         "rotation_error_deg",
         "R_deg",
     ),
@@ -66,6 +70,7 @@ def build_stage_metric_evaluation(
     trace: dict[str, Any],
     *,
     lifecycle_rows: list[dict[str, Any]] | None = None,
+    frame_metric_rows: list[dict[str, Any]] | None = None,
     run_quality: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build offline stage metrics from runtime trace and lifecycle rows.
@@ -76,6 +81,7 @@ def build_stage_metric_evaluation(
     """
 
     lifecycle_by_frame = _index_lifecycle_rows(lifecycle_rows or [])
+    frame_metrics_by_frame = _index_frame_metric_rows(frame_metric_rows or [])
     events = list(trace.get("events") or [])
     frame_rows: list[dict[str, Any]] = []
 
@@ -83,12 +89,14 @@ def build_stage_metric_evaluation(
         frame_id = as_int(event.get("frame_id"), index)
         action = str(event.get("action") or "unknown")
         lifecycle = lifecycle_by_frame.get(frame_id, {})
+        frame_metrics = frame_metrics_by_frame.get(frame_id, {})
         frame_rows.append(
             _build_process_frame_row(
                 stage_name=action,
                 frame_id=frame_id,
                 event=event,
                 lifecycle=lifecycle,
+                frame_metrics=frame_metrics,
             )
         )
 
@@ -96,12 +104,14 @@ def build_stage_metric_evaluation(
     for event in recovery_events:
         source_frame_id = as_int(event.get("source_frame_id"), as_int(event.get("frame_id"), 0))
         lifecycle = lifecycle_by_frame.get(source_frame_id, {})
+        frame_metrics = frame_metrics_by_frame.get(source_frame_id, {})
         frame_rows.append(
             _build_process_frame_row(
                 stage_name="recovery_attempt",
                 frame_id=source_frame_id,
                 event=event,
                 lifecycle=lifecycle,
+                frame_metrics=frame_metrics,
                 extra={
                     "current_frame_id": as_int(event.get("current_frame_id"), 0),
                     "recovery_attempt_count": 1,
@@ -121,12 +131,14 @@ def build_stage_metric_evaluation(
     for event in materialized_events:
         source_frame_id = as_int(event.get("source_frame_id"), as_int(event.get("frame_id"), 0))
         lifecycle = lifecycle_by_frame.get(source_frame_id, {})
+        frame_metrics = frame_metrics_by_frame.get(source_frame_id, {})
         frame_rows.append(
             _build_process_frame_row(
                 stage_name="true_source_materialized",
                 frame_id=source_frame_id,
                 event=event,
                 lifecycle=lifecycle,
+                frame_metrics=frame_metrics,
                 extra={
                     "current_frame_id": as_int(event.get("current_tick_frame_id"), 0),
                     "true_source_materialized_count": 1,
@@ -236,15 +248,34 @@ def _index_lifecycle_rows(rows: list[dict[str, Any]]) -> dict[int, dict[str, Any
     return indexed
 
 
+def _index_frame_metric_rows(rows: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    indexed: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        frame_id = _frame_metric_frame_id(row)
+        if frame_id:
+            indexed[frame_id] = row
+    return indexed
+
+
+def _frame_metric_frame_id(row: dict[str, Any]) -> int:
+    for key in ("original_frame_idx", "frame_id", "frame_idx", "sequence_order"):
+        frame_id = as_int(row.get(key), 0)
+        if frame_id:
+            return frame_id
+    return 0
+
+
 def _build_process_frame_row(
     *,
     stage_name: str,
     frame_id: int,
     event: dict[str, Any],
     lifecycle: dict[str, Any],
+    frame_metrics: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     decision_meta = event.get("decision_meta", {}) or {}
+    quality = frame_metrics or {}
     row = {
         "stage_name": stage_name,
         "frame_id": frame_id,
@@ -276,14 +307,14 @@ def _build_process_frame_row(
             "miniba_inliers",
             "incremental_miniba_inliers",
         ),
-        "psnr": _metric_value("psnr", event, lifecycle),
-        "ssim": _metric_value("ssim", event, lifecycle),
-        "lpips": _metric_value("lpips", event, lifecycle),
+        "psnr": _metric_value("psnr", event, lifecycle, quality),
+        "ssim": _metric_value("ssim", event, lifecycle, quality),
+        "lpips": _metric_value("lpips", event, lifecycle, quality),
         "absolute_relative_translation_error": _metric_value(
-            "absolute_relative_translation_error", event, lifecycle
+            "absolute_relative_translation_error", event, lifecycle, quality
         ),
         "absolute_relative_rotation_error": _metric_value(
-            "absolute_relative_rotation_error", event, lifecycle
+            "absolute_relative_rotation_error", event, lifecycle, quality
         ),
         "risk_score": as_float(decision_meta.get("R_t")),
         "visibility_score": as_float(decision_meta.get("V_t")),
@@ -412,11 +443,26 @@ def _collect_quality_keys(value: Any, seen: set[str]) -> None:
             _collect_quality_keys(child, seen)
 
 
-def _metric_value(name: str, event: dict[str, Any], lifecycle: dict[str, Any]) -> float | None:
-    return _first_float(event, lifecycle, *QUALITY_ALIASES[name])
+def _metric_value(
+    name: str,
+    event: dict[str, Any],
+    lifecycle: dict[str, Any],
+    frame_metrics: dict[str, Any],
+) -> float | None:
+    return _first_float(event, lifecycle, *QUALITY_ALIASES[name], frame_metrics=frame_metrics)
 
 
-def _first_float(event: dict[str, Any], lifecycle: dict[str, Any], *keys: str) -> float | None:
+def _first_float(
+    event: dict[str, Any],
+    lifecycle: dict[str, Any],
+    *keys: str,
+    frame_metrics: dict[str, Any] | None = None,
+) -> float | None:
+    quality = frame_metrics or {}
+    for key in keys:
+        value = as_float(quality.get(key))
+        if value is not None:
+            return value
     for key in keys:
         value = as_float(lifecycle.get(key))
         if value is not None:

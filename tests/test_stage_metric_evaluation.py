@@ -79,6 +79,13 @@ LIFECYCLE_ROWS = [
     {"frame_id": "4", "psnr": "22.0", "ssim": "0.60", "lpips": "0.35", "absolute_relative_translation_error": "0.08", "absolute_relative_rotation_error": "0.8", "lifecycle_state": "evaluated", "state_risk_bucket": "low"},
 ]
 
+FRAME_METRIC_ROWS = [
+    {"frame_idx": "1", "original_frame_idx": "1", "psnr": "21.0", "ssim": "0.51", "lpips": "0.39", "abs_trans_error": "0.11", "abs_rot_error_deg": "1.1"},
+    {"frame_idx": "2", "original_frame_idx": "2", "psnr": "17.0", "ssim": "0.44", "lpips": "0.51", "abs_trans_error": "0.21", "abs_rot_error_deg": "2.1"},
+    {"frame_idx": "3", "original_frame_idx": "3", "psnr": "14.0", "ssim": "0.31", "lpips": "0.71", "abs_trans_error": "0.51", "abs_rot_error_deg": "5.1"},
+    {"frame_idx": "4", "original_frame_idx": "4", "psnr": "23.0", "ssim": "0.61", "lpips": "0.34", "abs_trans_error": "0.09", "abs_rot_error_deg": "0.9"},
+]
+
 
 class StageMetricEvaluationTests(unittest.TestCase):
     def test_builds_stage_rows_with_offline_quality_pose_and_lifecycle_metrics(self):
@@ -111,23 +118,46 @@ class StageMetricEvaluationTests(unittest.TestCase):
         self.assertNotIn("PSNR", result["online_decision_metric_fields_seen"])
         self.assertNotIn("LPIPS", result["online_decision_metric_fields_seen"])
 
+    def test_merges_frame_metrics_for_stage_quality_and_pose_errors(self):
+        result = build_stage_metric_evaluation(
+            TRACE,
+            lifecycle_rows=LIFECYCLE_ROWS,
+            frame_metric_rows=FRAME_METRIC_ROWS,
+        )
+        by_stage = {row["stage_name"]: row for row in result["stage_rows"]}
+
+        self.assertAlmostEqual(by_stage["direct_admit"]["psnr_mean"], 22.0)
+        self.assertAlmostEqual(by_stage["direct_admit"]["ssim_mean"], 0.56)
+        self.assertAlmostEqual(by_stage["direct_admit"]["lpips_mean"], 0.365)
+        self.assertAlmostEqual(by_stage["direct_admit"]["absolute_relative_translation_error_mean"], 0.10)
+        self.assertAlmostEqual(by_stage["direct_admit"]["absolute_relative_rotation_error_mean"], 1.0)
+        self.assertAlmostEqual(by_stage["defer_recoverable"]["absolute_relative_translation_error_mean"], 0.21)
+        self.assertAlmostEqual(by_stage["defer_recoverable"]["absolute_relative_rotation_error_mean"], 2.1)
+
     def test_cli_writes_summary_table_frame_table_and_report(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             trace_path = base / "semantic_trace.json"
             lifecycle_path = base / "lifecycle.csv"
+            frame_metrics_path = base / "frame_metrics.csv"
             output_dir = base / "out"
             trace_path.write_text(json.dumps(TRACE), encoding="utf-8")
             with lifecycle_path.open("w", encoding="utf-8", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=list(LIFECYCLE_ROWS[0]))
                 writer.writeheader()
                 writer.writerows(LIFECYCLE_ROWS)
+            with frame_metrics_path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=list(FRAME_METRIC_ROWS[0]))
+                writer.writeheader()
+                writer.writerows(FRAME_METRIC_ROWS)
 
             rc = stage_metric_main([
                 "--trace_json",
                 str(trace_path),
                 "--lifecycle_csv",
                 str(lifecycle_path),
+                "--frame_metrics_csv",
+                str(frame_metrics_path),
                 "--output_dir",
                 str(output_dir),
             ])
@@ -140,6 +170,7 @@ class StageMetricEvaluationTests(unittest.TestCase):
             summary = json.loads((output_dir / "stage_metric_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["overall_summary"]["true_source_materialized_count"], 1)
             self.assertEqual(summary["metric_contract"]["online_quality_metric_fields"], [])
+            self.assertAlmostEqual(summary["overall_summary"]["absolute_relative_rotation_error_mean"], 2.2333333333333334)
 
 
 if __name__ == "__main__":

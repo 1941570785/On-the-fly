@@ -74,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trace_json", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--lifecycle_csv")
+    parser.add_argument("--frame_metrics_csv")
     parser.add_argument("--run_quality_json")
     args = parser.parse_args(argv)
 
@@ -83,11 +84,13 @@ def main(argv: list[str] | None = None) -> int:
 
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
     lifecycle_rows = load_lifecycle_csv(args.lifecycle_csv)
+    frame_metric_rows = load_lifecycle_csv(args.frame_metrics_csv)
     run_quality = _load_optional_json(args.run_quality_json)
 
     evaluation = build_stage_metric_evaluation(
         trace,
         lifecycle_rows=lifecycle_rows,
+        frame_metric_rows=frame_metric_rows,
         run_quality=run_quality,
     )
 
