@@ -71,6 +71,15 @@ if __name__ == "__main__":
             "(off mode remains baseline path)."
         )
         runtime_gate = PaperAlignedRuntimeGate(args)
+        effective_risk_mode = str(
+            getattr(runtime_gate, "training_risk_mode", getattr(runtime_gate, "mode", risk_mode)) or risk_mode
+        )
+        if effective_risk_mode != risk_mode:
+            print(
+                f"[risk_admission_mode={risk_mode}] effective runtime mode: "
+                f"{effective_risk_mode}"
+            )
+        risk_mode = effective_risk_mode
         atexit.register(runtime_gate.flush_trace)
         def _flush_chosen_kfs_resolution_events():
             events = pop_chosen_kfs_resolution_events()
@@ -1135,24 +1144,6 @@ if __name__ == "__main__":
             should_add_keyframe, runtime_action = runtime_gate.decide(
                 frameID, info, bool(baseline_should_add), phase=phase, evidence=evidence
             )
-            if (
-                risk_mode == "paper_aligned_semantic_v1"
-                and getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit")
-                == "true_source_commit"
-                and str(runtime_action) == "defer_recoverable"
-            ):
-                _attempt_recovery_pose_path(
-                    {
-                        "source_frame_id": int(frameID),
-                        "source_input_index": int(frameID),
-                        "current_tick_frame_id": int(frameID),
-                        "current_tick_image_name": str(info.get("image_name", "")),
-                        "bridge_type": "true_source_commit",
-                        "source_payload": runtime_gate._source_payload(frameID, info, evidence),
-                    },
-                    current_frame_id=frameID,
-                    attempt_reason="deferred_recovery_retry",
-                )
             if (
                 risk_mode == "paper_aligned_semantic_v1"
                 and getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit")

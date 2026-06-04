@@ -145,8 +145,63 @@ def get_args():
             'off',
             'paper_aligned_baseline_passthrough',
             'paper_aligned_semantic_v1',
+            'on_the_fly_innovation_v1',
         ],
         help='Risk admission mode. off keeps baseline runtime unchanged.',
+    )
+    parser.add_argument(
+        '--paper_aligned_tau_R_low',
+        type=float,
+        default=None,
+        help='Override coupled/semantic R low threshold.',
+    )
+    parser.add_argument(
+        '--paper_aligned_tau_R_high',
+        type=float,
+        default=None,
+        help='Override coupled/semantic R high threshold.',
+    )
+    parser.add_argument(
+        '--paper_aligned_tau_V',
+        type=float,
+        default=None,
+        help='Override coupled/semantic direct-admit V threshold.',
+    )
+    parser.add_argument(
+        '--paper_aligned_tau_V_min',
+        type=float,
+        default=None,
+        help='Override coupled/semantic defer minimum V threshold.',
+    )
+    parser.add_argument(
+        '--paper_aligned_tau_B',
+        type=float,
+        default=None,
+        help='Override coupled/semantic recoverable risk-band threshold.',
+    )
+    parser.add_argument(
+        '--paper_aligned_tau_Q',
+        type=float,
+        default=None,
+        help='Override coupled/semantic defer Q threshold.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_delay_frames',
+        type=int,
+        default=None,
+        help='Override semantic recovery pool delay in frames.',
+    )
+    parser.add_argument(
+        '--paper_aligned_semantic_recovery_max_attempts',
+        type=int,
+        default=None,
+        help='Override semantic recovery maximum attempts per deferred source.',
+    )
+    parser.add_argument(
+        '--paper_aligned_semantic_recovery_attempts_per_tick',
+        type=int,
+        default=None,
+        help='Override semantic recovery attempts scheduled per tick.',
     )
     parser.add_argument(
         '--paper_aligned_recovery_commit_bridge',
@@ -158,7 +213,7 @@ def get_args():
     parser.add_argument(
         '--paper_aligned_defer_recovery_support_bridge',
         type=str,
-        default='off',
+        default=None,
         choices=['off', 'v1'],
         help='Defer-recoverable recovery support bridge (anchor transition + reference propagation).',
     )
@@ -177,7 +232,7 @@ def get_args():
     parser.add_argument(
         '--paper_aligned_recovery_commit_control',
         type=str,
-        default='off',
+        default=None,
         choices=[
             'off',
             'conservative',
@@ -195,7 +250,7 @@ def get_args():
     parser.add_argument(
         '--paper_aligned_direct_density_control',
         type=str,
-        default='off',
+        default=None,
         choices=[
             'off',
             'conservative',
@@ -350,7 +405,7 @@ def get_args():
     parser.add_argument(
         '--paper_aligned_direct_update_prev_desc_on_hold',
         type=str,
-        default='off',
+        default=None,
         choices=['off', 'on', 'light'],
         help='Whether to update prev_desc_kpts when direct finalize is held.',
     )

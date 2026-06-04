@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .config import apply_coupled_innovation_defaults, resolve_coupled_innovation_config
 from .direct_density_control import DirectDensityController
 from .recovery_commit_control import RecoveryCommitController
 from .semantic_runtime import SemanticV1RuntimePolicy
@@ -21,7 +22,10 @@ def _to_bool(x: Any) -> bool:
 
 class PaperAlignedRuntimeGate:
     def __init__(self, args: Any) -> None:
+        self.requested_mode = str(getattr(args, "risk_admission_mode", "off") or "off")
+        self.coupled_config = apply_coupled_innovation_defaults(args)
         self.mode = str(getattr(args, "risk_admission_mode", "off") or "off")
+        self.training_risk_mode = self.mode
         self.trace_path = str(getattr(args, "paper_aligned_contract_trace_path", "") or "").strip()
         self.recovery_bridge_mode = str(
             getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit") or "true_source_commit"
@@ -72,7 +76,13 @@ class PaperAlignedRuntimeGate:
         self.direct_density_controller = DirectDensityController(args)
         self._anchor_count_at_last_direct_finalize = 1
         if self.mode == "paper_aligned_semantic_v1":
-            self.semantic_policy = SemanticV1RuntimePolicy()
+            cfg = self.coupled_config
+            self.semantic_policy = SemanticV1RuntimePolicy(
+                thresholds=cfg.thresholds if cfg.enabled else None,
+                recovery_delay_frames=cfg.recovery_delay_frames if cfg.enabled else None,
+                recovery_max_attempts=cfg.recovery_max_attempts if cfg.enabled else None,
+                recovery_attempts_per_tick=cfg.recovery_attempts_per_tick if cfg.enabled else None,
+            )
 
     def _get_event(self, frame_id: int) -> dict[str, Any] | None:
         idx = self._event_index.get(frame_id)
@@ -539,6 +549,9 @@ class PaperAlignedRuntimeGate:
                 "recovery_bridge_tag": bridge_tag,
                 "thresholds": semantic["thresholds"],
             }
+            if self.coupled_config.enabled:
+                decision_meta["coupled_model"] = self.coupled_config.model_name
+                decision_meta["module_switches"] = self.coupled_config.module_switches()
 
         admit = action in ("direct_admit", "current_frame_surrogate_commit")
         event = {
@@ -550,6 +563,8 @@ class PaperAlignedRuntimeGate:
             "action": action,
             "admit_to_chain": admit,
             "mode": self.mode,
+            "requested_mode": self.requested_mode,
+            "coupled_model_enabled": bool(self.coupled_config.enabled),
             "decision_meta": decision_meta,
             "pose_init_attempted": False,
             "pose_init_success": None,
@@ -826,6 +841,12 @@ class PaperAlignedRuntimeGate:
         out.parent.mkdir(parents=True, exist_ok=True)
         payload: dict[str, Any] = {
             "mode": self.mode,
+            "requested_mode": self.requested_mode,
+            "coupled_innovation_config": self.coupled_config.to_trace_dict() if self.coupled_config.enabled else {},
+            "stage_metric_contract": self.coupled_config.stage_metric_contract() if self.coupled_config.enabled else {
+                "online_quality_metric_fields": [],
+                "offline_stage_metric_fields": [],
+            },
             "num_events": len(self.trace_events),
             "direct_admit": int(sum(1 for e in self.trace_events if e.get("action") == "direct_admit")),
             "true_recovery_commit": int(sum(1 for e in self.trace_events if e.get("source_recovery_committed", False))),

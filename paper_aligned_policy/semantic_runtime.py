@@ -11,15 +11,21 @@ def _clamp01(x: float) -> float:
 
 
 class SemanticV1RuntimePolicy:
-    def __init__(self, thresholds: Thresholds | None = None) -> None:
+    def __init__(
+        self,
+        thresholds: Thresholds | None = None,
+        recovery_delay_frames: int | None = None,
+        recovery_max_attempts: int | None = None,
+        recovery_attempts_per_tick: int | None = None,
+    ) -> None:
         self.th = thresholds or Thresholds()
         self.recovery_pool: list[dict[str, Any]] = []
         self.recovery_pool_max = 0
         self.total_frames = 0
         self.decision_counts = {"direct_admit": 0, "defer_recoverable": 0, "discard": 0}
-        self.recovery_delay_frames = 8
-        self.recovery_max_attempts = 3
-        self.recovery_attempts_per_tick = 3
+        self.recovery_delay_frames = int(8 if recovery_delay_frames is None else recovery_delay_frames)
+        self.recovery_max_attempts = int(3 if recovery_max_attempts is None else recovery_max_attempts)
+        self.recovery_attempts_per_tick = int(3 if recovery_attempts_per_tick is None else recovery_attempts_per_tick)
         self.recovery_attempt_count = 0
         self.recovery_success_count = 0
         self.recovery_discard_count = 0
@@ -38,25 +44,43 @@ class SemanticV1RuntimePolicy:
         pose_fail_rate = _clamp01(float(evidence.get("recent_pose_fail_rate", 0.0) or 0.0))
         is_test = bool(evidence.get("is_test", False))
 
-        risk_from_instability = 0.55 * (1.0 - support_ratio) + 0.45 * pose_fail_rate
-        if not baseline_should_add:
-            risk_from_instability = 0.6 * risk_from_instability + 0.4
-        R_t = _clamp01(risk_from_instability)
+        pose_uncertainty = _clamp01(float(evidence.get("pose_uncertainty", 1.0 - support_ratio) or 0.0))
+        state_support_gap = _clamp01(float(evidence.get("state_support_gap", 1.0 - support_ratio) or 0.0))
+        temporal_degradation = _clamp01(
+            float(evidence.get("temporal_degradation", pose_fail_rate) or 0.0)
+        )
+        R_t = _clamp01(0.40 * pose_uncertainty + 0.35 * state_support_gap + 0.25 * temporal_degradation)
 
         baseline_bonus = 1.0 if baseline_should_add else 0.0
-        test_bonus = 0.2 if is_test else 0.0
-        V_t = _clamp01(0.45 * support_ratio + 0.35 * disp_ratio + 0.20 * baseline_bonus + test_bonus)
+        test_bonus = 1.0 if is_test else 0.0
+        representation_gain = _clamp01(float(evidence.get("representation_gain", disp_ratio) or 0.0))
+        view_motion_gain = _clamp01(float(evidence.get("view_motion_gain", disp_ratio) or 0.0))
+        chain_support_gain = _clamp01(float(evidence.get("chain_support_gain", support_ratio) or 0.0))
+        V_t = _clamp01(
+            0.35 * representation_gain
+            + 0.30 * view_motion_gain
+            + 0.25 * chain_support_gain
+            + 0.10 * baseline_bonus
+            + 0.05 * test_bonus
+        )
 
-        C_t = _clamp01(0.6 * support_ratio + 0.4 * (1.0 - pose_fail_rate))
-        B_R_t = _clamp01(1.0 - abs(R_t - 0.575) / 0.175)
-        Q_t = _clamp01(0.45 * B_R_t + 0.25 * V_t + 0.30 * C_t)
+        default_context = 0.55 * chain_support_gain + 0.25 * (1.0 - pose_fail_rate) + 0.20 * support_ratio
+        C_t = _clamp01(float(evidence.get("recovery_context_score", default_context) or 0.0))
+        B_R_t = self._risk_band_score(R_t)
+        Q_t = _clamp01(0.40 * B_R_t + 0.30 * V_t + 0.30 * C_t)
         return {"R_t": R_t, "V_t": V_t, "C_t": C_t, "B_R_t": B_R_t, "Q_t": Q_t}
 
-    def _decision(self, R_t: float, V_t: float, Q_t: float) -> str:
+    def _risk_band_score(self, R_t: float) -> float:
+        risk = _clamp01(float(R_t))
+        high = float(self.th.tau_R_high)
+        if risk <= high:
+            return 1.0
+        return _clamp01((1.0 - risk) / max(1.0 - high, 1e-6))
+
+    def _decision(self, R_t: float, V_t: float, B_R_t: float, Q_t: float) -> str:
         direct = (R_t <= self.th.tau_R_low) and (V_t >= self.th.tau_V)
         defer = (
-            (R_t > self.th.tau_R_low)
-            and (R_t < self.th.tau_R_high)
+            (B_R_t >= self.th.tau_B)
             and (V_t >= self.th.tau_V_min)
             and (Q_t >= self.th.tau_Q)
         )
@@ -75,7 +99,12 @@ class SemanticV1RuntimePolicy:
             + 0.15 * min(age / 50.0, 1.0)
         )
 
-    def _tick_recovery(self, current_step: int, current_scores: dict[str, float]) -> dict[str, Any]:
+    def _tick_recovery(
+        self,
+        current_step: int,
+        current_scores: dict[str, float],
+        current_frame_id: int,
+    ) -> dict[str, Any]:
         pool_before = len(self.recovery_pool)
         if not self.recovery_pool:
             tick = {
@@ -118,7 +147,12 @@ class SemanticV1RuntimePolicy:
             q_blend = 0.7 * float(item["Q_t"]) + 0.3 * float(current_scores["Q_t"])
             v_blend = 0.7 * float(item["V_t"]) + 0.3 * float(current_scores["V_t"])
             r_blend = 0.7 * float(item["R_t"]) + 0.3 * float(current_scores["R_t"])
-            ok = (q_blend >= self.th.tau_Q) and (v_blend >= self.th.tau_V_min) and (r_blend < self.th.tau_R_high)
+            b_blend = self._risk_band_score(r_blend)
+            ok = (
+                (q_blend >= self.th.tau_Q)
+                and (v_blend >= self.th.tau_V_min)
+                and (b_blend >= self.th.tau_B)
+            )
             item["attempts"] = int(item.get("attempts", 0)) + 1
             if ok:
                 success += 1
@@ -132,15 +166,17 @@ class SemanticV1RuntimePolicy:
                         "source_payload": item.get("source_payload", {}),
                         "pool_enter_tick": int(item["defer_step"]),
                         "recovery_attempt_tick": int(current_step),
+                        "current_tick_frame_id": int(current_frame_id),
                         "recovery_attempt_count": int(item["attempts"]),
                         "scores": {
                             "R_t": float(item.get("R_t", 0.0)),
                             "V_t": float(item.get("V_t", 0.0)),
-                            "Q_t": float(item.get("Q_t", 0.0),
-                            ),
+                            "B_R_t": float(item.get("B_R_t", 0.0)),
+                            "Q_t": float(item.get("Q_t", 0.0)),
                             "q_blend": float(q_blend),
                             "v_blend": float(v_blend),
                             "r_blend": float(r_blend),
+                            "b_blend": float(b_blend),
                         },
                     }
                 )
@@ -152,6 +188,7 @@ class SemanticV1RuntimePolicy:
                         "q_blend": float(q_blend),
                         "v_blend": float(v_blend),
                         "r_blend": float(r_blend),
+                        "b_blend": float(b_blend),
                     }
                 )
                 self.recovery_pool.remove(item)
@@ -188,9 +225,9 @@ class SemanticV1RuntimePolicy:
         self.total_frames += 1
         ev = evidence or {}
         scores = self._scores(baseline_should_add, ev)
-        action = self._decision(scores["R_t"], scores["V_t"], scores["Q_t"])
+        action = self._decision(scores["R_t"], scores["V_t"], scores["B_R_t"], scores["Q_t"])
         self.decision_counts[action] = int(self.decision_counts.get(action, 0)) + 1
-        recovery_tick = self._tick_recovery(self.total_frames, scores)
+        recovery_tick = self._tick_recovery(self.total_frames, scores, int(frame_id))
         if action == "defer_recoverable":
             self.recovery_pool.append(
                 {
@@ -199,6 +236,7 @@ class SemanticV1RuntimePolicy:
                     "attempts": 0,
                     "R_t": scores["R_t"],
                     "V_t": scores["V_t"],
+                    "B_R_t": scores["B_R_t"],
                     "Q_t": scores["Q_t"],
                     "source_payload": source_payload or {},
                 }

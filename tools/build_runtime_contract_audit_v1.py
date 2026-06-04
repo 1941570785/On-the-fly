@@ -15,7 +15,8 @@ TH = {
     "tau_R_low": 0.40,
     "tau_R_high": 0.75,
     "tau_V": 0.55,
-    "tau_V_min": 0.25,
+    "tau_V_min": 0.45,
+    "tau_B": 0.12,
     "tau_Q": 0.10,
 }
 
@@ -153,14 +154,22 @@ def event_score(event: dict[str, Any], key: str) -> float | None:
 
 
 def expected_decision(event: dict[str, Any]) -> str:
+    meta = event.get("decision_meta") or {}
+    th = meta.get("thresholds") or {}
     r = event_score(event, "R_t")
     v = event_score(event, "V_t")
+    b = event_score(event, "B_R_t")
     q = event_score(event, "Q_t")
-    if r is None or v is None or q is None:
+    if r is None or v is None or b is None or q is None:
         return "score_missing"
-    if r <= TH["tau_R_low"] and v >= TH["tau_V"]:
+    tau_R_low = float(th.get("tau_R_low", TH["tau_R_low"]))
+    tau_V = float(th.get("tau_V", TH["tau_V"]))
+    tau_V_min = float(th.get("tau_V_min", TH["tau_V_min"]))
+    tau_B = float(th.get("tau_B", TH["tau_B"]))
+    tau_Q = float(th.get("tau_Q", TH["tau_Q"]))
+    if r <= tau_R_low and v >= tau_V:
         return "direct_admit"
-    if r > TH["tau_R_low"] and r < TH["tau_R_high"] and v >= TH["tau_V_min"] and q >= TH["tau_Q"]:
+    if b >= tau_B and v >= tau_V_min and q >= tau_Q:
         return "defer_recoverable"
     return "discard"
 
@@ -248,11 +257,13 @@ def rvq_semantic_audit(trace: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
                 "frame_id": as_int(ev.get("frame_id"), -1),
                 "R": meta.get("R_t", ""),
                 "V": meta.get("V_t", ""),
+                "B": meta.get("B_R_t", ""),
                 "Q": meta.get("Q_t", ""),
                 "tau_R_low": th.get("tau_R_low", TH["tau_R_low"]),
                 "tau_R_high": th.get("tau_R_high", TH["tau_R_high"]),
                 "tau_V": th.get("tau_V", TH["tau_V"]),
                 "tau_V_min": th.get("tau_V_min", TH["tau_V_min"]),
+                "tau_B": th.get("tau_B", TH["tau_B"]),
                 "tau_Q": th.get("tau_Q", TH["tau_Q"]),
                 "expected_decision_by_rvq": expected,
                 "actual_decision": actual,
