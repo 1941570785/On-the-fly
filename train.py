@@ -387,6 +387,11 @@ if __name__ == "__main__":
             source_frame_id, {"attempt_count": 0, "last_attempt_frame": -10_000, "last_success": False}
         )
         is_defer_recoverable = lifecycle_state_before == "defer_recoverable"
+        is_density_hold_recoverable = bool(
+            lifecycle_state_before == "direct_admit"
+            and runtime_gate.is_recovery_pose_path_candidate(source_frame_id)
+        )
+        is_recovery_pose_candidate = bool(is_defer_recoverable or is_density_hold_recoverable)
         is_duplicate = bool(source_event.get("final_keyframe_incremented", False)) or runtime_gate._source_already_committed(source_frame_id)
         is_surrogate = bool(int(source_frame_id) == int(current_frame_id))
         missing_source = bool(source_frame_id < 0 or source_desc is None or source_image is None)
@@ -416,7 +421,7 @@ if __name__ == "__main__":
         allowed = bool(
             risk_mode != "off"
             and getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit") == "true_source_commit"
-            and is_defer_recoverable
+            and is_recovery_pose_candidate
             and not block_reason
         )
         lifecycle_event = {
@@ -426,6 +431,7 @@ if __name__ == "__main__":
             "lifecycle_state_after": lifecycle_state_before,
             "is_defer_recoverable": bool(is_defer_recoverable),
             "is_defer_only": bool(is_defer_recoverable),
+            "is_density_hold_recoverable": bool(is_density_hold_recoverable),
             "in_recovery_pool": True,
             "pose_path_requested": True,
             "pose_path_allowed": bool(allowed),
@@ -1610,6 +1616,21 @@ if __name__ == "__main__":
                             trace_ev["direct_finalization_reason"] = str(fin_dec.reason)
                             if not direct_keyframe_finalized:
                                 trace_ev["direct_admit_but_held_for_density"] = True
+                        density_hold_recovery_enqueued = False
+                        density_hold_recovery_bridge_tag = ""
+                        if not direct_keyframe_finalized:
+                            density_hold_recovery_enqueued = runtime_gate.enqueue_density_hold_recovery_candidate(
+                                frame_id=int(frameID),
+                                info=info,
+                                evidence=evidence,
+                                hold_decision=str(fin_dec.decision),
+                                hold_reason=str(fin_dec.reason),
+                                density_debug=dbg,
+                            )
+                            if trace_ev is not None:
+                                density_hold_recovery_bridge_tag = str(
+                                    trace_ev.get("density_hold_recovery_bridge_tag", "")
+                                )
                         v2_payload = {
                             "frame_id": int(frameID),
                             "source_frame_id": int(frameID),
@@ -1672,6 +1693,10 @@ if __name__ == "__main__":
                             "keyframe_finalized": bool(direct_keyframe_finalized),
                             "representation_updated": bool(direct_keyframe_finalized),
                             "blocked_override_reason": str(dbg.get("blocked_override_reason", "")),
+                            "density_hold_recovery_enqueued": bool(
+                                density_hold_recovery_enqueued
+                            ),
+                            "density_hold_recovery_bridge_tag": density_hold_recovery_bridge_tag,
                         }
                         if runtime_gate.direct_density_controller.is_v2221:
                             v2_payload.update(

@@ -587,6 +587,10 @@ class RecoveryCommitController:
         scores = candidate.get("scores", {}) or {}
         source_payload = candidate.get("source_payload", {}) or {}
         inlier_evidence = source_payload.get("inlier_evidence", {}) or {}
+        is_density_hold_recovery = bool(
+            source_payload.get("density_hold_context")
+            or context.get("is_density_hold_recovery", False)
+        )
         current_tick = int(context.get("current_tick_frame_id", -1))
         source_input = int(candidate.get("source_input_index", candidate.get("source_frame_id", -1)))
         age = max(0, current_tick - source_input)
@@ -891,6 +895,10 @@ class RecoveryCommitController:
         scores = candidate.get("scores", {}) or {}
         source_payload = candidate.get("source_payload", {}) or {}
         inlier_evidence = source_payload.get("inlier_evidence", {}) or {}
+        is_density_hold_recovery = bool(
+            source_payload.get("density_hold_context")
+            or context.get("is_density_hold_recovery", False)
+        )
         current_tick = int(context.get("current_tick_frame_id", -1))
         source_input = int(candidate.get("source_input_index", candidate.get("source_frame_id", -1)))
         age = max(0, current_tick - source_input)
@@ -1138,6 +1146,10 @@ class RecoveryCommitController:
         scores = candidate.get("scores", {}) or {}
         source_payload = candidate.get("source_payload", {}) or {}
         inlier_evidence = source_payload.get("inlier_evidence", {}) or {}
+        is_density_hold_recovery = bool(
+            source_payload.get("density_hold_context")
+            or context.get("is_density_hold_recovery", False)
+        )
         source_input = int(candidate.get("source_input_index", candidate.get("source_frame_id", -1)))
         current_tick = int(context.get("current_tick_frame_id", -1))
         source_gap_to_last_committed = int(context.get("source_gap_to_last_committed", 0))
@@ -1173,6 +1185,7 @@ class RecoveryCommitController:
         )
         can_seed = bool(
             early_seed_window_active
+            and (not is_density_hold_recovery)
             and hard_ok
             and self._v7_seed_commits < self.v7_seed_budget_total_short500
             and feasibility >= self.v7_min_seed_feasibility
@@ -1211,6 +1224,10 @@ class RecoveryCommitController:
                 "predicted_gap_if_hold": predicted_gap_if_hold,
                 "early_seed_window_active": early_seed_window_active,
                 "can_be_early_seed_candidate": can_seed,
+                "is_density_hold_recovery": is_density_hold_recovery,
+                "early_seed_blocked_by_density_hold": bool(
+                    early_seed_window_active and is_density_hold_recovery and hard_ok
+                ),
                 "seed_budget_used": self._v7_seed_commits,
                 "seed_budget_total": self.v7_seed_budget_total_short500,
                 "min_seed_inliers": self.v7_min_seed_inliers,

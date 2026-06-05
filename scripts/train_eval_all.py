@@ -114,7 +114,6 @@ if __name__ == "__main__":
                 render_dir = os.path.join(model_path, "test_images")
 
                 image_names = get_image_names(gt_dir)
-                image_names.sort()
                 image_names = image_names[:: test_params["test_hold"]]
 
                 PSNR, SSIM, LPIPS = 0, 0, 0

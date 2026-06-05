@@ -29,6 +29,7 @@ class SemanticV1RuntimePolicy:
         self.recovery_attempt_count = 0
         self.recovery_success_count = 0
         self.recovery_discard_count = 0
+        self.density_hold_recoverable_count = 0
         self.recovery_success_events: list[dict[str, Any]] = []
         self.recovery_discard_events: list[dict[str, Any]] = []
         self.recovery_pool_timeline: list[dict[str, Any]] = []
@@ -264,6 +265,45 @@ class SemanticV1RuntimePolicy:
             "thresholds": asdict(self.th),
         }
 
+    def enqueue_density_hold_candidate(
+        self,
+        frame_id: int,
+        scores: dict[str, float],
+        source_payload: dict[str, Any] | None = None,
+        hold_reason: str = "",
+    ) -> bool:
+        source_id = int(frame_id)
+        for item in self.recovery_pool:
+            if int(item.get("frame_id", -1)) == source_id:
+                return False
+
+        self.recovery_pool.append(
+            {
+                "frame_id": source_id,
+                "defer_step": int(self.total_frames),
+                "attempts": 0,
+                "R_t": float(scores.get("R_t", 0.0)),
+                "V_t": float(scores.get("V_t", 0.0)),
+                "B_R_t": float(scores.get("B_R_t", 0.0)),
+                "Q_t": float(scores.get("Q_t", 0.0)),
+                "source_payload": source_payload or {},
+                "defer_reason": "direct_density_hold",
+                "density_hold_reason": str(hold_reason),
+            }
+        )
+        self.density_hold_recoverable_count += 1
+        self.recovery_pool_max = max(self.recovery_pool_max, len(self.recovery_pool))
+        self.recovery_pool_timeline.append(
+            {
+                "tick": int(self.total_frames),
+                "event": "enqueue_density_hold_candidate",
+                "frame_id": source_id,
+                "pool_after": len(self.recovery_pool),
+                "hold_reason": str(hold_reason),
+            }
+        )
+        return True
+
     def pop_recovered_sources(self) -> list[dict[str, Any]]:
         items = self._recovered_sources_queue
         self._recovered_sources_queue = []
@@ -277,6 +317,7 @@ class SemanticV1RuntimePolicy:
             "recovery_attempt_count": int(self.recovery_attempt_count),
             "recovery_success_count": int(self.recovery_success_count),
             "recovery_discard_count": int(self.recovery_discard_count),
+            "density_hold_recoverable_count": int(self.density_hold_recoverable_count),
             "decision_counts": {k: int(v) for k, v in self.decision_counts.items()},
             "recovery_success_events": self.recovery_success_events,
             "recovery_discard_events": self.recovery_discard_events,

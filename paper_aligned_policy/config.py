@@ -30,10 +30,10 @@ class CoupledInnovationConfig:
     recovery_attempts_per_tick: int = 3
     recovery_commit_bridge: str = "true_source_commit"
     defer_recovery_support_bridge: str = "v1"
-    recovery_commit_control: str = "recovery_commit_early_seed_v7"
-    direct_density_control: str = "target_band_v2_2_2_1"
+    recovery_commit_control: str = "off"
+    direct_density_control: str = "off"
     direct_update_prev_desc_on_hold: str = "off"
-    direct_density_upper_per_100: float = 80.0
+    direct_density_upper_per_100: float = 75.0
     direct_density_hard_upper_per_100: float = 90.0
     online_quality_metric_fields: tuple[str, ...] = ()
     offline_stage_metric_fields: tuple[str, ...] = (
@@ -145,19 +145,19 @@ def resolve_coupled_innovation_config(args: Any) -> CoupledInnovationConfig:
         recovery_commit_control=_str(
             args,
             "paper_aligned_recovery_commit_control",
-            "recovery_commit_early_seed_v7" if enabled else "off",
+            "off",
         ),
         direct_density_control=_str(
             args,
             "paper_aligned_direct_density_control",
-            "target_band_v2_2_2_1" if enabled else "off",
+            "off",
         ),
         direct_update_prev_desc_on_hold=_str(args, "paper_aligned_direct_update_prev_desc_on_hold", "off"),
         direct_density_upper_per_100=(
             _float_with_legacy_default(
                 args,
                 "paper_aligned_direct_density_upper_per_100",
-                80.0,
+                75.0,
                 45.0,
             )
             if enabled

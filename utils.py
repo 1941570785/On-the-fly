@@ -18,18 +18,28 @@ import time
 import cv2
 import torch.nn.functional as F
 import os
+import re
 
 def parse_time(seconds):
     # 秒转 HH:MM:SS 字符串
     return time.strftime("%H:%M:%S", time.gmtime(seconds))
 
-def get_image_names(in_folder, image_extensions=[".jpg", ".png", ".jpeg"]):
-    # 列出目录下指定扩展名的图像文件
-    return [
+_NATURAL_SORT_TOKEN_RE = re.compile(r"(\d+)")
+
+
+def natural_sort_key(name):
+    parts = _NATURAL_SORT_TOKEN_RE.split(os.path.basename(str(name)))
+    return tuple(int(part) if part.isdigit() else part.lower() for part in parts)
+
+
+def get_image_names(in_folder, image_extensions=(".jpg", ".png", ".jpeg")):
+    # 流式重建必须按时间/数字帧序读取，不能使用字典序。
+    names = [
         f
         for f in os.listdir(in_folder)
         if os.path.splitext(f)[-1].lower() in image_extensions
     ]
+    return sorted(names, key=natural_sort_key)
 
 def psnr(img1, img2):
     # 计算 PSNR，假设输入范围 [0,1]

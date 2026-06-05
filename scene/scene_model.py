@@ -38,6 +38,11 @@ from scene.optimizers import SparseGaussianAdam
 from scene.keyframe import Keyframe
 from scene.anchor import Anchor
 from scene.pose_eval_utils import select_pose_eval_pairs
+from scene.frame_metrics import (
+    build_frame_metric_row,
+    infer_dataset_scene_from_output_dir,
+    write_frame_metrics_csv,
+)
 from utils import (
     RGB2SH,
     depth2points,
@@ -51,6 +56,12 @@ from utils import (
     rotation_distance,
 )
 from dataloaders.read_write_model import write_model
+
+
+def _metric_float(value):
+    if hasattr(value, "detach"):
+        return float(value.detach().cpu().item())
+    return float(value)
 
 
 class SceneModel:
@@ -558,7 +569,14 @@ class SceneModel:
                 ) / 2
 
     @torch.no_grad()
-    def evaluate(self, eval_poses=False, with_LPIPS=False, all=False):
+    def evaluate(
+        self,
+        eval_poses=False,
+        with_LPIPS=False,
+        all=False,
+        return_frame_metrics=False,
+        frame_metrics_output_dir="",
+    ):
         """
         【评估模块】评估场景质量
         
@@ -582,6 +600,8 @@ class SceneModel:
         if with_LPIPS:
             metrics["LPIPS"] = 0
         n_test_frames = 0
+        frame_quality_by_index = {}
+        pose_error_by_index = {}
         # 确定评估的关键帧范围
         start_index = 0 if all else self.active_anchor.keyframe_ids[0]
         
@@ -605,14 +625,23 @@ class SceneModel:
                 gt_image = gt_image * mask
                 
                 # 计算PSNR（峰值信噪比）
-                metrics["PSNR"] += psnr(image[mask], gt_image[mask])
+                psnr_value = _metric_float(psnr(image[mask], gt_image[mask]))
+                metrics["PSNR"] += psnr_value
                 # 计算SSIM（结构相似性）
-                metrics["SSIM"] += fused_ssim(
-                    image[None], gt_image[None], train=False
-                ).item()
+                ssim_value = float(
+                    fused_ssim(image[None], gt_image[None], train=False).item()
+                )
+                metrics["SSIM"] += ssim_value
                 # 计算LPIPS（感知损失，如果启用）
+                lpips_value = None
                 if with_LPIPS and self.lpips is not None:
-                    metrics["LPIPS"] += self.lpips(image[None], gt_image[None]).item()
+                    lpips_value = float(self.lpips(image[None], gt_image[None]).item())
+                    metrics["LPIPS"] += lpips_value
+                frame_quality_by_index[int(keyframe.index)] = {
+                    "psnr": psnr_value,
+                    "ssim": ssim_value,
+                    "lpips": lpips_value,
+                }
                 n_test_frames += 1
 
         # 计算平均指标
@@ -625,8 +654,9 @@ class SceneModel:
         # ========== 计算位姿误差 ==========
         if eval_poses:
             # 获取优化后的位姿和真实位姿
+            all_Rts = self.get_Rts()
             Rts, gt_Rts = select_pose_eval_pairs(
-                self.get_Rts(),
+                all_Rts,
                 self.get_gt_Rts(align=False),
                 self.gt_Rts_mask,
             )
@@ -640,10 +670,65 @@ class SceneModel:
                 t_error = (Rts_aligned[:, :3, 3] - gt_Rts[:, :3, 3]).norm(dim=-1)
 
                 # 转换为度数和米
-                metrics["R°"] = R_error.mean().item() * 180 / math.pi
+                R_error_deg = R_error * 180 / math.pi
+                metrics["R°"] = R_error_deg.mean().item()
                 metrics["t"] = t_error.mean().item()
+                valid_indices = self._pose_eval_keyframe_indices(all_Rts)
+                pair_count = min(len(valid_indices), len(R_error_deg), len(t_error))
+                for offset, keyframe_index in enumerate(valid_indices[:pair_count]):
+                    pose_error_by_index[int(keyframe_index)] = {
+                        "abs_rot_error_deg": float(R_error_deg[offset].detach().cpu().item()),
+                        "abs_trans_error": float(t_error[offset].detach().cpu().item()),
+                    }
 
+        if return_frame_metrics:
+            return metrics, self._build_frame_metric_rows(
+                frame_quality_by_index=frame_quality_by_index,
+                pose_error_by_index=pose_error_by_index,
+                output_dir=frame_metrics_output_dir,
+            )
         return metrics
+
+    def _pose_eval_keyframe_indices(self, all_Rts):
+        n_masked_poses = min(int(self.gt_Rts_mask.shape[0]), int(all_Rts.shape[0]))
+        if n_masked_poses <= 0:
+            return []
+        valid_mask = self.gt_Rts_mask[:n_masked_poses].to(
+            device=all_Rts.device,
+            dtype=torch.bool,
+        )
+        return torch.where(valid_mask)[0].detach().cpu().tolist()
+
+    def _build_frame_metric_rows(
+        self,
+        *,
+        frame_quality_by_index,
+        pose_error_by_index,
+        output_dir,
+    ):
+        dataset_name, scene_name = infer_dataset_scene_from_output_dir(output_dir)
+        all_Rts = self.get_Rts().detach().cpu().tolist() if len(self.keyframes) > 0 else []
+        rows = []
+        for sequence_order, keyframe in enumerate(self.keyframes):
+            keyframe_index = int(keyframe.index)
+            rows.append(
+                build_frame_metric_row(
+                    dataset_name=dataset_name,
+                    scene_name=scene_name,
+                    frame_idx=keyframe_index,
+                    original_image_name=str(keyframe.info.get("name", "")),
+                    sequence_order=sequence_order,
+                    stream_frame_idx=int(keyframe.info.get("_paper_aligned_source_frame_id", sequence_order)),
+                    is_test_view=bool(keyframe.info.get("is_test", False)),
+                    is_keyframe=True,
+                    is_registered=True,
+                    est_rt=all_Rts[keyframe_index] if keyframe_index < len(all_Rts) else None,
+                    quality=frame_quality_by_index.get(keyframe_index, {}),
+                    pose_error=pose_error_by_index.get(keyframe_index, {}),
+                    output_dir=output_dir,
+                )
+            )
+        return rows
 
     @torch.no_grad()
     def save_test_frames(self, out_dir):
@@ -1666,7 +1751,14 @@ class SceneModel:
             if n_frames > 0:
                 metrics["FPS"] = n_frames / reconstruction_time
         # 计算渲染质量指标（PSNR、SSIM、LPIPS、位姿误差）
-        metrics.update(self.evaluate(True, True, True))
+        eval_metrics, frame_metric_rows = self.evaluate(
+            True,
+            True,
+            True,
+            return_frame_metrics=True,
+            frame_metrics_output_dir=path,
+        )
+        metrics.update(eval_metrics)
 
         # 如果路径为空，跳过保存，仅返回指标
         if path == "":
@@ -1703,6 +1795,8 @@ class SceneModel:
         # 将元数据保存为JSON文件
         with open(os.path.join(path, "metadata.json"), "w") as f:
             json.dump(metadata, f, indent=4)
+
+        write_frame_metrics_csv(os.path.join(path, "frame_metrics.csv"), frame_metric_rows)
 
         # ========== 保存测试关键帧渲染图像 ==========
         # 【评估模块】渲染所有测试关键帧并保存图像（用于可视化结果）

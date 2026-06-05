@@ -59,7 +59,6 @@ class ImageDataset:
         # 【数据加载模块】收集并排序所有图像路径
         self.images_dir = os.path.join(args.source_path, args.images_dir)
         self.image_name_list = get_image_names(self.images_dir)
-        self.image_name_list.sort()  # 按文件名排序
         # 从指定索引开始（支持跳过前面的图像）
         self.image_name_list = self.image_name_list[args.start_at :]
         self.image_paths = [

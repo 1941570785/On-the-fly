@@ -328,6 +328,11 @@ class PaperAlignedRuntimeGate:
             int(source_event.get("num_miniba_inliers", 0) or 0),
         )
         source_action = str(source_event.get("action", ""))
+        source_payload = recovered.get("source_payload", {}) or {}
+        is_density_hold_recovery = bool(
+            source_event.get("density_hold_recovery_enqueued")
+            or source_payload.get("density_hold_context")
+        )
         is_surrogate = bool(source_frame_id == int(current_tick_frame_id))
         is_contamination_risk = bool(source_action not in {"defer_recoverable", "direct_admit"})
         anchor_count_before = self._current_anchor_count()
@@ -369,6 +374,7 @@ class PaperAlignedRuntimeGate:
             "source_num_inliers": int(source_num_inliers),
             "is_surrogate": is_surrogate,
             "is_contamination_risk": is_contamination_risk,
+            "is_density_hold_recovery": is_density_hold_recovery,
             "open_gap_unclosed": bool(current_open_gap > int(episode_trigger)),
             **mat_stats,
             **source_pose_fail,
@@ -585,6 +591,88 @@ class PaperAlignedRuntimeGate:
         self._event_index[int(frame_id)] = len(self.trace_events)
         self.trace_events.append(event)
         return admit, action
+
+    def enqueue_density_hold_recovery_candidate(
+        self,
+        *,
+        frame_id: int,
+        info: dict[str, Any],
+        evidence: dict[str, Any] | None = None,
+        hold_decision: str = "",
+        hold_reason: str = "",
+        density_debug: dict[str, Any] | None = None,
+    ) -> bool:
+        event = self._get_event(int(frame_id))
+        if self.semantic_policy is None or event is None:
+            return False
+
+        decision_meta = event.get("decision_meta")
+        if not isinstance(decision_meta, dict):
+            decision_meta = {}
+            event["decision_meta"] = decision_meta
+
+        if str(event.get("action", "")) not in {"direct_admit", "current_frame_surrogate_commit"}:
+            event["density_hold_recovery_enqueued"] = False
+            event["density_hold_recovery_block_reason"] = "not_direct_candidate"
+            return False
+        if bool(event.get("final_keyframe_incremented", False)):
+            event["density_hold_recovery_enqueued"] = False
+            event["density_hold_recovery_block_reason"] = "already_finalized"
+            return False
+
+        scores = {
+            "R_t": float(decision_meta.get("R_t", 1.0) or 0.0),
+            "V_t": float(decision_meta.get("V_t", 0.0) or 0.0),
+            "B_R_t": float(decision_meta.get("B_R_t", 0.0) or 0.0),
+            "Q_t": float(decision_meta.get("Q_t", 0.0) or 0.0),
+        }
+        th = self.semantic_policy.th
+        recoverable = bool(
+            scores["R_t"] <= float(th.tau_R_high)
+            and scores["B_R_t"] >= float(th.tau_B)
+            and scores["V_t"] >= float(th.tau_V_min)
+            and scores["Q_t"] >= float(th.tau_Q)
+        )
+        if not recoverable:
+            event["density_hold_recovery_enqueued"] = False
+            event["density_hold_recovery_block_reason"] = "semantic_scores_not_recoverable"
+            return False
+
+        source_payload = self._source_payload(int(frame_id), info, dict(evidence or {}))
+        source_payload["density_hold_context"] = {
+            "hold_decision": str(hold_decision),
+            "hold_reason": str(hold_reason),
+            "density_debug": dict(density_debug or {}),
+        }
+        enqueued = self.semantic_policy.enqueue_density_hold_candidate(
+            int(frame_id),
+            scores,
+            source_payload=source_payload,
+            hold_reason=str(hold_reason),
+        )
+        tag = "density_hold_recoverable" if enqueued else "density_hold_duplicate"
+        event["direct_admit_but_held_for_density"] = True
+        event["density_hold_recovery_enqueued"] = bool(enqueued)
+        event["density_hold_recovery_bridge_tag"] = tag
+        event["density_hold_recovery_hold_decision"] = str(hold_decision)
+        event["density_hold_recovery_hold_reason"] = str(hold_reason)
+        decision_meta["density_hold_recovery_bridge_tag"] = tag
+        decision_meta["recovery_pool_size"] = len(self.semantic_policy.recovery_pool)
+        decision_meta["density_hold_recovery_enqueued"] = bool(enqueued)
+        return bool(enqueued)
+
+    def is_recovery_pose_path_candidate(self, frame_id: int) -> bool:
+        event = self._get_event(int(frame_id))
+        if event is None:
+            return False
+        action = str(event.get("action", ""))
+        if action == "defer_recoverable":
+            return True
+        return bool(
+            action == "direct_admit"
+            and event.get("direct_admit_but_held_for_density")
+            and event.get("density_hold_recovery_enqueued")
+        )
 
     def mark_pose_attempt(self, frame_id: int) -> None:
         event = self._get_event(frame_id)

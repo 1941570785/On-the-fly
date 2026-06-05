@@ -321,6 +321,9 @@ def _build_process_frame_row(
         "quality_proxy_score": as_float(decision_meta.get("Q_t")),
         "recovery_attempt_count": 0,
         "true_source_materialized_count": 0,
+        "density_hold_recovery_enqueued_count": 1
+        if as_bool(event.get("density_hold_recovery_enqueued"))
+        else 0,
     }
     if extra:
         row.update(extra)
@@ -353,6 +356,9 @@ def _aggregate_one_stage(stage_name: str, rows: list[dict[str, Any]]) -> dict[st
         "recovery_attempt_count": sum(as_int(row.get("recovery_attempt_count"), 0) for row in rows),
         "true_source_materialized_count": sum(
             as_int(row.get("true_source_materialized_count"), 0) for row in rows
+        ),
+        "density_hold_recovery_enqueued_count": sum(
+            as_int(row.get("density_hold_recovery_enqueued_count"), 0) for row in rows
         ),
         "psnr_mean": _mean(_numbers(rows, "psnr")),
         "ssim_mean": _mean(_numbers(rows, "ssim")),

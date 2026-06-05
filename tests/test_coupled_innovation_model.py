@@ -52,10 +52,10 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
         self.assertEqual(cfg.recovery_commit_bridge, "true_source_commit")
         self.assertEqual(cfg.defer_recovery_support_bridge, "v1")
-        self.assertEqual(cfg.recovery_commit_control, "recovery_commit_early_seed_v7")
-        self.assertEqual(cfg.direct_density_control, "target_band_v2_2_2_1")
+        self.assertEqual(cfg.recovery_commit_control, "off")
+        self.assertEqual(cfg.direct_density_control, "off")
         self.assertEqual(cfg.direct_update_prev_desc_on_hold, "off")
-        self.assertEqual(cfg.direct_density_upper_per_100, 80.0)
+        self.assertEqual(cfg.direct_density_upper_per_100, 75.0)
         self.assertEqual(cfg.direct_density_hard_upper_per_100, 90.0)
         self.assertEqual(cfg.thresholds.tau_R_low, 0.10)
         self.assertEqual(cfg.thresholds.tau_V_min, 0.45)
@@ -110,12 +110,12 @@ class CoupledInnovationModelTests(unittest.TestCase):
 
         cfg = policy_config.resolve_coupled_innovation_config(args)
 
-        self.assertEqual(cfg.direct_density_upper_per_100, 80.0)
+        self.assertEqual(cfg.direct_density_upper_per_100, 75.0)
         self.assertEqual(cfg.direct_density_hard_upper_per_100, 90.0)
 
         PaperAlignedRuntimeGate(args)
 
-        self.assertEqual(args.paper_aligned_direct_density_upper_per_100, 80.0)
+        self.assertEqual(args.paper_aligned_direct_density_upper_per_100, 75.0)
         self.assertEqual(args.paper_aligned_direct_density_hard_upper_per_100, 90.0)
 
     def test_cli_accepts_coupled_mode_and_tuning_knobs(self):
@@ -163,8 +163,8 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertEqual(args.risk_admission_mode, gate.training_risk_mode)
         self.assertIsNotNone(gate.semantic_policy)
         self.assertEqual(args.paper_aligned_defer_recovery_support_bridge, "v1")
-        self.assertEqual(args.paper_aligned_recovery_commit_control, "recovery_commit_early_seed_v7")
-        self.assertEqual(args.paper_aligned_direct_density_control, "target_band_v2_2_2_1")
+        self.assertEqual(args.paper_aligned_recovery_commit_control, "off")
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
         self.assertEqual(gate.semantic_policy.th.tau_R_low, 0.31)
         self.assertEqual(gate.semantic_policy.recovery_delay_frames, 4)
 
@@ -264,6 +264,48 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertEqual(decision.reason, "v7_hold_low_seed_inliers")
         self.assertTrue(decision.debug["early_seed_low_inlier_guard"])
 
+    def test_density_held_recovery_candidate_does_not_bypass_density_with_early_seed(self):
+        controller = RecoveryCommitController(
+            _args(paper_aligned_recovery_commit_control="recovery_commit_early_seed_v7")
+        )
+        recovered = {
+            "source_frame_id": 160,
+            "source_input_index": 160,
+            "scores": {"R_t": 0.0, "V_t": 1.0, "Q_t": 1.0},
+            "source_payload": {
+                "inlier_evidence": {"num_matches": 1200},
+                "density_hold_context": {"hold_reason": "at_or_above_upper_default_hold_gap_safe"},
+            },
+        }
+        context = {
+            "current_tick_frame_id": 168,
+            "source_num_inliers": 900,
+            "keyframe_density_per_100": 72.0,
+            "source_gap_to_last_committed": 1,
+            "predicted_gap_if_hold": 9,
+            "keyframe_growth_recent": 30,
+            "recent_materialization_rate": 1.0,
+            "recent_pose_fail_rate": 0.0,
+            "recent_runtime_attempt_count": 0,
+            "recent_materialized_count": 0,
+            "recent_failed_no_materialization_count": 0,
+            "source_pose_fail_count": 0,
+            "keyframes_since_last_pose_fail": 999,
+            "source_already_committed": False,
+            "is_surrogate": False,
+            "is_contamination_risk": False,
+            "anchor_count_available": False,
+            "anchor_count_before": None,
+        }
+
+        decision = controller.decide(recovered, context)
+
+        self.assertEqual(decision.action, "hold")
+        self.assertTrue(decision.reason.startswith("v6_hold_"))
+        self.assertFalse(decision.debug["can_be_early_seed_candidate"])
+        self.assertTrue(decision.debug["early_seed_blocked_by_density_hold"])
+        self.assertEqual(decision.debug["density_state"], "above_hard")
+
     def test_direct_density_control_holds_redundant_baseline_direct_frames_above_band(self):
         controller = DirectDensityController(
             _args(paper_aligned_direct_density_control="target_band_v2_2_2_1")
@@ -300,6 +342,147 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertFalse(decision.finalize)
         self.assertEqual(decision.decision, "hold_density_high")
         self.assertIn("upper", decision.reason)
+
+    def test_coupled_direct_density_finalizes_moderate_safe_gap_direct_candidate(self):
+        args = _args(paper_aligned_direct_density_control="target_band_v2_2_2_1")
+        gate = PaperAlignedRuntimeGate(args)
+        controller = gate.direct_density_controller
+
+        decision = controller.decide(
+            frame_id=300,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=48.0,
+            local_density_before=48.0,
+            local_window_density=48.0,
+            local_window_keyframes=48,
+            local_window_gap_max=5.0,
+            local_window_gap_after_if_hold=5.0,
+            keyframe_growth_recent=30,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=5,
+            main_chain_gap_before=4.0,
+            main_chain_gap_after_if_hold=5.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=31.0,
+            displacement_threshold=30.0,
+            num_matches=2400,
+            min_num_inliers=100,
+            pose_inliers=700,
+            novelty_proxy=0.35,
+            current_keyframe_count=144,
+        )
+
+        self.assertTrue(decision.finalize)
+        self.assertEqual(decision.decision, "finalize_baseline_skeleton_reserve")
+        self.assertEqual(decision.reason, "baseline_skeleton_reserve")
+
+    def test_density_held_direct_candidate_enters_recovery_pool(self):
+        gate = PaperAlignedRuntimeGate(_args())
+        info = {
+            "image_name": "252.jpg",
+            "image_path": "/tmp/252.jpg",
+            "is_test": False,
+            "_inlier_evidence": {"num_matches": 2400},
+            "_local_context": {"phase": "incremental"},
+        }
+        evidence = {
+            "median_displacement": 31.0,
+            "displacement_threshold": 30.0,
+            "num_matches": 2400,
+            "min_num_inliers_threshold": 100,
+            "is_test": False,
+            "recent_pose_fail_rate": 0.0,
+        }
+
+        admit, action = gate.decide(
+            252,
+            info,
+            baseline_should_add=True,
+            phase="incremental",
+            evidence=evidence,
+        )
+
+        self.assertTrue(admit)
+        self.assertEqual(action, "direct_admit")
+        self.assertEqual(len(gate.semantic_policy.recovery_pool), 0)
+
+        enqueued = gate.enqueue_density_hold_recovery_candidate(
+            frame_id=252,
+            info=info,
+            evidence=evidence,
+            hold_decision="hold_density_high",
+            hold_reason="at_or_above_upper_default_hold_gap_safe",
+            density_debug={"density_before": 53.17, "local_window_density": 46.0},
+        )
+
+        event = gate.trace_events[-1]
+        self.assertTrue(enqueued)
+        self.assertEqual(len(gate.semantic_policy.recovery_pool), 1)
+        self.assertEqual(gate.semantic_policy.recovery_pool[0]["frame_id"], 252)
+        self.assertEqual(
+            gate.semantic_policy.recovery_pool[0]["defer_reason"],
+            "direct_density_hold",
+        )
+        self.assertTrue(event["density_hold_recovery_enqueued"])
+        self.assertEqual(
+            event["decision_meta"]["density_hold_recovery_bridge_tag"],
+            "density_hold_recoverable",
+        )
+        self.assertTrue(gate.is_recovery_pose_path_candidate(252))
+
+        admit, action = gate.decide(
+            253,
+            {**info, "image_name": "253.jpg"},
+            baseline_should_add=True,
+            phase="incremental",
+            evidence=evidence,
+        )
+        self.assertTrue(admit)
+        self.assertEqual(action, "direct_admit")
+        self.assertFalse(gate.is_recovery_pose_path_candidate(253))
+
+    def test_direct_density_preserves_baseline_skeleton_when_gap_budget_is_exhausted(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="target_band_v2_2_2_1")
+        )
+        controller._sync_budget_window(248)
+        controller._budget.gap_rescue_used = controller.gap_rescue_budget_per_100
+
+        decision = controller.decide(
+            frame_id=248,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=45.2,
+            local_density_before=45.0,
+            local_window_density=45.0,
+            local_window_keyframes=45,
+            local_window_gap_max=10.0,
+            local_window_gap_after_if_hold=1.0,
+            keyframe_growth_recent=30,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=1,
+            main_chain_gap_before=3.0,
+            main_chain_gap_after_if_hold=4.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=31.0,
+            displacement_threshold=30.0,
+            num_matches=2400,
+            min_num_inliers=100,
+            pose_inliers=700,
+            novelty_proxy=0.35,
+            current_keyframe_count=112,
+        )
+
+        self.assertTrue(decision.finalize)
+        self.assertEqual(decision.decision, "finalize_baseline_skeleton_reserve")
+        self.assertEqual(decision.reason, "baseline_skeleton_reserve")
 
     def test_direct_density_control_keeps_gap_critical_baseline_direct_frames(self):
         controller = DirectDensityController(

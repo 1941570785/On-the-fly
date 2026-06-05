@@ -38,7 +38,7 @@ class DirectDensityController:
         self.mode = str(getattr(args, "paper_aligned_direct_density_control", "off") or "off")
         self.density_lower = float(getattr(args, "paper_aligned_direct_density_lower_per_100", 25.0) or 25.0)
         self.density_target = float(getattr(args, "paper_aligned_direct_density_target_per_100", 35.0) or 35.0)
-        self.density_upper = float(getattr(args, "paper_aligned_direct_density_upper_per_100", 80.0) or 80.0)
+        self.density_upper = float(getattr(args, "paper_aligned_direct_density_upper_per_100", 75.0) or 75.0)
         self.density_hard_upper = float(
             getattr(args, "paper_aligned_direct_density_hard_upper_per_100", 90.0) or 90.0
         )
@@ -1093,6 +1093,27 @@ class DirectDensityController:
             and growth_ok
         )
         dbg["hold_density_high_allowed"] = hold_density_high_allowed
+        baseline_skeleton_local_cap = max(
+            self.density_upper,
+            self.gap_rescue_density_upper_later,
+        )
+        baseline_skeleton_global_cap = self.density_hard_upper
+        if early_phase:
+            baseline_skeleton_global_cap += 10.0
+        baseline_skeleton_reserve = bool(
+            self.is_v2221
+            and bool(baseline_should_add)
+            and runtime_action == "direct_admit"
+            and gap_safe
+            and not anchor_changed
+            and not starvation_risk
+            and keyframe_debt <= 0
+            and local_window_density <= baseline_skeleton_local_cap
+            and density_before <= baseline_skeleton_global_cap
+        )
+        dbg["baseline_skeleton_reserve"] = baseline_skeleton_reserve
+        dbg["baseline_skeleton_local_cap"] = baseline_skeleton_local_cap
+        dbg["baseline_skeleton_global_cap"] = baseline_skeleton_global_cap
 
         def _fin(
             decision: str,
@@ -1401,6 +1422,13 @@ class DirectDensityController:
                 "priority_hard_gap_v2_2_2_1",
                 exempt_budget=True,
                 hard_cap_exception=True,
+            )
+
+        if baseline_skeleton_reserve:
+            return _fin(
+                "finalize_baseline_skeleton_reserve",
+                "baseline_skeleton_reserve",
+                exempt_budget=True,
             )
 
         if self.is_v221 or self.is_v222_family:
