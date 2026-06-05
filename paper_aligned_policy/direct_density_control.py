@@ -38,9 +38,9 @@ class DirectDensityController:
         self.mode = str(getattr(args, "paper_aligned_direct_density_control", "off") or "off")
         self.density_lower = float(getattr(args, "paper_aligned_direct_density_lower_per_100", 25.0) or 25.0)
         self.density_target = float(getattr(args, "paper_aligned_direct_density_target_per_100", 35.0) or 35.0)
-        self.density_upper = float(getattr(args, "paper_aligned_direct_density_upper_per_100", 45.0) or 45.0)
+        self.density_upper = float(getattr(args, "paper_aligned_direct_density_upper_per_100", 80.0) or 80.0)
         self.density_hard_upper = float(
-            getattr(args, "paper_aligned_direct_density_hard_upper_per_100", 50.0) or 50.0
+            getattr(args, "paper_aligned_direct_density_hard_upper_per_100", 90.0) or 90.0
         )
         self.gap_hard_limit = int(getattr(args, "paper_aligned_direct_gap_hard_limit", 20) or 20)
         self.redundant_source_gap = int(
@@ -893,6 +893,8 @@ class DirectDensityController:
             return DirectFinalizationDecision(True, "finalize", "control_off_or_not_direct", dbg)
         if is_test or is_bootstrap_phase:
             return DirectFinalizationDecision(True, "finalize", "test_or_bootstrap_bypass", dbg)
+        if bool(baseline_should_add) and runtime_action == "direct_admit":
+            dbg["baseline_direct_admit_candidate"] = True
 
         growth_ok = keyframe_growth_recent >= min_growth_window
         baseline_relative_kf_ok = current_keyframe_count >= int(baseline_min_kf)
@@ -1409,6 +1411,17 @@ class DirectDensityController:
             return _fin("finalize_gap_critical_v2_2", "gap_critical_v2_2", exempt_budget=True)
 
         if anchor_changed:
+            anchor_boundary_density_hold = bool(
+                gap_safe
+                and not starvation_risk
+                and keyframe_debt <= 0
+                and density_before >= self.density_target
+                and local_window_density >= self.local_density_lower
+                and not want_support
+            )
+            dbg["anchor_boundary_density_hold"] = anchor_boundary_density_hold
+            if anchor_boundary_density_hold:
+                return _hold("hold_density_high", "anchor_boundary_density_hold")
             return _fin("finalize_anchor_boundary", "anchor_boundary", exempt_budget=True)
 
         if early_rescue_needed:

@@ -37,6 +37,7 @@ from poses.guided_mvs import GuidedMVS
 from scene.optimizers import SparseGaussianAdam
 from scene.keyframe import Keyframe
 from scene.anchor import Anchor
+from scene.pose_eval_utils import select_pose_eval_pairs
 from utils import (
     RGB2SH,
     depth2points,
@@ -624,9 +625,12 @@ class SceneModel:
         # ========== 计算位姿误差 ==========
         if eval_poses:
             # 获取优化后的位姿和真实位姿
-            Rts = self.get_Rts()
-            gt_Rts = self.get_gt_Rts(align=False)
-            if len(Rts) == len(gt_Rts):
+            Rts, gt_Rts = select_pose_eval_pairs(
+                self.get_Rts(),
+                self.get_gt_Rts(align=False),
+                self.gt_Rts_mask,
+            )
+            if len(Rts) == len(gt_Rts) and len(Rts) > 0:
                 # 对齐位姿（计算相似变换）
                 Rts_aligned = torch.linalg.inv(align_poses(Rts, gt_Rts))
                 gt_Rts = torch.linalg.inv(gt_Rts)
@@ -1099,8 +1103,14 @@ class SceneModel:
         n_poses = min(self.gt_Rts_mask.shape[0], self.cached_Rts.shape[0])
         # 如果需要对齐，计算相似变换将真实位姿对齐到优化位姿
         if align and n_poses > 0:
-            Rts = self.get_Rts()[:n_poses][self.gt_Rts_mask[:n_poses]]
-            return align_poses(self.gt_Rts[: len(Rts)], Rts)
+            Rts, gt_Rts = select_pose_eval_pairs(
+                self.get_Rts(),
+                self.gt_Rts,
+                self.gt_Rts_mask,
+            )
+            if len(Rts) == 0:
+                return self.gt_Rts[:0]
+            return align_poses(gt_Rts, Rts)
         else:
             return self.gt_Rts
 

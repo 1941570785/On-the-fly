@@ -33,6 +33,8 @@ class CoupledInnovationConfig:
     recovery_commit_control: str = "recovery_commit_early_seed_v7"
     direct_density_control: str = "target_band_v2_2_2_1"
     direct_update_prev_desc_on_hold: str = "off"
+    direct_density_upper_per_100: float = 80.0
+    direct_density_hard_upper_per_100: float = 90.0
     online_quality_metric_fields: tuple[str, ...] = ()
     offline_stage_metric_fields: tuple[str, ...] = (
         "PSNR",
@@ -94,6 +96,16 @@ def _float(args: Any, name: str, default: float) -> float:
     return float(_value(args, name, default))
 
 
+def _float_with_legacy_default(args: Any, name: str, default: float, legacy_default: float) -> float:
+    value = getattr(args, name, None)
+    if value is None or value == "":
+        return float(default)
+    parsed = float(value)
+    if parsed == float(legacy_default):
+        return float(default)
+    return parsed
+
+
 def _int(args: Any, name: str, default: int) -> int:
     return int(_value(args, name, default))
 
@@ -106,8 +118,9 @@ def resolve_coupled_innovation_config(args: Any) -> CoupledInnovationConfig:
     requested = str(getattr(args, "risk_admission_mode", "off") or "off")
     enabled = requested == COUPLED_INNOVATION_MODE
     base_thresholds = Thresholds()
+    tau_R_low_default = 0.10 if enabled else base_thresholds.tau_R_low
     thresholds = Thresholds(
-        tau_R_low=_float(args, "paper_aligned_tau_R_low", base_thresholds.tau_R_low),
+        tau_R_low=_float(args, "paper_aligned_tau_R_low", tau_R_low_default),
         tau_R_high=_float(args, "paper_aligned_tau_R_high", base_thresholds.tau_R_high),
         tau_V=_float(args, "paper_aligned_tau_V", base_thresholds.tau_V),
         tau_V_min=_float(args, "paper_aligned_tau_V_min", base_thresholds.tau_V_min),
@@ -140,6 +153,26 @@ def resolve_coupled_innovation_config(args: Any) -> CoupledInnovationConfig:
             "target_band_v2_2_2_1" if enabled else "off",
         ),
         direct_update_prev_desc_on_hold=_str(args, "paper_aligned_direct_update_prev_desc_on_hold", "off"),
+        direct_density_upper_per_100=(
+            _float_with_legacy_default(
+                args,
+                "paper_aligned_direct_density_upper_per_100",
+                80.0,
+                45.0,
+            )
+            if enabled
+            else _float(args, "paper_aligned_direct_density_upper_per_100", 45.0)
+        ),
+        direct_density_hard_upper_per_100=(
+            _float_with_legacy_default(
+                args,
+                "paper_aligned_direct_density_hard_upper_per_100",
+                90.0,
+                50.0,
+            )
+            if enabled
+            else _float(args, "paper_aligned_direct_density_hard_upper_per_100", 50.0)
+        ),
     )
 
 
@@ -153,4 +186,6 @@ def apply_coupled_innovation_defaults(args: Any) -> CoupledInnovationConfig:
     setattr(args, "paper_aligned_recovery_commit_control", cfg.recovery_commit_control)
     setattr(args, "paper_aligned_direct_density_control", cfg.direct_density_control)
     setattr(args, "paper_aligned_direct_update_prev_desc_on_hold", cfg.direct_update_prev_desc_on_hold)
+    setattr(args, "paper_aligned_direct_density_upper_per_100", cfg.direct_density_upper_per_100)
+    setattr(args, "paper_aligned_direct_density_hard_upper_per_100", cfg.direct_density_hard_upper_per_100)
     return cfg

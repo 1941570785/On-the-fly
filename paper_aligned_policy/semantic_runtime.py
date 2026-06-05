@@ -77,8 +77,15 @@ class SemanticV1RuntimePolicy:
             return 1.0
         return _clamp01((1.0 - risk) / max(1.0 - high, 1e-6))
 
-    def _decision(self, R_t: float, V_t: float, B_R_t: float, Q_t: float) -> str:
-        direct = (R_t <= self.th.tau_R_low) and (V_t >= self.th.tau_V)
+    def _decision(
+        self,
+        baseline_should_add: bool,
+        R_t: float,
+        V_t: float,
+        B_R_t: float,
+        Q_t: float,
+    ) -> str:
+        direct = bool(baseline_should_add) and (R_t <= self.th.tau_R_low) and (V_t >= self.th.tau_V)
         defer = (
             (B_R_t >= self.th.tau_B)
             and (V_t >= self.th.tau_V_min)
@@ -225,7 +232,13 @@ class SemanticV1RuntimePolicy:
         self.total_frames += 1
         ev = evidence or {}
         scores = self._scores(baseline_should_add, ev)
-        action = self._decision(scores["R_t"], scores["V_t"], scores["B_R_t"], scores["Q_t"])
+        action = self._decision(
+            baseline_should_add,
+            scores["R_t"],
+            scores["V_t"],
+            scores["B_R_t"],
+            scores["Q_t"],
+        )
         self.decision_counts[action] = int(self.decision_counts.get(action, 0)) + 1
         recovery_tick = self._tick_recovery(self.total_frames, scores, int(frame_id))
         if action == "defer_recoverable":

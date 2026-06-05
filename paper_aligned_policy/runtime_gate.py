@@ -78,10 +78,10 @@ class PaperAlignedRuntimeGate:
         if self.mode == "paper_aligned_semantic_v1":
             cfg = self.coupled_config
             self.semantic_policy = SemanticV1RuntimePolicy(
-                thresholds=cfg.thresholds if cfg.enabled else None,
-                recovery_delay_frames=cfg.recovery_delay_frames if cfg.enabled else None,
-                recovery_max_attempts=cfg.recovery_max_attempts if cfg.enabled else None,
-                recovery_attempts_per_tick=cfg.recovery_attempts_per_tick if cfg.enabled else None,
+                thresholds=cfg.thresholds,
+                recovery_delay_frames=cfg.recovery_delay_frames,
+                recovery_max_attempts=cfg.recovery_max_attempts,
+                recovery_attempts_per_tick=cfg.recovery_attempts_per_tick,
             )
 
     def _get_event(self, frame_id: int) -> dict[str, Any] | None:

@@ -66,6 +66,30 @@ class SemanticRuntimePolicyTests(unittest.TestCase):
         self.assertEqual(recovered[0]["current_tick_frame_id"], 12)
         self.assertGreater(recovered[0]["current_tick_frame_id"], recovered[0]["source_frame_id"])
 
+    def test_non_baseline_frame_cannot_direct_admit_even_when_scores_are_strong(self):
+        policy = SemanticV1RuntimePolicy(
+            thresholds=Thresholds(tau_R_low=0.40, tau_R_high=0.75, tau_B=0.12, tau_V=0.55, tau_V_min=0.45, tau_Q=0.10)
+        )
+
+        decision = policy.decide(
+            20,
+            baseline_should_add=False,
+            evidence={
+                "pose_uncertainty": 0.0,
+                "state_support_gap": 0.0,
+                "temporal_degradation": 0.0,
+                "representation_gain": 0.90,
+                "view_motion_gain": 0.90,
+                "chain_support_gain": 0.90,
+                "recovery_context_score": 1.0,
+            },
+            source_payload={"source_input_index": 20},
+        )
+
+        self.assertGreaterEqual(decision["scores"]["V_t"], policy.th.tau_V)
+        self.assertEqual(decision["action"], "defer_recoverable")
+        self.assertEqual(decision["recovery_pool_size"], 1)
+
     def test_low_risk_moderate_value_frame_can_enter_recovery_pool(self):
         policy = SemanticV1RuntimePolicy(
             thresholds=Thresholds(tau_R_low=0.40, tau_R_high=0.75, tau_B=0.25, tau_V=0.55, tau_V_min=0.25, tau_Q=0.10)

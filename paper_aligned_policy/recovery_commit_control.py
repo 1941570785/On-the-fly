@@ -263,6 +263,9 @@ class RecoveryCommitController:
         self.v7_min_seed_matches = int(
             getattr(args, "paper_aligned_recovery_v7_min_seed_matches", 300) or 300
         )
+        self.v7_min_seed_inliers = int(
+            getattr(args, "paper_aligned_recovery_v7_min_seed_inliers", 12) or 12
+        )
         self._gap_interval_index = 0
         self._in_gap_interval = False
         self._gap_interval_override_count = 0
@@ -450,6 +453,7 @@ class RecoveryCommitController:
                 "density_before": density_before,
                 "density_after": density_after,
                 "density_state": density_state,
+                "density_above_hard": density_after > self.v5_density_hard_upper,
                 "window_id": window_id,
                 "window_candidate_rank": window_candidate_rank,
                 "window_support_score": float(support_score),
@@ -1049,7 +1053,6 @@ class RecoveryCommitController:
             and v_t >= self.v5_min_v
             and q_t >= self.v5_min_q
             and num_matches >= self.min_geom_matches
-            and density_after <= self.v5_density_hard_upper
         )
         if not hard_ok:
             debug["blocked_reason"] = "hard_semantics"
@@ -1174,6 +1177,15 @@ class RecoveryCommitController:
             and self._v7_seed_commits < self.v7_seed_budget_total_short500
             and feasibility >= self.v7_min_seed_feasibility
             and num_matches >= self.v7_min_seed_matches
+            and num_inliers >= self.v7_min_seed_inliers
+        )
+        early_seed_low_inlier_guard = bool(
+            early_seed_window_active
+            and hard_ok
+            and feasibility >= self.v7_min_seed_feasibility
+            and num_matches >= self.v7_min_seed_matches
+            and num_inliers >= 0
+            and num_inliers < self.v7_min_seed_inliers
         )
         debug = dict(base_debug)
         debug.update(
@@ -1201,6 +1213,8 @@ class RecoveryCommitController:
                 "can_be_early_seed_candidate": can_seed,
                 "seed_budget_used": self._v7_seed_commits,
                 "seed_budget_total": self.v7_seed_budget_total_short500,
+                "min_seed_inliers": self.v7_min_seed_inliers,
+                "early_seed_low_inlier_guard": early_seed_low_inlier_guard,
                 "invalid_semantics_type": "" if hard_ok else "hard_invalid_semantics",
                 "hard_invalid_reason": "" if hard_ok else "source_or_rvq_semantics",
                 "soft_invalid_reason": "",
@@ -1213,6 +1227,9 @@ class RecoveryCommitController:
                 "is_duplicate": bool(context.get("source_already_committed", False)),
             }
         )
+        if early_seed_low_inlier_guard:
+            debug["blocked_reason"] = "early_seed_low_inliers"
+            return RecoveryCommitDecision("hold", "v7_hold_low_seed_inliers", debug)
         if can_seed:
             self._v7_seed_commits += 1
             debug["seed_budget_used"] = self._v7_seed_commits
