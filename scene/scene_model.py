@@ -635,6 +635,7 @@ class SceneModel:
                 # 计算LPIPS（感知损失，如果启用）
                 lpips_value = None
                 if with_LPIPS and self.lpips is not None:
+                    torch.cuda.empty_cache()
                     lpips_value = float(self.lpips(image[None], gt_image[None]).item())
                     metrics["LPIPS"] += lpips_value
                 frame_quality_by_index[int(keyframe.index)] = {
@@ -642,6 +643,8 @@ class SceneModel:
                     "ssim": ssim_value,
                     "lpips": lpips_value,
                 }
+                del render_pkg, image, gt_image, mask
+                torch.cuda.empty_cache()
                 n_test_frames += 1
 
         # 计算平均指标
