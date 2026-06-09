@@ -1725,6 +1725,21 @@ if __name__ == "__main__":
                             "value_hold_block_reason": str(
                                 dbg.get("value_hold_block_reason", "")
                             ),
+                            "high_recent_growth_representation_guard": bool(
+                                dbg.get("high_recent_growth_representation_guard", False)
+                            ),
+                            "low_semantic_coverage_representation_guard": bool(
+                                dbg.get("low_semantic_coverage_representation_guard", False)
+                            ),
+                            "anchor_boundary_representation_guard": bool(
+                                dbg.get("anchor_boundary_representation_guard", False)
+                            ),
+                            "long_stream_low_growth_context": bool(
+                                dbg.get("long_stream_low_growth_context", False)
+                            ),
+                            "density_only_hold_disabled": bool(
+                                dbg.get("density_only_hold_disabled", False)
+                            ),
                             "hold_low_representation_value": bool(
                                 dbg.get("hold_low_representation_value", False)
                             ),

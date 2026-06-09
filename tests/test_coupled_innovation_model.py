@@ -880,6 +880,44 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertTrue(decision.debug["long_stream_low_growth_context"])
         self.assertGreaterEqual(decision.debug["value_hold_budget_per_100"], 40)
 
+    def test_value_risk_decouple_v3_keeps_long_stream_hold_when_local_density_softens(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_value_decouple_v3")
+        )
+
+        decision = controller.decide(
+            frame_id=240,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=86.2,
+            local_density_before=69.0,
+            local_window_density=69.0,
+            local_window_keyframes=69,
+            local_window_gap_max=2.0,
+            local_window_gap_after_if_hold=2.0,
+            keyframe_growth_recent=-31,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=1,
+            main_chain_gap_before=1.0,
+            main_chain_gap_after_if_hold=1.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=60.0,
+            displacement_threshold=30.0,
+            num_matches=2400,
+            min_num_inliers=100,
+            pose_inliers=1600,
+            novelty_proxy=0.0,
+            current_keyframe_count=207,
+            semantic_scores={"R_t": 0.0, "V_t": 0.99, "Q_t": 0.997, "C_t": 1.0, "B_R_t": 1.0},
+        )
+
+        self.assertFalse(decision.finalize)
+        self.assertEqual(decision.decision, "hold_low_representation_value")
+        self.assertTrue(decision.debug["long_stream_low_growth_context"])
+
     def test_value_risk_decouple_v3_does_not_hold_from_density_alone(self):
         controller = DirectDensityController(
             _args(paper_aligned_direct_density_control="pose_rep_value_decouple_v3")

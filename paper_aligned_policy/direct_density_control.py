@@ -569,7 +569,7 @@ class DirectDensityController:
             and int(frame_id) >= 150
             and keyframe_growth_recent <= max(12, min_growth_window)
             and density_before >= self.density_upper
-            and local_density_before >= 70.0
+            and local_density_before >= 60.0
             and source_gap_to_last_keyframe <= self.redundant_source_gap
             and semantic_Q >= 0.85
             and semantic_BR >= 0.8
