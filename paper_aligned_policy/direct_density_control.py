@@ -87,7 +87,7 @@ class DirectDensityController:
             self.baseline_relative_lower_ratio = 0.55
             if self.prev_desc_update_on_hold == "off":
                 self.prev_desc_update_on_hold = "light"
-        if self.mode == "pose_rep_value_decouple_v2":
+        if self.mode in {"pose_rep_value_decouple_v2", "pose_rep_value_decouple_v3"}:
             self.density_lower = 16.0
             self.density_target = 30.0
             self.density_upper = 70.0
@@ -145,7 +145,7 @@ class DirectDensityController:
             self.soft_gap_threshold = 5
             self.hard_gap_threshold = 15
             self.gap_critical_limit = 15
-        if self.mode == "pose_rep_value_decouple_v2":
+        if self.mode in {"pose_rep_value_decouple_v2", "pose_rep_value_decouple_v3"}:
             self.local_density_lower = 12.0
             self.soft_gap_threshold = 8
             self.hard_gap_threshold = 18
@@ -161,6 +161,19 @@ class DirectDensityController:
             self.value_hold_budget_per_100 = int(
                 getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 5)
                 or 5
+            )
+        if self.mode == "pose_rep_value_decouple_v3":
+            self.value_hold_budget_per_100 = int(
+                getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 48)
+                or 48
+            )
+            self.representation_value_hold_max = float(
+                getattr(args, "paper_aligned_direct_representation_value_hold_max", 0.35)
+                or 0.35
+            )
+            self.pose_reference_value_min = float(
+                getattr(args, "paper_aligned_direct_pose_reference_value_min", 0.65)
+                or 0.65
             )
         if self.mode in {"target_band_v2_2_1", "target_band_v2_2_2", "target_band_v2_2_2_1"}:
             self.gap_critical_limit = self.hard_gap_threshold
@@ -202,11 +215,19 @@ class DirectDensityController:
 
     @property
     def is_pose_rep_decouple(self) -> bool:
-        return self.mode in {"pose_rep_decouple_v1", "pose_rep_value_decouple_v2"}
+        return self.mode in {
+            "pose_rep_decouple_v1",
+            "pose_rep_value_decouple_v2",
+            "pose_rep_value_decouple_v3",
+        }
 
     @property
     def is_pose_rep_value_decouple(self) -> bool:
-        return self.mode == "pose_rep_value_decouple_v2"
+        return self.mode in {"pose_rep_value_decouple_v2", "pose_rep_value_decouple_v3"}
+
+    @property
+    def is_pose_rep_value_v3(self) -> bool:
+        return self.mode == "pose_rep_value_decouple_v3"
 
     @property
     def is_v222_family(self) -> bool:
@@ -531,8 +552,34 @@ class DirectDensityController:
             or semantic_Q < 0.38
             or pose_inliers < max(min_num_inliers, 1)
         )
+        high_recent_growth_representation_guard = bool(
+            self.is_pose_rep_value_v3
+            and keyframe_growth_recent >= max(24, int(self.min_growth_per_100 * 2.5))
+        )
+        low_semantic_coverage_representation_guard = bool(
+            self.is_pose_rep_value_v3
+            and (semantic_C < 0.82 or semantic_Q < 0.78)
+            and motion_value >= 0.55
+        )
+        anchor_boundary_representation_guard = bool(
+            self.is_pose_rep_value_v3 and anchor_changed
+        )
+        long_stream_low_growth_context = bool(
+            self.is_pose_rep_value_v3
+            and int(frame_id) >= 150
+            and keyframe_growth_recent <= max(12, min_growth_window)
+            and density_before >= self.density_upper
+            and local_density_before >= 70.0
+            and source_gap_to_last_keyframe <= self.redundant_source_gap
+            and semantic_Q >= 0.85
+            and semantic_BR >= 0.8
+            and not low_semantic_coverage_representation_guard
+        )
         representation_value_high = bool(
             representation_value >= self.representation_value_hold_max
+            or high_recent_growth_representation_guard
+            or low_semantic_coverage_representation_guard
+            or anchor_boundary_representation_guard
             or (
                 source_gap_to_last_keyframe > self.redundant_source_gap
                 and semantic_V >= 0.65
@@ -557,9 +604,16 @@ class DirectDensityController:
             and density_state != "below_lower"
             and value_hold_budget_available
             and not bootstrap_value_hold_guard
+            and (not self.is_pose_rep_value_v3 or long_stream_low_growth_context)
         )
         block_reason = ""
-        if representation_value_high:
+        if high_recent_growth_representation_guard:
+            block_reason = "high_recent_growth_representation_guard"
+        elif low_semantic_coverage_representation_guard:
+            block_reason = "low_semantic_coverage_representation_guard"
+        elif anchor_boundary_representation_guard:
+            block_reason = "anchor_boundary_representation_guard"
+        elif representation_value_high:
             block_reason = "representation_value_high"
         elif pose_risk_high:
             block_reason = "pose_risk_high"
@@ -640,6 +694,11 @@ class DirectDensityController:
             "finalize_pose_risk_reference": False,
             "representation_value_high": representation_value_high,
             "pose_risk_high": pose_risk_high,
+            "high_recent_growth_representation_guard": high_recent_growth_representation_guard,
+            "low_semantic_coverage_representation_guard": low_semantic_coverage_representation_guard,
+            "anchor_boundary_representation_guard": anchor_boundary_representation_guard,
+            "long_stream_low_growth_context": long_stream_low_growth_context,
+            "density_only_hold_disabled": self.is_pose_rep_value_v3,
         }
         direct_candidate = dbg["direct_admit_candidate"]
         if not self.enabled or not direct_candidate:
@@ -694,7 +753,11 @@ class DirectDensityController:
                 dbg,
             )
 
-        if density_before >= self.density_hard_upper and gap_safe:
+        if (
+            not self.is_pose_rep_value_v3
+            and density_before >= self.density_hard_upper
+            and gap_safe
+        ):
             dbg["hold_density_high"] = True
             dbg["hold_density_high_allowed"] = True
             dbg["direct_keyframe_finalized"] = False
