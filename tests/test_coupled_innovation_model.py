@@ -880,7 +880,7 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertTrue(decision.debug["long_stream_low_growth_context"])
         self.assertGreaterEqual(decision.debug["value_hold_budget_per_100"], 40)
 
-    def test_value_risk_decouple_v3_keeps_long_stream_hold_when_local_density_softens(self):
+    def test_value_risk_decouple_v3_waits_for_long_sequence_maturity(self):
         controller = DirectDensityController(
             _args(paper_aligned_direct_density_control="pose_rep_value_decouple_v3")
         )
@@ -914,9 +914,11 @@ class CoupledInnovationModelTests(unittest.TestCase):
             semantic_scores={"R_t": 0.0, "V_t": 0.99, "Q_t": 0.997, "C_t": 1.0, "B_R_t": 1.0},
         )
 
-        self.assertFalse(decision.finalize)
-        self.assertEqual(decision.decision, "hold_low_representation_value")
-        self.assertTrue(decision.debug["long_stream_low_growth_context"])
+        self.assertTrue(decision.finalize)
+        self.assertNotEqual(decision.decision, "hold_low_representation_value")
+        self.assertFalse(decision.debug["long_stream_low_growth_context"])
+        self.assertTrue(decision.debug["long_sequence_maturity_guard"])
+        self.assertEqual(decision.debug["value_hold_block_reason"], "long_sequence_maturity_guard")
 
     def test_value_risk_decouple_v3_does_not_hold_from_density_alone(self):
         controller = DirectDensityController(

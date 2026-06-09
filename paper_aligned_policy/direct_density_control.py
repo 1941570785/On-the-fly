@@ -564,9 +564,12 @@ class DirectDensityController:
         anchor_boundary_representation_guard = bool(
             self.is_pose_rep_value_v3 and anchor_changed
         )
+        long_sequence_maturity_guard = bool(
+            self.is_pose_rep_value_v3 and int(frame_id) < 300
+        )
         long_stream_low_growth_context = bool(
             self.is_pose_rep_value_v3
-            and int(frame_id) >= 150
+            and not long_sequence_maturity_guard
             and keyframe_growth_recent <= max(12, min_growth_window)
             and density_before >= self.density_upper
             and local_density_before >= 60.0
@@ -627,6 +630,8 @@ class DirectDensityController:
             block_reason = "value_hold_budget_exhausted"
         elif bootstrap_value_hold_guard:
             block_reason = "early_bootstrap_value_hold_guard"
+        elif long_sequence_maturity_guard:
+            block_reason = "long_sequence_maturity_guard"
 
         dbg: dict[str, Any] = {
             "mode": self.mode,
@@ -697,6 +702,7 @@ class DirectDensityController:
             "high_recent_growth_representation_guard": high_recent_growth_representation_guard,
             "low_semantic_coverage_representation_guard": low_semantic_coverage_representation_guard,
             "anchor_boundary_representation_guard": anchor_boundary_representation_guard,
+            "long_sequence_maturity_guard": long_sequence_maturity_guard,
             "long_stream_low_growth_context": long_stream_low_growth_context,
             "density_only_hold_disabled": self.is_pose_rep_value_v3,
         }
