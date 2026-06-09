@@ -1146,6 +1146,21 @@ if __name__ == "__main__":
                     if len(recent_pose_success) > 0
                     else 0.0
                 ),
+                "baseline_prev_should_add": bool(
+                    (support_bridge_trace or {}).get("baseline_prev_should_add", baseline_should_add)
+                ),
+                "support_triggered_keyframe_gate": bool(
+                    (support_bridge_trace or {}).get("support_triggered_keyframe_gate", False)
+                ),
+                "support_candidate_count": int(
+                    (support_bridge_trace or {}).get("support_candidate_count", 0) or 0
+                ),
+                "best_support_num_matches": int(
+                    (support_bridge_trace or {}).get("best_support_num_matches", 0) or 0
+                ),
+                "best_support_median_displacement": float(
+                    (support_bridge_trace or {}).get("best_support_median_displacement", 0.0) or 0.0
+                ),
             }
             should_add_keyframe, runtime_action = runtime_gate.decide(
                 frameID, info, bool(baseline_should_add), phase=phase, evidence=evidence
@@ -1619,18 +1634,23 @@ if __name__ == "__main__":
                         density_hold_recovery_enqueued = False
                         density_hold_recovery_bridge_tag = ""
                         if not direct_keyframe_finalized:
-                            density_hold_recovery_enqueued = runtime_gate.enqueue_density_hold_recovery_candidate(
-                                frame_id=int(frameID),
-                                info=info,
-                                evidence=evidence,
-                                hold_decision=str(fin_dec.decision),
-                                hold_reason=str(fin_dec.reason),
-                                density_debug=dbg,
-                            )
-                            if trace_ev is not None:
-                                density_hold_recovery_bridge_tag = str(
-                                    trace_ev.get("density_hold_recovery_bridge_tag", "")
+                            if runtime_gate.direct_density_controller.should_enqueue_hold_recovery():
+                                density_hold_recovery_enqueued = runtime_gate.enqueue_density_hold_recovery_candidate(
+                                    frame_id=int(frameID),
+                                    info=info,
+                                    evidence=evidence,
+                                    hold_decision=str(fin_dec.decision),
+                                    hold_reason=str(fin_dec.reason),
+                                    density_debug=dbg,
                                 )
+                                if trace_ev is not None:
+                                    density_hold_recovery_bridge_tag = str(
+                                        trace_ev.get("density_hold_recovery_bridge_tag", "")
+                                    )
+                            elif trace_ev is not None:
+                                trace_ev["density_hold_recovery_enqueued"] = False
+                                trace_ev["density_hold_recovery_bridge_tag"] = "pose_only_tracking_hold"
+                                density_hold_recovery_bridge_tag = "pose_only_tracking_hold"
                         v2_payload = {
                             "frame_id": int(frameID),
                             "source_frame_id": int(frameID),
@@ -1668,6 +1688,31 @@ if __name__ == "__main__":
                             ),
                             "high_novelty_score": float(dbg.get("high_novelty_score", 0.0)),
                             "support_needed_score": float(dbg.get("support_needed_score", 0.0)),
+                            "representation_value_score": float(
+                                dbg.get("representation_value_score", 0.0)
+                            ),
+                            "pose_reference_value_score": float(
+                                dbg.get("pose_reference_value_score", 0.0)
+                            ),
+                            "pose_risk_score": float(dbg.get("pose_risk_score", 0.0)),
+                            "semantic_R_t": float(dbg.get("semantic_R_t", 0.0)),
+                            "semantic_V_t": float(dbg.get("semantic_V_t", 0.0)),
+                            "semantic_Q_t": float(dbg.get("semantic_Q_t", 0.0)),
+                            "semantic_C_t": float(dbg.get("semantic_C_t", 0.0)),
+                            "semantic_B_R_t": float(dbg.get("semantic_B_R_t", 0.0)),
+                            "value_hold_allowed": bool(dbg.get("value_hold_allowed", False)),
+                            "value_hold_block_reason": str(
+                                dbg.get("value_hold_block_reason", "")
+                            ),
+                            "hold_low_representation_value": bool(
+                                dbg.get("hold_low_representation_value", False)
+                            ),
+                            "finalize_high_representation_value": bool(
+                                dbg.get("finalize_high_representation_value", False)
+                            ),
+                            "finalize_pose_risk_reference": bool(
+                                dbg.get("finalize_pose_risk_reference", False)
+                            ),
                             "high_novelty_budget_used": int(dbg.get("high_novelty_budget_used", 0)),
                             "support_needed_budget_used": int(dbg.get("support_needed_budget_used", 0)),
                             "high_novelty_budget_exhausted": bool(
@@ -1981,6 +2026,10 @@ if __name__ == "__main__":
                                     ] = True
                                 elif runtime_gate.direct_density_controller.mode == "target_band_v2":
                                     runtime_gate.direct_density_control_v2_events[-1][
+                                        "prev_desc_updated_on_hold"
+                                    ] = True
+                                elif runtime_gate.direct_density_control_events:
+                                    runtime_gate.direct_density_control_events[-1][
                                         "prev_desc_updated_on_hold"
                                     ] = True
                     if direct_keyframe_finalized:

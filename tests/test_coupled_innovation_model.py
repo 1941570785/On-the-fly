@@ -138,6 +138,8 @@ class CoupledInnovationModelTests(unittest.TestCase):
                 "6",
                 "--paper_aligned_semantic_recovery_attempts_per_tick",
                 "2",
+                "--paper_aligned_direct_density_control",
+                "pose_rep_decouple_v1",
             ]
             with patch.object(sys, "argv", argv):
                 try:
@@ -151,6 +153,7 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertEqual(args.paper_aligned_recovery_delay_frames, 5)
         self.assertEqual(args.paper_aligned_semantic_recovery_max_attempts, 6)
         self.assertEqual(args.paper_aligned_semantic_recovery_attempts_per_tick, 2)
+        self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_decouple_v1")
 
     def test_runtime_gate_applies_coupled_preset_to_args_before_subsystems_use_them(self):
         args = _args(paper_aligned_tau_R_low=0.31, paper_aligned_recovery_delay_frames=4)
@@ -305,6 +308,88 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertFalse(decision.debug["can_be_early_seed_candidate"])
         self.assertTrue(decision.debug["early_seed_blocked_by_density_hold"])
         self.assertEqual(decision.debug["density_state"], "above_hard")
+
+    def test_pose_rep_decouple_mode_holds_dense_redundant_direct_frame(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_decouple_v1")
+        )
+
+        self.assertEqual(controller.prev_desc_update_on_hold, "light")
+        self.assertLessEqual(controller.density_upper, 42.0)
+        decision = controller.decide(
+            frame_id=220,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=60.0,
+            local_density_before=60.0,
+            local_window_density=60.0,
+            local_window_keyframes=60,
+            local_window_gap_max=2.0,
+            local_window_gap_after_if_hold=2.0,
+            keyframe_growth_recent=30,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=1,
+            main_chain_gap_before=1.0,
+            main_chain_gap_after_if_hold=2.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=31.0,
+            displacement_threshold=30.0,
+            num_matches=2400,
+            min_num_inliers=100,
+            pose_inliers=700,
+            novelty_proxy=0.35,
+            current_keyframe_count=132,
+        )
+
+        self.assertFalse(decision.finalize)
+        self.assertEqual(decision.decision, "hold_density_high")
+        self.assertTrue(
+            controller.should_update_prev_desc_on_hold(decision.decision, decision.debug["density_state"])
+        )
+        self.assertFalse(controller.should_enqueue_hold_recovery())
+        regular_controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="target_band_v2_2_2_1")
+        )
+        self.assertTrue(regular_controller.should_enqueue_hold_recovery())
+
+    def test_pose_rep_decouple_mode_preserves_sparse_gap_frame(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_decouple_v1")
+        )
+
+        decision = controller.decide(
+            frame_id=220,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=18.0,
+            local_density_before=18.0,
+            local_window_density=18.0,
+            local_window_keyframes=18,
+            local_window_gap_max=15.0,
+            local_window_gap_after_if_hold=16.0,
+            keyframe_growth_recent=8,
+            baseline_relative_density=0.7,
+            source_gap_to_last_keyframe=16,
+            main_chain_gap_before=15.0,
+            main_chain_gap_after_if_hold=16.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=31.0,
+            displacement_threshold=30.0,
+            num_matches=2400,
+            min_num_inliers=100,
+            pose_inliers=700,
+            novelty_proxy=0.35,
+            current_keyframe_count=40,
+        )
+
+        self.assertTrue(decision.finalize)
+        self.assertIn("gap", decision.reason)
 
     def test_direct_density_control_holds_redundant_baseline_direct_frames_above_band(self):
         controller = DirectDensityController(
@@ -593,6 +678,129 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertFalse(decision.finalize)
         self.assertEqual(decision.decision, "hold_density_high")
         self.assertIn("anchor_boundary", decision.reason)
+
+    def test_value_aware_pose_rep_decouple_holds_low_representation_value_pose_reference(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_value_decouple_v2")
+        )
+
+        decision = controller.decide(
+            frame_id=420,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=46.0,
+            local_density_before=44.0,
+            local_window_density=44.0,
+            local_window_keyframes=44,
+            local_window_gap_max=3.0,
+            local_window_gap_after_if_hold=3.0,
+            keyframe_growth_recent=18,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=2,
+            main_chain_gap_before=2.0,
+            main_chain_gap_after_if_hold=3.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=21.0,
+            displacement_threshold=30.0,
+            num_matches=150,
+            min_num_inliers=100,
+            pose_inliers=170,
+            novelty_proxy=0.22,
+            current_keyframe_count=193,
+            semantic_scores={"R_t": 0.12, "V_t": 0.20, "Q_t": 0.82, "C_t": 0.35, "B_R_t": 0.0},
+        )
+
+        self.assertFalse(decision.finalize)
+        self.assertEqual(decision.decision, "hold_low_representation_value")
+        self.assertIn("pose_reference_only", decision.reason)
+        self.assertLess(decision.debug["representation_value_score"], 0.42)
+        self.assertGreaterEqual(decision.debug["pose_reference_value_score"], 0.55)
+        self.assertTrue(decision.debug["value_hold_allowed"])
+        self.assertTrue(
+            controller.should_update_prev_desc_on_hold(decision.decision, decision.debug["density_state"])
+        )
+        self.assertFalse(controller.should_enqueue_hold_recovery())
+
+    def test_value_aware_pose_rep_decouple_finalizes_high_representation_value(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_value_decouple_v2")
+        )
+
+        decision = controller.decide(
+            frame_id=420,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=46.0,
+            local_density_before=44.0,
+            local_window_density=44.0,
+            local_window_keyframes=44,
+            local_window_gap_max=3.0,
+            local_window_gap_after_if_hold=3.0,
+            keyframe_growth_recent=18,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=2,
+            main_chain_gap_before=2.0,
+            main_chain_gap_after_if_hold=3.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=48.0,
+            displacement_threshold=30.0,
+            num_matches=520,
+            min_num_inliers=100,
+            pose_inliers=220,
+            novelty_proxy=0.76,
+            current_keyframe_count=193,
+            semantic_scores={"R_t": 0.10, "V_t": 0.78, "Q_t": 0.86, "C_t": 0.68, "B_R_t": 0.0},
+        )
+
+        self.assertTrue(decision.finalize)
+        self.assertEqual(decision.decision, "finalize_high_representation_value")
+        self.assertGreaterEqual(decision.debug["representation_value_score"], 0.42)
+        self.assertFalse(decision.debug["value_hold_allowed"])
+        self.assertEqual(decision.debug["value_hold_block_reason"], "representation_value_high")
+
+    def test_value_aware_pose_rep_decouple_finalizes_high_risk_pose_even_if_representation_is_low(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_value_decouple_v2")
+        )
+
+        decision = controller.decide(
+            frame_id=420,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=46.0,
+            local_density_before=44.0,
+            local_window_density=44.0,
+            local_window_keyframes=44,
+            local_window_gap_max=3.0,
+            local_window_gap_after_if_hold=3.0,
+            keyframe_growth_recent=18,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=2,
+            main_chain_gap_before=2.0,
+            main_chain_gap_after_if_hold=3.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=18.0,
+            displacement_threshold=30.0,
+            num_matches=150,
+            min_num_inliers=100,
+            pose_inliers=115,
+            novelty_proxy=0.20,
+            current_keyframe_count=193,
+            semantic_scores={"R_t": 0.66, "V_t": 0.20, "Q_t": 0.36, "C_t": 0.35, "B_R_t": 0.45},
+        )
+
+        self.assertTrue(decision.finalize)
+        self.assertEqual(decision.decision, "finalize_pose_risk_reference")
+        self.assertEqual(decision.debug["value_hold_block_reason"], "pose_risk_high")
 
     def test_trace_flush_records_coupled_contract_and_stage_metric_contract(self):
         with tempfile.TemporaryDirectory() as td:

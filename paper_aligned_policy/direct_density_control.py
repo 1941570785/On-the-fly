@@ -13,6 +13,11 @@ def _f(x: Any, default: float = 0.0) -> float:
         return default
 
 
+def _clamp01(x: Any, default: float = 0.0) -> float:
+    v = _f(x, default)
+    return max(0.0, min(1.0, v))
+
+
 @dataclass
 class DirectFinalizationDecision:
     finalize: bool
@@ -70,6 +75,28 @@ class DirectDensityController:
         self.hold_tracking_bridge_mode = str(
             getattr(args, "paper_aligned_direct_hold_tracking_bridge_mode", "light") or "light"
         )
+        if self.mode == "pose_rep_decouple_v1":
+            self.density_lower = 18.0
+            self.density_target = 28.0
+            self.density_upper = 42.0
+            self.density_hard_upper = 58.0
+            self.gap_hard_limit = 15
+            self.redundant_source_gap = 2
+            self.min_growth_per_100 = 10.0
+            self.baseline_relative_lower_ratio = 0.55
+            if self.prev_desc_update_on_hold == "off":
+                self.prev_desc_update_on_hold = "light"
+        if self.mode == "pose_rep_value_decouple_v2":
+            self.density_lower = 16.0
+            self.density_target = 30.0
+            self.density_upper = 70.0
+            self.density_hard_upper = 92.0
+            self.gap_hard_limit = 18
+            self.redundant_source_gap = 2
+            self.min_growth_per_100 = 8.0
+            self.baseline_relative_lower_ratio = 0.45
+            if self.prev_desc_update_on_hold == "off":
+                self.prev_desc_update_on_hold = "light"
         if self.mode == "conservative":
             self.density_upper = min(self.density_upper, 40.0)
             self.density_target = min(self.density_target, 32.0)
@@ -112,6 +139,24 @@ class DirectDensityController:
         self.post500_gap_rescue_budget_per_100 = int(
             getattr(args, "paper_aligned_direct_v2_2_2_1_post500_gap_rescue_budget_per_100", 4) or 4
         )
+        if self.mode == "pose_rep_decouple_v1":
+            self.local_density_lower = 14.0
+            self.soft_gap_threshold = 5
+            self.hard_gap_threshold = 15
+            self.gap_critical_limit = 15
+        if self.mode == "pose_rep_value_decouple_v2":
+            self.local_density_lower = 12.0
+            self.soft_gap_threshold = 8
+            self.hard_gap_threshold = 18
+            self.gap_critical_limit = 18
+            self.representation_value_hold_max = float(
+                getattr(args, "paper_aligned_direct_representation_value_hold_max", 0.42)
+                or 0.42
+            )
+            self.pose_reference_value_min = float(
+                getattr(args, "paper_aligned_direct_pose_reference_value_min", 0.55)
+                or 0.55
+            )
         if self.mode in {"target_band_v2_2_1", "target_band_v2_2_2", "target_band_v2_2_2_1"}:
             self.gap_critical_limit = self.hard_gap_threshold
         self._budget = _BudgetWindow()
@@ -151,6 +196,14 @@ class DirectDensityController:
         return self.mode == "target_band_v2_2_2_1"
 
     @property
+    def is_pose_rep_decouple(self) -> bool:
+        return self.mode in {"pose_rep_decouple_v1", "pose_rep_value_decouple_v2"}
+
+    @property
+    def is_pose_rep_value_decouple(self) -> bool:
+        return self.mode == "pose_rep_value_decouple_v2"
+
+    @property
     def is_v222_family(self) -> bool:
         return self.is_v222 or self.is_v2221
 
@@ -169,8 +222,17 @@ class DirectDensityController:
         if self.prev_desc_update_on_hold == "light":
             if self.hold_tracking_bridge_mode == "none":
                 return False
+            if self.is_pose_rep_decouple:
+                return decision in {
+                    "hold_redundant",
+                    "hold_density_high",
+                    "hold_low_representation_value",
+                }
             return decision == "hold_redundant" and density_state == "in_band"
         return False
+
+    def should_enqueue_hold_recovery(self) -> bool:
+        return self.enabled and not self.is_pose_rep_decouple
 
     def _window_id(self, frame_id: int) -> int:
         return int(frame_id) // 100
@@ -235,8 +297,38 @@ class DirectDensityController:
         local_window_keyframes: int = 0,
         local_window_gap_max: float = 0.0,
         local_window_gap_after_if_hold: float = 0.0,
+        semantic_scores: dict[str, Any] | None = None,
     ) -> DirectFinalizationDecision:
-        if self.is_v221 or self.is_v222_family or self.mode == "target_band_v2_2":
+        if self.is_pose_rep_value_decouple:
+            return self._decide_pose_rep_value_v2(
+                frame_id=frame_id,
+                runtime_action=runtime_action,
+                baseline_should_add=baseline_should_add,
+                is_test=is_test,
+                is_bootstrap_phase=is_bootstrap_phase,
+                density_before=density_before,
+                local_density_before=local_density_before,
+                local_window_density=local_window_density,
+                local_window_keyframes=local_window_keyframes,
+                local_window_gap_max=local_window_gap_max,
+                local_window_gap_after_if_hold=local_window_gap_after_if_hold,
+                keyframe_growth_recent=keyframe_growth_recent,
+                baseline_relative_density=baseline_relative_density,
+                source_gap_to_last_keyframe=source_gap_to_last_keyframe,
+                main_chain_gap_before=main_chain_gap_before,
+                main_chain_gap_after_if_hold=main_chain_gap_after_if_hold,
+                anchor_changed=anchor_changed,
+                support_triggered=support_triggered,
+                median_displacement=median_displacement,
+                displacement_threshold=displacement_threshold,
+                num_matches=num_matches,
+                min_num_inliers=min_num_inliers,
+                pose_inliers=pose_inliers,
+                novelty_proxy=novelty_proxy,
+                current_keyframe_count=current_keyframe_count,
+                semantic_scores=semantic_scores,
+            )
+        if self.is_pose_rep_decouple or self.is_v221 or self.is_v222_family or self.mode == "target_band_v2_2":
             return self._decide_v22(
                 frame_id=frame_id,
                 runtime_action=runtime_action,
@@ -330,6 +422,255 @@ class DirectDensityController:
             pose_inliers=pose_inliers,
             novelty_proxy=novelty_proxy,
         )
+
+    def _decide_pose_rep_value_v2(
+        self,
+        *,
+        frame_id: int,
+        runtime_action: str,
+        baseline_should_add: bool,
+        is_test: bool,
+        is_bootstrap_phase: bool,
+        density_before: float,
+        local_density_before: float,
+        local_window_density: float,
+        local_window_keyframes: int,
+        local_window_gap_max: float,
+        local_window_gap_after_if_hold: float,
+        keyframe_growth_recent: int,
+        baseline_relative_density: float,
+        source_gap_to_last_keyframe: int,
+        main_chain_gap_before: float,
+        main_chain_gap_after_if_hold: float,
+        anchor_changed: bool,
+        support_triggered: bool,
+        median_displacement: float,
+        displacement_threshold: float,
+        num_matches: int,
+        min_num_inliers: int,
+        pose_inliers: int,
+        novelty_proxy: float,
+        current_keyframe_count: int,
+        semantic_scores: dict[str, Any] | None,
+    ) -> DirectFinalizationDecision:
+        self._sync_budget_window(frame_id)
+        min_growth_window = max(1, int(self.min_growth_per_100 * 0.5))
+        expected_min_keyframes = float(frame_id) * self.density_lower / 100.0
+        keyframe_debt = max(0.0, expected_min_keyframes - float(current_keyframe_count))
+        baseline_expected_kf = float(frame_id) * self.baseline_density_per_100 / 100.0
+        baseline_min_kf = self.baseline_relative_lower_ratio * baseline_expected_kf
+
+        scores = dict(semantic_scores or {})
+        semantic_R = _clamp01(scores.get("R_t"), 0.5)
+        semantic_V = _clamp01(scores.get("V_t"), 0.0)
+        semantic_Q = _clamp01(scores.get("Q_t"), 0.5)
+        semantic_C = _clamp01(scores.get("C_t"), 0.0)
+        semantic_BR = _clamp01(scores.get("B_R_t"), 0.0)
+        risk_score = max(semantic_R, semantic_BR)
+        disp_ratio = _f(median_displacement, 0.0) / max(_f(displacement_threshold, 0.0), 1e-6)
+        motion_value = max(0.0, min(1.0, disp_ratio / 2.0))
+        match_support = max(0.0, min(1.0, _f(num_matches, 0.0) / max(2.0 * max(min_num_inliers, 1), 1.0)))
+        pose_support = max(0.0, min(1.0, _f(pose_inliers, 0.0) / max(2.0 * max(min_num_inliers, 1), 1.0)))
+        novelty_value = _clamp01(novelty_proxy, 0.0)
+        representation_value = _clamp01(
+            0.42 * semantic_V
+            + 0.18 * semantic_C
+            + 0.18 * motion_value
+            + 0.12 * novelty_value
+            + 0.06 * match_support
+            + (0.04 if support_triggered else 0.0)
+        )
+        pose_reference_value = _clamp01(
+            0.36 * (1.0 - risk_score)
+            + 0.28 * semantic_Q
+            + 0.22 * pose_support
+            + 0.14 * match_support
+        )
+
+        growth_ok = keyframe_growth_recent >= min_growth_window
+        baseline_relative_kf_ok = current_keyframe_count >= int(baseline_min_kf)
+        local_under_dense = bool(
+            local_window_density < self.local_density_lower
+            and density_before < self.density_upper
+        )
+        growth_starved = bool(not growth_ok and density_before < self.density_target)
+        starvation_risk = bool(
+            density_before < self.density_lower
+            or keyframe_debt > 0.5
+            or growth_starved
+            or (not baseline_relative_kf_ok and density_before < self.density_target)
+            or local_under_dense
+        )
+        density_state = self._density_state(density_before, starvation_risk=starvation_risk)
+        hard_lim = self.hard_gap_threshold
+        gap_critical = bool(
+            main_chain_gap_after_if_hold > hard_lim
+            or local_window_gap_after_if_hold > hard_lim
+            or local_window_gap_max > hard_lim
+            or source_gap_to_last_keyframe > hard_lim
+        )
+        gap_safe = bool(
+            main_chain_gap_after_if_hold <= hard_lim
+            and local_window_gap_after_if_hold <= hard_lim
+            and source_gap_to_last_keyframe <= hard_lim
+        )
+        pose_risk_high = bool(
+            risk_score >= 0.55
+            or semantic_Q < 0.38
+            or pose_inliers < max(min_num_inliers, 1)
+        )
+        representation_value_high = bool(
+            representation_value >= self.representation_value_hold_max
+            or semantic_V >= 0.55
+            or semantic_C >= 0.65
+            or novelty_value >= 0.65
+            or disp_ratio >= 1.25
+        )
+        value_hold_allowed = bool(
+            not representation_value_high
+            and pose_reference_value >= self.pose_reference_value_min
+            and not pose_risk_high
+            and not support_triggered
+            and gap_safe
+            and not starvation_risk
+            and density_state != "below_lower"
+        )
+        block_reason = ""
+        if representation_value_high:
+            block_reason = "representation_value_high"
+        elif pose_risk_high:
+            block_reason = "pose_risk_high"
+        elif support_triggered:
+            block_reason = "support_triggered"
+        elif not gap_safe:
+            block_reason = "gap_not_safe"
+        elif starvation_risk or density_state == "below_lower":
+            block_reason = "keyframe_density_debt"
+        elif pose_reference_value < self.pose_reference_value_min:
+            block_reason = "pose_reference_value_low"
+
+        dbg: dict[str, Any] = {
+            "mode": self.mode,
+            "frame_id": frame_id,
+            "density_before": density_before,
+            "density_after": density_before,
+            "local_density_before": local_density_before,
+            "local_window_density": local_window_density,
+            "local_window_keyframes": local_window_keyframes,
+            "local_window_gap_max": local_window_gap_max,
+            "local_window_gap_after_if_hold": local_window_gap_after_if_hold,
+            "baseline_relative_density": baseline_relative_density,
+            "keyframe_count_current": current_keyframe_count,
+            "expected_min_keyframes": round(expected_min_keyframes, 2),
+            "keyframe_debt": round(keyframe_debt, 2),
+            "recent_keyframe_growth": keyframe_growth_recent,
+            "keyframe_growth_recent": keyframe_growth_recent,
+            "source_gap_to_last_keyframe": source_gap_to_last_keyframe,
+            "main_chain_gap_before": main_chain_gap_before,
+            "main_chain_gap_after_if_hold": main_chain_gap_after_if_hold,
+            "density_state": density_state,
+            "direct_admit_candidate": runtime_action in {"direct_admit", "current_frame_surrogate_commit"},
+            "baseline_direct_admit_candidate": bool(baseline_should_add and runtime_action == "direct_admit"),
+            "starvation_risk": starvation_risk,
+            "local_density_rescue_triggered": local_under_dense,
+            "gap_critical_triggered": gap_critical,
+            "gap_critical_finalized": False,
+            "semantic_R_t": semantic_R,
+            "semantic_V_t": semantic_V,
+            "semantic_Q_t": semantic_Q,
+            "semantic_C_t": semantic_C,
+            "semantic_B_R_t": semantic_BR,
+            "pose_risk_score": risk_score,
+            "motion_value_score": motion_value,
+            "match_support_score": match_support,
+            "pose_support_score": pose_support,
+            "representation_value_score": representation_value,
+            "pose_reference_value_score": pose_reference_value,
+            "representation_value_hold_max": self.representation_value_hold_max,
+            "pose_reference_value_min": self.pose_reference_value_min,
+            "value_hold_allowed": value_hold_allowed,
+            "value_hold_block_reason": block_reason,
+            "high_novelty_score": novelty_value if representation_value_high else 0.0,
+            "support_needed_score": min(1.0, num_matches / max(min_num_inliers, 1)) if support_triggered else 0.0,
+            "hold_low_representation_value": False,
+            "hold_density_high": False,
+            "hold_redundant": False,
+            "hold_redundant_allowed": False,
+            "hold_density_high_allowed": False,
+            "hold_density_high_blocked_by_gap": False,
+            "hold_redundant_blocked_by_gap": False,
+            "hold_redundant_blocked_by_lower_guard": False,
+            "hold_density_high_blocked_by_starvation": False,
+            "hold_density_high_blocked_by_local_under_density": False,
+            "finalize_high_novelty": False,
+            "finalize_support_needed": False,
+            "finalize_gap_critical": False,
+            "finalize_high_representation_value": False,
+            "finalize_pose_risk_reference": False,
+            "representation_value_high": representation_value_high,
+            "pose_risk_high": pose_risk_high,
+        }
+        direct_candidate = dbg["direct_admit_candidate"]
+        if not self.enabled or not direct_candidate:
+            dbg["direct_keyframe_finalized"] = True
+            return DirectFinalizationDecision(True, "finalize", "control_off_or_not_direct", dbg)
+        if is_test or is_bootstrap_phase:
+            dbg["direct_keyframe_finalized"] = True
+            return DirectFinalizationDecision(True, "finalize", "test_or_bootstrap_bypass", dbg)
+
+        def _finalize(decision: str, reason: str) -> DirectFinalizationDecision:
+            dbg["direct_keyframe_finalized"] = True
+            dbg["keyframe_finalized"] = True
+            if decision == "finalize_gap_critical_v2":
+                dbg["gap_critical_finalized"] = True
+                dbg["finalize_gap_critical"] = True
+            if decision == "finalize_support_needed":
+                dbg["finalize_support_needed"] = True
+            if decision == "finalize_high_representation_value":
+                dbg["finalize_high_representation_value"] = True
+                dbg["finalize_high_novelty"] = bool(novelty_value >= 0.65 or disp_ratio >= 1.25)
+            if decision == "finalize_pose_risk_reference":
+                dbg["finalize_pose_risk_reference"] = True
+            if decision == "finalize_local_density_rescue":
+                dbg["finalize_local_density_rescue"] = True
+            return DirectFinalizationDecision(True, decision, reason, dbg)
+
+        if gap_critical:
+            return _finalize("finalize_gap_critical_v2", "value_hold_blocked_by_gap")
+        if local_under_dense:
+            dbg["hold_density_high_blocked_by_local_under_density"] = True
+            return _finalize("finalize_local_density_rescue", "local_under_density_preempts_value_hold")
+        if starvation_risk or density_state == "below_lower":
+            dbg["hold_redundant_blocked_by_lower_guard"] = True
+            return _finalize("finalize_growth_rescue", "keyframe_density_debt_preempts_value_hold")
+        if pose_risk_high:
+            return _finalize("finalize_pose_risk_reference", "pose_risk_high")
+        if support_triggered:
+            return _finalize("finalize_support_needed", "support_triggered_representation_context")
+        if representation_value_high:
+            return _finalize("finalize_high_representation_value", "representation_value_high")
+        if anchor_changed and representation_value >= 0.34:
+            return _finalize("finalize_anchor_boundary", "anchor_boundary_representation_context")
+
+        if value_hold_allowed:
+            dbg["hold_low_representation_value"] = True
+            dbg["direct_keyframe_finalized"] = False
+            dbg["keyframe_finalized"] = False
+            return DirectFinalizationDecision(
+                False,
+                "hold_low_representation_value",
+                "pose_reference_only_low_representation_value",
+                dbg,
+            )
+
+        if density_before >= self.density_hard_upper and gap_safe:
+            dbg["hold_density_high"] = True
+            dbg["hold_density_high_allowed"] = True
+            dbg["direct_keyframe_finalized"] = False
+            dbg["keyframe_finalized"] = False
+            return DirectFinalizationDecision(False, "hold_density_high", "dense_band_pose_reference_only", dbg)
+
+        return _finalize("finalize", block_reason or "default_value_aware_finalize")
 
     def _decide_v2(
         self,
@@ -1384,7 +1725,7 @@ class DirectDensityController:
                 if rescued is not None:
                     return rescued
             elif (
-                source_gap > 6
+                source_gap_to_last_keyframe > 6
                 and density_before >= self.density_lower
                 and density_before <= self.density_upper
                 and not starvation_risk

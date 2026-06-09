@@ -261,6 +261,8 @@ def get_args():
             'target_band_v2_2_1',
             'target_band_v2_2_2',
             'target_band_v2_2_2_1',
+            'pose_rep_decouple_v1',
+            'pose_rep_value_decouple_v2',
         ],
         help='Direct keyframe finalization density guard (not R/V/Q admission).',
     )

@@ -829,7 +829,21 @@ class PaperAlignedRuntimeGate:
         num_matches: int,
         min_num_inliers: int,
         pose_inliers: int,
+        semantic_scores: dict[str, Any] | None = None,
     ):
+        if semantic_scores is None:
+            event = self._get_event(int(frame_id))
+            meta = event.get("decision_meta", {}) if isinstance(event, dict) else {}
+            if isinstance(meta, dict):
+                semantic_scores = {
+                    "R_t": meta.get("R_t"),
+                    "V_t": meta.get("V_t"),
+                    "Q_t": meta.get("Q_t"),
+                    "C_t": meta.get("C_t"),
+                    "B_R_t": meta.get("B_R_t"),
+                }
+            else:
+                semantic_scores = {}
         last_tick, _ = self._last_committed_source_before(frame_id)
         source_gap = int(frame_id - last_tick) if last_tick >= 0 else int(frame_id)
         gap_before = float(self._main_chain_gap_p90_recent())
@@ -889,6 +903,7 @@ class PaperAlignedRuntimeGate:
             local_window_keyframes=local_window_keyframes,
             local_window_gap_max=local_window_gap_max,
             local_window_gap_after_if_hold=local_window_gap_after_if_hold,
+            semantic_scores=semantic_scores,
         )
         if ctrl.is_v22:
             decision.debug.update(
