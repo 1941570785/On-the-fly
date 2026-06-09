@@ -1695,12 +1695,33 @@ if __name__ == "__main__":
                                 dbg.get("pose_reference_value_score", 0.0)
                             ),
                             "pose_risk_score": float(dbg.get("pose_risk_score", 0.0)),
+                            "motion_value_score": float(dbg.get("motion_value_score", 0.0)),
+                            "match_support_score": float(dbg.get("match_support_score", 0.0)),
+                            "pose_support_score": float(dbg.get("pose_support_score", 0.0)),
+                            "source_redundancy_score": float(
+                                dbg.get("source_redundancy_score", 0.0)
+                            ),
+                            "representation_redundancy_penalty": float(
+                                dbg.get("representation_redundancy_penalty", 0.0)
+                            ),
                             "semantic_R_t": float(dbg.get("semantic_R_t", 0.0)),
                             "semantic_V_t": float(dbg.get("semantic_V_t", 0.0)),
                             "semantic_Q_t": float(dbg.get("semantic_Q_t", 0.0)),
                             "semantic_C_t": float(dbg.get("semantic_C_t", 0.0)),
                             "semantic_B_R_t": float(dbg.get("semantic_B_R_t", 0.0)),
                             "value_hold_allowed": bool(dbg.get("value_hold_allowed", False)),
+                            "value_hold_budget_per_100": int(
+                                dbg.get("value_hold_budget_per_100", 0)
+                            ),
+                            "value_hold_budget_used": int(
+                                dbg.get("value_hold_budget_used", 0)
+                            ),
+                            "value_hold_budget_available": bool(
+                                dbg.get("value_hold_budget_available", False)
+                            ),
+                            "bootstrap_value_hold_guard": bool(
+                                dbg.get("bootstrap_value_hold_guard", False)
+                            ),
                             "value_hold_block_reason": str(
                                 dbg.get("value_hold_block_reason", "")
                             ),

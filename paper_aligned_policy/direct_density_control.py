@@ -34,6 +34,7 @@ class _BudgetWindow:
     early_rescue_used: int = 0
     gap_rescue_used: int = 0
     post500_gap_rescue_used: int = 0
+    value_hold_used: int = 0
 
 
 class DirectDensityController:
@@ -156,6 +157,10 @@ class DirectDensityController:
             self.pose_reference_value_min = float(
                 getattr(args, "paper_aligned_direct_pose_reference_value_min", 0.55)
                 or 0.55
+            )
+            self.value_hold_budget_per_100 = int(
+                getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 5)
+                or 5
             )
         if self.mode in {"target_band_v2_2_1", "target_band_v2_2_2", "target_band_v2_2_2_1"}:
             self.gap_critical_limit = self.hard_gap_threshold
@@ -466,25 +471,31 @@ class DirectDensityController:
         semantic_Q = _clamp01(scores.get("Q_t"), 0.5)
         semantic_C = _clamp01(scores.get("C_t"), 0.0)
         semantic_BR = _clamp01(scores.get("B_R_t"), 0.0)
-        risk_score = max(semantic_R, semantic_BR)
+        risk_score = semantic_R
         disp_ratio = _f(median_displacement, 0.0) / max(_f(displacement_threshold, 0.0), 1e-6)
         motion_value = max(0.0, min(1.0, disp_ratio / 2.0))
         match_support = max(0.0, min(1.0, _f(num_matches, 0.0) / max(2.0 * max(min_num_inliers, 1), 1.0)))
         pose_support = max(0.0, min(1.0, _f(pose_inliers, 0.0) / max(2.0 * max(min_num_inliers, 1), 1.0)))
         novelty_value = _clamp01(novelty_proxy, 0.0)
+        source_redundancy = 1.0 if source_gap_to_last_keyframe <= self.redundant_source_gap else 0.0
+        redundancy_penalty = _clamp01(
+            0.50 * source_redundancy * pose_support
+            + 0.20 * source_redundancy * match_support
+        )
         representation_value = _clamp01(
-            0.42 * semantic_V
-            + 0.18 * semantic_C
-            + 0.18 * motion_value
-            + 0.12 * novelty_value
-            + 0.06 * match_support
-            + (0.04 if support_triggered else 0.0)
+            0.18 * semantic_V
+            + 0.10 * semantic_C
+            + 0.27 * motion_value
+            + 0.20 * novelty_value
+            + (0.08 if support_triggered else 0.0)
+            - redundancy_penalty
         )
         pose_reference_value = _clamp01(
-            0.36 * (1.0 - risk_score)
-            + 0.28 * semantic_Q
-            + 0.22 * pose_support
-            + 0.14 * match_support
+            0.30 * (1.0 - risk_score)
+            + 0.22 * semantic_Q
+            + 0.18 * semantic_BR
+            + 0.18 * pose_support
+            + 0.12 * match_support
         )
 
         growth_ok = keyframe_growth_recent >= min_growth_window
@@ -516,38 +527,52 @@ class DirectDensityController:
         )
         pose_risk_high = bool(
             risk_score >= 0.55
+            or semantic_BR < 0.25
             or semantic_Q < 0.38
             or pose_inliers < max(min_num_inliers, 1)
         )
         representation_value_high = bool(
             representation_value >= self.representation_value_hold_max
-            or semantic_V >= 0.55
-            or semantic_C >= 0.65
-            or novelty_value >= 0.65
-            or disp_ratio >= 1.25
+            or (
+                source_gap_to_last_keyframe > self.redundant_source_gap
+                and semantic_V >= 0.65
+                and semantic_C >= 0.55
+                and novelty_value >= 0.55
+            )
+            or (
+                source_gap_to_last_keyframe > self.redundant_source_gap
+                and disp_ratio >= 1.75
+            )
         )
+        value_hold_budget_available = bool(
+            self._budget.value_hold_used < self.value_hold_budget_per_100
+        )
+        bootstrap_value_hold_guard = int(frame_id) <= 100
         value_hold_allowed = bool(
             not representation_value_high
             and pose_reference_value >= self.pose_reference_value_min
             and not pose_risk_high
-            and not support_triggered
             and gap_safe
             and not starvation_risk
             and density_state != "below_lower"
+            and value_hold_budget_available
+            and not bootstrap_value_hold_guard
         )
         block_reason = ""
         if representation_value_high:
             block_reason = "representation_value_high"
         elif pose_risk_high:
             block_reason = "pose_risk_high"
-        elif support_triggered:
-            block_reason = "support_triggered"
         elif not gap_safe:
             block_reason = "gap_not_safe"
         elif starvation_risk or density_state == "below_lower":
             block_reason = "keyframe_density_debt"
         elif pose_reference_value < self.pose_reference_value_min:
             block_reason = "pose_reference_value_low"
+        elif not value_hold_budget_available:
+            block_reason = "value_hold_budget_exhausted"
+        elif bootstrap_value_hold_guard:
+            block_reason = "early_bootstrap_value_hold_guard"
 
         dbg: dict[str, Any] = {
             "mode": self.mode,
@@ -584,10 +609,16 @@ class DirectDensityController:
             "motion_value_score": motion_value,
             "match_support_score": match_support,
             "pose_support_score": pose_support,
+            "source_redundancy_score": source_redundancy,
+            "representation_redundancy_penalty": redundancy_penalty,
             "representation_value_score": representation_value,
             "pose_reference_value_score": pose_reference_value,
             "representation_value_hold_max": self.representation_value_hold_max,
             "pose_reference_value_min": self.pose_reference_value_min,
+            "value_hold_budget_per_100": self.value_hold_budget_per_100,
+            "value_hold_budget_used": self._budget.value_hold_used,
+            "value_hold_budget_available": value_hold_budget_available,
+            "bootstrap_value_hold_guard": bootstrap_value_hold_guard,
             "value_hold_allowed": value_hold_allowed,
             "value_hold_block_reason": block_reason,
             "high_novelty_score": novelty_value if representation_value_high else 0.0,
@@ -645,14 +676,14 @@ class DirectDensityController:
             return _finalize("finalize_growth_rescue", "keyframe_density_debt_preempts_value_hold")
         if pose_risk_high:
             return _finalize("finalize_pose_risk_reference", "pose_risk_high")
-        if support_triggered:
-            return _finalize("finalize_support_needed", "support_triggered_representation_context")
         if representation_value_high:
             return _finalize("finalize_high_representation_value", "representation_value_high")
         if anchor_changed and representation_value >= 0.34:
             return _finalize("finalize_anchor_boundary", "anchor_boundary_representation_context")
 
         if value_hold_allowed:
+            self._budget.value_hold_used += 1
+            dbg["value_hold_budget_used"] = self._budget.value_hold_used
             dbg["hold_low_representation_value"] = True
             dbg["direct_keyframe_finalized"] = False
             dbg["keyframe_finalized"] = False
