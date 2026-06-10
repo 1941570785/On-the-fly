@@ -1688,6 +1688,7 @@ if __name__ == "__main__":
                             ),
                             "high_novelty_score": float(dbg.get("high_novelty_score", 0.0)),
                             "support_needed_score": float(dbg.get("support_needed_score", 0.0)),
+                            "novelty_value_score": float(dbg.get("novelty_value_score", 0.0)),
                             "representation_value_score": float(
                                 dbg.get("representation_value_score", 0.0)
                             ),

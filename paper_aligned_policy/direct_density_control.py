@@ -628,7 +628,6 @@ class DirectDensityController:
         )
         active_memory_low_representation_value = bool(
             representation_value < self.representation_value_hold_max
-            and novelty_value <= 0.25
         )
         active_memory_low_marginal_representation = bool(
             active_memory_low_representation_value
@@ -774,6 +773,7 @@ class DirectDensityController:
             "value_hold_block_reason": block_reason,
             "high_novelty_score": novelty_value if representation_value_high else 0.0,
             "support_needed_score": min(1.0, num_matches / max(min_num_inliers, 1)) if support_triggered else 0.0,
+            "novelty_value_score": novelty_value,
             "hold_low_representation_value": False,
             "hold_density_high": False,
             "hold_redundant": False,
