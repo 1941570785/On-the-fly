@@ -644,7 +644,6 @@ class DirectDensityController:
             and active_memory_stable_pose_reference
             and active_memory_low_marginal_representation
             and not anchor_changed
-            and not support_triggered
             and gap_safe
             and not starvation_risk
             and density_state != "below_lower"
@@ -733,6 +732,8 @@ class DirectDensityController:
             "source_gap_to_last_keyframe": source_gap_to_last_keyframe,
             "main_chain_gap_before": main_chain_gap_before,
             "main_chain_gap_after_if_hold": main_chain_gap_after_if_hold,
+            "anchor_changed": anchor_changed,
+            "support_triggered": support_triggered,
             "density_state": density_state,
             "direct_admit_candidate": runtime_action in {"direct_admit", "current_frame_surrogate_commit"},
             "baseline_direct_admit_candidate": bool(baseline_should_add and runtime_action == "direct_admit"),
