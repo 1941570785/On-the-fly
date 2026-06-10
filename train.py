@@ -1743,6 +1743,9 @@ if __name__ == "__main__":
                             "active_memory_context": bool(
                                 dbg.get("active_memory_context", False)
                             ),
+                            "active_memory_context_candidate": bool(
+                                dbg.get("active_memory_context_candidate", False)
+                            ),
                             "active_memory_frame_role": str(
                                 dbg.get("active_memory_frame_role", "")
                             ),
@@ -1751,6 +1754,21 @@ if __name__ == "__main__":
                             ),
                             "active_memory_redundancy_pressure": float(
                                 dbg.get("active_memory_redundancy_pressure", 0.0)
+                            ),
+                            "active_memory_redundancy_pressure_high": bool(
+                                dbg.get("active_memory_redundancy_pressure_high", False)
+                            ),
+                            "active_memory_low_parallax": bool(
+                                dbg.get("active_memory_low_parallax", False)
+                            ),
+                            "active_memory_stable_pose_reference": bool(
+                                dbg.get("active_memory_stable_pose_reference", False)
+                            ),
+                            "active_memory_low_representation_value": bool(
+                                dbg.get("active_memory_low_representation_value", False)
+                            ),
+                            "active_memory_low_marginal_representation": bool(
+                                dbg.get("active_memory_low_marginal_representation", False)
                             ),
                             "density_only_hold_disabled": bool(
                                 dbg.get("density_only_hold_disabled", False)

@@ -615,6 +615,9 @@ class DirectDensityController:
             + 0.18 * _clamp01((local_density_before - 35.0) / 45.0)
         )
         active_memory_low_parallax = bool(disp_ratio <= 0.85 and motion_value <= 0.45)
+        active_memory_redundancy_pressure_high = bool(
+            active_memory_redundancy_pressure >= 0.70
+        )
         active_memory_stable_pose_reference = bool(
             risk_score <= 0.25
             and semantic_Q >= 0.85
@@ -627,17 +630,28 @@ class DirectDensityController:
             representation_value < self.representation_value_hold_max
             and novelty_value <= 0.25
         )
-        active_memory_context = bool(
+        active_memory_low_marginal_representation = bool(
+            active_memory_low_representation_value
+            and active_memory_redundancy_pressure_high
+        )
+        value_hold_budget_available = bool(
+            self._budget.value_hold_used < self.value_hold_budget_per_100
+        )
+        active_memory_context_candidate = bool(
             self.is_pose_rep_active_memory_v1
             and int(frame_id) >= 300
-            and source_gap_to_last_keyframe <= self.redundant_source_gap
             and density_before >= 55.0
             and local_density_before >= 45.0
-            and active_memory_low_parallax
             and active_memory_stable_pose_reference
-            and active_memory_low_representation_value
+            and active_memory_low_marginal_representation
             and not anchor_changed
             and not support_triggered
+            and gap_safe
+            and not starvation_risk
+            and density_state != "below_lower"
+        )
+        active_memory_context = bool(
+            active_memory_context_candidate and value_hold_budget_available
         )
         active_memory_marginal_value = representation_value
         active_memory_frame_role = (
@@ -659,9 +673,6 @@ class DirectDensityController:
                 and disp_ratio >= 1.75
             )
         )
-        value_hold_budget_available = bool(
-            self._budget.value_hold_used < self.value_hold_budget_per_100
-        )
         bootstrap_value_hold_guard = int(frame_id) <= 100
         value_hold_allowed = bool(
             not representation_value_high
@@ -679,7 +690,7 @@ class DirectDensityController:
             )
         )
         block_reason = ""
-        if high_recent_growth_representation_guard:
+        if high_recent_growth_representation_guard and not active_memory_context:
             block_reason = "high_recent_growth_representation_guard"
         elif low_semantic_coverage_representation_guard:
             block_reason = "low_semantic_coverage_representation_guard"
@@ -740,12 +751,15 @@ class DirectDensityController:
             "match_support_score": match_support,
             "pose_support_score": pose_support,
             "active_memory_context": active_memory_context,
+            "active_memory_context_candidate": active_memory_context_candidate,
             "active_memory_frame_role": active_memory_frame_role,
             "active_memory_marginal_value": active_memory_marginal_value,
             "active_memory_redundancy_pressure": active_memory_redundancy_pressure,
+            "active_memory_redundancy_pressure_high": active_memory_redundancy_pressure_high,
             "active_memory_low_parallax": active_memory_low_parallax,
             "active_memory_stable_pose_reference": active_memory_stable_pose_reference,
             "active_memory_low_representation_value": active_memory_low_representation_value,
+            "active_memory_low_marginal_representation": active_memory_low_marginal_representation,
             "source_redundancy_score": source_redundancy,
             "representation_redundancy_penalty": redundancy_penalty,
             "representation_value_score": representation_value,

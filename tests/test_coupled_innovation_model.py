@@ -1022,6 +1022,53 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertTrue(decision.debug["active_memory_context"])
         self.assertLess(decision.debug["active_memory_marginal_value"], 0.35)
 
+    def test_active_memory_v1_holds_high_motion_low_marginal_representation_frame(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v1")
+        )
+
+        decision = controller.decide(
+            frame_id=520,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=68.0,
+            local_density_before=88.0,
+            local_window_density=88.0,
+            local_window_keyframes=88,
+            local_window_gap_max=2.0,
+            local_window_gap_after_if_hold=2.0,
+            keyframe_growth_recent=42,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=1,
+            main_chain_gap_before=1.0,
+            main_chain_gap_after_if_hold=2.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=60.0,
+            displacement_threshold=30.0,
+            num_matches=2600,
+            min_num_inliers=100,
+            pose_inliers=1800,
+            novelty_proxy=0.0,
+            current_keyframe_count=350,
+            semantic_scores={
+                "R_t": 0.02,
+                "V_t": 0.96,
+                "Q_t": 0.997,
+                "C_t": 0.99,
+                "B_R_t": 1.0,
+            },
+        )
+
+        self.assertFalse(decision.finalize)
+        self.assertEqual(decision.decision, "hold_low_representation_value")
+        self.assertEqual(decision.debug["active_memory_frame_role"], "tracking_only")
+        self.assertTrue(decision.debug["active_memory_context"])
+        self.assertTrue(decision.debug["active_memory_low_marginal_representation"])
+        self.assertFalse(decision.debug["active_memory_low_parallax"])
+
     def test_active_memory_v1_keeps_high_novelty_gap_frame_as_representation(self):
         controller = DirectDensityController(
             _args(paper_aligned_direct_density_control="pose_rep_active_memory_v1")
