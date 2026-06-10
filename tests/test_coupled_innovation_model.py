@@ -155,6 +155,23 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertEqual(args.paper_aligned_semantic_recovery_attempts_per_tick, 2)
         self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_value_decouple_v3")
 
+    def test_cli_accepts_long_video_active_memory_direct_density_mode(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_direct_density_control",
+                "pose_rep_active_memory_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_active_memory_v1")
+
     def test_runtime_gate_applies_coupled_preset_to_args_before_subsystems_use_them(self):
         args = _args(paper_aligned_tau_R_low=0.31, paper_aligned_recovery_delay_frames=4)
 
@@ -957,6 +974,98 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertTrue(decision.finalize)
         self.assertFalse(decision.debug["hold_density_high"])
         self.assertEqual(decision.decision, "finalize_high_representation_value")
+
+    def test_active_memory_v1_holds_low_parallax_redundant_tum_frame(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v1")
+        )
+
+        decision = controller.decide(
+            frame_id=900,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=72.0,
+            local_density_before=72.0,
+            local_window_density=72.0,
+            local_window_keyframes=72,
+            local_window_gap_max=2.0,
+            local_window_gap_after_if_hold=2.0,
+            keyframe_growth_recent=28,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=1,
+            main_chain_gap_before=1.0,
+            main_chain_gap_after_if_hold=2.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=18.0,
+            displacement_threshold=30.0,
+            num_matches=2600,
+            min_num_inliers=100,
+            pose_inliers=1800,
+            novelty_proxy=0.08,
+            current_keyframe_count=650,
+            semantic_scores={
+                "R_t": 0.05,
+                "V_t": 0.92,
+                "Q_t": 0.96,
+                "C_t": 0.96,
+                "B_R_t": 0.95,
+            },
+        )
+
+        self.assertFalse(decision.finalize)
+        self.assertEqual(decision.decision, "hold_low_representation_value")
+        self.assertEqual(decision.reason, "pose_reference_only_low_representation_value")
+        self.assertEqual(decision.debug["active_memory_frame_role"], "tracking_only")
+        self.assertTrue(decision.debug["active_memory_context"])
+        self.assertLess(decision.debug["active_memory_marginal_value"], 0.35)
+
+    def test_active_memory_v1_keeps_high_novelty_gap_frame_as_representation(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v1")
+        )
+
+        decision = controller.decide(
+            frame_id=900,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=72.0,
+            local_density_before=72.0,
+            local_window_density=72.0,
+            local_window_keyframes=72,
+            local_window_gap_max=2.0,
+            local_window_gap_after_if_hold=8.0,
+            keyframe_growth_recent=28,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=6,
+            main_chain_gap_before=4.0,
+            main_chain_gap_after_if_hold=8.0,
+            anchor_changed=False,
+            support_triggered=True,
+            median_displacement=62.0,
+            displacement_threshold=30.0,
+            num_matches=1400,
+            min_num_inliers=100,
+            pose_inliers=800,
+            novelty_proxy=0.78,
+            current_keyframe_count=650,
+            semantic_scores={
+                "R_t": 0.18,
+                "V_t": 0.88,
+                "Q_t": 0.82,
+                "C_t": 0.72,
+                "B_R_t": 0.80,
+            },
+        )
+
+        self.assertTrue(decision.finalize)
+        self.assertEqual(decision.debug["active_memory_frame_role"], "representation")
+        self.assertFalse(decision.debug["active_memory_context"])
+        self.assertGreaterEqual(decision.debug["active_memory_marginal_value"], 0.35)
 
     def test_trace_flush_records_coupled_contract_and_stage_metric_contract(self):
         with tempfile.TemporaryDirectory() as td:

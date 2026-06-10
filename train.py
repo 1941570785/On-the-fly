@@ -1740,6 +1740,18 @@ if __name__ == "__main__":
                             "long_stream_low_growth_context": bool(
                                 dbg.get("long_stream_low_growth_context", False)
                             ),
+                            "active_memory_context": bool(
+                                dbg.get("active_memory_context", False)
+                            ),
+                            "active_memory_frame_role": str(
+                                dbg.get("active_memory_frame_role", "")
+                            ),
+                            "active_memory_marginal_value": float(
+                                dbg.get("active_memory_marginal_value", 0.0)
+                            ),
+                            "active_memory_redundancy_pressure": float(
+                                dbg.get("active_memory_redundancy_pressure", 0.0)
+                            ),
                             "density_only_hold_disabled": bool(
                                 dbg.get("density_only_hold_disabled", False)
                             ),

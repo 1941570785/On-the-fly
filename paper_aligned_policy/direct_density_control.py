@@ -87,7 +87,11 @@ class DirectDensityController:
             self.baseline_relative_lower_ratio = 0.55
             if self.prev_desc_update_on_hold == "off":
                 self.prev_desc_update_on_hold = "light"
-        if self.mode in {"pose_rep_value_decouple_v2", "pose_rep_value_decouple_v3"}:
+        if self.mode in {
+            "pose_rep_value_decouple_v2",
+            "pose_rep_value_decouple_v3",
+            "pose_rep_active_memory_v1",
+        }:
             self.density_lower = 16.0
             self.density_target = 30.0
             self.density_upper = 70.0
@@ -145,7 +149,11 @@ class DirectDensityController:
             self.soft_gap_threshold = 5
             self.hard_gap_threshold = 15
             self.gap_critical_limit = 15
-        if self.mode in {"pose_rep_value_decouple_v2", "pose_rep_value_decouple_v3"}:
+        if self.mode in {
+            "pose_rep_value_decouple_v2",
+            "pose_rep_value_decouple_v3",
+            "pose_rep_active_memory_v1",
+        }:
             self.local_density_lower = 12.0
             self.soft_gap_threshold = 8
             self.hard_gap_threshold = 18
@@ -162,7 +170,7 @@ class DirectDensityController:
                 getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 5)
                 or 5
             )
-        if self.mode == "pose_rep_value_decouple_v3":
+        if self.mode in {"pose_rep_value_decouple_v3", "pose_rep_active_memory_v1"}:
             self.value_hold_budget_per_100 = int(
                 getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 48)
                 or 48
@@ -174,6 +182,15 @@ class DirectDensityController:
             self.pose_reference_value_min = float(
                 getattr(args, "paper_aligned_direct_pose_reference_value_min", 0.65)
                 or 0.65
+            )
+        if self.mode == "pose_rep_active_memory_v1":
+            self.value_hold_budget_per_100 = int(
+                getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 85)
+                or 85
+            )
+            self.representation_value_hold_max = float(
+                getattr(args, "paper_aligned_direct_representation_value_hold_max", 0.38)
+                or 0.38
             )
         if self.mode in {"target_band_v2_2_1", "target_band_v2_2_2", "target_band_v2_2_2_1"}:
             self.gap_critical_limit = self.hard_gap_threshold
@@ -219,15 +236,27 @@ class DirectDensityController:
             "pose_rep_decouple_v1",
             "pose_rep_value_decouple_v2",
             "pose_rep_value_decouple_v3",
+            "pose_rep_active_memory_v1",
         }
 
     @property
     def is_pose_rep_value_decouple(self) -> bool:
-        return self.mode in {"pose_rep_value_decouple_v2", "pose_rep_value_decouple_v3"}
+        return self.mode in {
+            "pose_rep_value_decouple_v2",
+            "pose_rep_value_decouple_v3",
+            "pose_rep_active_memory_v1",
+        }
 
     @property
     def is_pose_rep_value_v3(self) -> bool:
-        return self.mode == "pose_rep_value_decouple_v3"
+        return self.mode in {
+            "pose_rep_value_decouple_v3",
+            "pose_rep_active_memory_v1",
+        }
+
+    @property
+    def is_pose_rep_active_memory_v1(self) -> bool:
+        return self.mode == "pose_rep_active_memory_v1"
 
     @property
     def is_v222_family(self) -> bool:
@@ -578,9 +607,45 @@ class DirectDensityController:
             and semantic_BR >= 0.8
             and not low_semantic_coverage_representation_guard
         )
+        active_memory_redundancy_pressure = _clamp01(
+            0.28 * source_redundancy
+            + 0.20 * pose_support
+            + 0.16 * match_support
+            + 0.18 * _clamp01((density_before - 45.0) / 35.0)
+            + 0.18 * _clamp01((local_density_before - 35.0) / 45.0)
+        )
+        active_memory_low_parallax = bool(disp_ratio <= 0.85 and motion_value <= 0.45)
+        active_memory_stable_pose_reference = bool(
+            risk_score <= 0.25
+            and semantic_Q >= 0.85
+            and semantic_C >= 0.85
+            and semantic_BR >= 0.80
+            and pose_support >= 0.75
+            and match_support >= 0.75
+        )
+        active_memory_low_representation_value = bool(
+            representation_value < self.representation_value_hold_max
+            and novelty_value <= 0.25
+        )
+        active_memory_context = bool(
+            self.is_pose_rep_active_memory_v1
+            and int(frame_id) >= 300
+            and source_gap_to_last_keyframe <= self.redundant_source_gap
+            and density_before >= 55.0
+            and local_density_before >= 45.0
+            and active_memory_low_parallax
+            and active_memory_stable_pose_reference
+            and active_memory_low_representation_value
+            and not anchor_changed
+            and not support_triggered
+        )
+        active_memory_marginal_value = representation_value
+        active_memory_frame_role = (
+            "tracking_only" if active_memory_context else "representation"
+        )
         representation_value_high = bool(
             representation_value >= self.representation_value_hold_max
-            or high_recent_growth_representation_guard
+            or (high_recent_growth_representation_guard and not active_memory_context)
             or low_semantic_coverage_representation_guard
             or anchor_boundary_representation_guard
             or (
@@ -607,7 +672,11 @@ class DirectDensityController:
             and density_state != "below_lower"
             and value_hold_budget_available
             and not bootstrap_value_hold_guard
-            and (not self.is_pose_rep_value_v3 or long_stream_low_growth_context)
+            and (
+                not self.is_pose_rep_value_v3
+                or long_stream_low_growth_context
+                or active_memory_context
+            )
         )
         block_reason = ""
         if high_recent_growth_representation_guard:
@@ -632,6 +701,8 @@ class DirectDensityController:
             block_reason = "early_bootstrap_value_hold_guard"
         elif long_sequence_maturity_guard:
             block_reason = "long_sequence_maturity_guard"
+        elif active_memory_context:
+            block_reason = "active_memory_tracking_only_context"
 
         dbg: dict[str, Any] = {
             "mode": self.mode,
@@ -668,6 +739,13 @@ class DirectDensityController:
             "motion_value_score": motion_value,
             "match_support_score": match_support,
             "pose_support_score": pose_support,
+            "active_memory_context": active_memory_context,
+            "active_memory_frame_role": active_memory_frame_role,
+            "active_memory_marginal_value": active_memory_marginal_value,
+            "active_memory_redundancy_pressure": active_memory_redundancy_pressure,
+            "active_memory_low_parallax": active_memory_low_parallax,
+            "active_memory_stable_pose_reference": active_memory_stable_pose_reference,
+            "active_memory_low_representation_value": active_memory_low_representation_value,
             "source_redundancy_score": source_redundancy,
             "representation_redundancy_penalty": redundancy_penalty,
             "representation_value_score": representation_value,
