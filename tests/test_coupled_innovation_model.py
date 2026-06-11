@@ -13,6 +13,31 @@ from paper_aligned_policy import config as policy_config
 from paper_aligned_policy.direct_density_control import DirectDensityController
 from paper_aligned_policy.recovery_commit_control import RecoveryCommitController
 from paper_aligned_policy.runtime_gate import PaperAlignedRuntimeGate
+from poses.feature_detector import DescribedKeypoints
+from poses.pose_initializer import PoseInitializer
+
+
+def _pose_pool_desc(num_keypoints=128, support_count=96, match_score=120):
+    import torch
+
+    desc = DescribedKeypoints(
+        torch.zeros(num_keypoints, 2),
+        torch.ones(num_keypoints, 8),
+    )
+    idx = torch.arange(min(support_count, num_keypoints))
+    desc.update_3D_pts(
+        torch.ones(len(idx), 3),
+        torch.ones(len(idx)),
+        torch.ones(len(idx)),
+        idx,
+    )
+    desc._test_match_score = match_score
+    return desc
+
+
+class _PosePoolMatcher:
+    def evaluate_match(self, ref_desc, _curr_desc):
+        return float(getattr(ref_desc, "_test_match_score", 0.0))
 
 
 def _args(**overrides):
@@ -1204,6 +1229,110 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertEqual(decision.debug["active_memory_frame_role"], "representation")
         self.assertFalse(decision.debug["active_memory_context"])
         self.assertGreaterEqual(decision.debug["active_memory_marginal_value"], 0.35)
+
+    def test_pose_only_reference_pool_registers_and_selects_tracking_only_frames(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v1")
+        )
+        curr_desc = _pose_pool_desc(match_score=0)
+        rt = torch.eye(4)
+
+        rejected = gate.register_pose_only_reference(
+            frame_id=310,
+            info={"is_test": False, "image_name": "rejected"},
+            desc_kpts=_pose_pool_desc(support_count=120, match_score=500),
+            Rt=rt,
+            density_debug={
+                "active_memory_context": False,
+                "active_memory_frame_role": "representation",
+            },
+            pose_debug={"num_pnp_inliers": 100, "num_miniba_inliers": 100},
+        )
+        accepted = gate.register_pose_only_reference(
+            frame_id=320,
+            info={"is_test": False, "image_name": "accepted"},
+            desc_kpts=_pose_pool_desc(support_count=120, match_score=500),
+            Rt=rt,
+            density_debug={
+                "active_memory_context": True,
+                "active_memory_frame_role": "tracking_only",
+            },
+            pose_debug={"num_pnp_inliers": 100, "num_miniba_inliers": 100},
+        )
+
+        selected = gate.select_pose_only_references(
+            frame_id=321,
+            curr_desc_kpts=curr_desc,
+            matcher=_PosePoolMatcher(),
+        )
+
+        self.assertFalse(rejected)
+        self.assertTrue(accepted)
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].info["_paper_aligned_source_frame_id"], 320)
+        self.assertEqual(selected[0].info["_paper_aligned_commit_origin"], "pose_only_reference")
+        self.assertEqual(gate.pose_only_reference_pool_summary()["pool_size"], 1)
+
+    def test_pose_only_reference_pool_expires_caps_and_ranks_by_match_support(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v1")
+        )
+        rt = torch.eye(4)
+        for frame_id in range(100, 170):
+            gate.register_pose_only_reference(
+                frame_id=frame_id,
+                info={"is_test": False, "image_name": str(frame_id)},
+                desc_kpts=_pose_pool_desc(
+                    support_count=120,
+                    match_score=frame_id,
+                ),
+                Rt=rt,
+                density_debug={
+                    "active_memory_context": True,
+                    "active_memory_frame_role": "tracking_only",
+                },
+                pose_debug={"num_pnp_inliers": 100, "num_miniba_inliers": 100},
+            )
+
+        selected = gate.select_pose_only_references(
+            frame_id=170,
+            curr_desc_kpts=_pose_pool_desc(match_score=0),
+            matcher=_PosePoolMatcher(),
+        )
+        expired = gate.select_pose_only_references(
+            frame_id=600,
+            curr_desc_kpts=_pose_pool_desc(match_score=0),
+            matcher=_PosePoolMatcher(),
+        )
+
+        summary = gate.pose_only_reference_pool_summary()
+        self.assertLessEqual(summary["pool_size"], 64)
+        self.assertEqual([ref.info["_paper_aligned_source_frame_id"] for ref in selected], [169, 168])
+        self.assertEqual(expired, [])
+        self.assertEqual(gate.pose_only_reference_pool_summary()["pool_size"], 0)
+
+    def test_pose_initializer_records_incremental_pose_support_for_pose_only_pool(self):
+        import torch
+
+        initializer = object.__new__(PoseInitializer)
+        match_indices = torch.tensor([2, 5, 8])
+        pts3d = torch.ones(3, 3)
+        pts_conf = torch.tensor([0.9, 0.8, 0.7])
+
+        initializer._record_incremental_pose_support(match_indices, pts3d, pts_conf)
+
+        support = initializer.last_incremental_pose_support
+        self.assertEqual(support["match_indices"].tolist(), [2, 5, 8])
+        self.assertEqual(support["pts3d"].shape, (3, 3))
+        self.assertAlmostEqual(float(support["pts_conf"][0]), 0.9, places=5)
+        self.assertAlmostEqual(float(support["pts_conf"][1]), 0.8, places=5)
+        self.assertAlmostEqual(float(support["pts_conf"][2]), 0.7, places=5)
+        pts3d[0, 0] = 42.0
+        self.assertNotEqual(float(support["pts3d"][0, 0]), 42.0)
 
     def test_trace_flush_records_coupled_contract_and_stage_metric_contract(self):
         with tempfile.TemporaryDirectory() as td:

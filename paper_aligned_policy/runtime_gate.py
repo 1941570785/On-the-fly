@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from .config import apply_coupled_innovation_defaults, resolve_coupled_innovation_config
@@ -67,6 +69,14 @@ class PaperAlignedRuntimeGate:
         self.direct_density_control_v2_2_1_events: list[dict[str, Any]] = []
         self.direct_density_control_v2_2_2_events: list[dict[str, Any]] = []
         self.direct_density_control_v2_2_2_1_events: list[dict[str, Any]] = []
+        self.pose_only_reference_pool: list[Any] = []
+        self.pose_only_reference_pool_max_size = 64
+        self.pose_only_reference_ttl_frames = 360
+        self.pose_only_reference_min_3d_points = 80
+        self.pose_only_reference_max_per_query = 2
+        self.pose_only_reference_min_match_score = 32.0
+        self.pose_only_reference_registered_count = 0
+        self.pose_only_reference_selected_count = 0
         self.trace_unavailable_reasons: dict[str, str] = {
             "match_graph_neighbor_ids": "No persistent match graph object is exposed; pairwise matches live on DescribedKeypoints.matches.",
             "match_graph_id": "No stable match graph id exists for keyframes in the current runtime.",
@@ -937,6 +947,242 @@ class PaperAlignedRuntimeGate:
     def append_direct_density_control_v2_2_2_1_event(self, payload: dict[str, Any]) -> None:
         self.direct_density_control_v2_2_2_1_events.append(dict(payload))
 
+    def _pose_only_pool_enabled(self) -> bool:
+        return bool(
+            getattr(self.direct_density_controller, "is_pose_rep_active_memory_v1", False)
+        )
+
+    def _clone_pose_only_value(self, value: Any) -> Any:
+        if hasattr(value, "detach") and hasattr(value, "clone"):
+            return value.detach().clone()
+        if hasattr(value, "clone"):
+            return value.clone()
+        return copy.deepcopy(value)
+
+    def _clone_pose_only_desc(self, desc_kpts: Any) -> Any:
+        desc = copy.copy(desc_kpts)
+        for name in ("kpts", "feats", "valid", "has_pt3d", "pts_conf", "pts3d", "depth"):
+            if hasattr(desc_kpts, name):
+                setattr(desc, name, self._clone_pose_only_value(getattr(desc_kpts, name)))
+        desc.matches = {}
+        return desc
+
+    def _pose_only_support_count(self, desc_kpts: Any) -> int:
+        has_pt3d = getattr(desc_kpts, "has_pt3d", None)
+        if has_pt3d is None:
+            return 0
+        try:
+            total = has_pt3d.sum()
+            return int(total.item() if hasattr(total, "item") else total)
+        except Exception:
+            return 0
+
+    def _tensor_float(self, value: Any, default: float = 0.0) -> float:
+        try:
+            if hasattr(value, "item"):
+                return float(value.item())
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _purge_pose_only_references(self, frame_id: int) -> None:
+        min_source_frame = int(frame_id) - int(self.pose_only_reference_ttl_frames)
+        self.pose_only_reference_pool = [
+            ref
+            for ref in self.pose_only_reference_pool
+            if int(ref.info.get("_paper_aligned_source_frame_id", -1)) >= min_source_frame
+        ]
+
+    def _apply_pose_support_to_desc(self, desc_kpts: Any, pose_support: dict[str, Any] | None) -> None:
+        if not pose_support or not hasattr(desc_kpts, "update_3D_pts"):
+            return
+        match_indices = pose_support.get("match_indices")
+        pts3d = pose_support.get("pts3d")
+        pts_conf = pose_support.get("pts_conf")
+        if match_indices is None or pts3d is None or pts_conf is None:
+            return
+        try:
+            if hasattr(match_indices, "numel") and int(match_indices.numel()) == 0:
+                return
+            depth = pose_support.get("depth")
+            if depth is None and hasattr(pts_conf, "new_zeros"):
+                depth = pts_conf.new_zeros(pts_conf.shape)
+            if depth is None:
+                depth = pts_conf
+            desc_kpts.update_3D_pts(pts3d, depth, pts_conf, match_indices)
+        except Exception:
+            return
+
+    def register_pose_only_reference(
+        self,
+        *,
+        frame_id: int,
+        info: dict[str, Any],
+        desc_kpts: Any,
+        Rt: Any,
+        density_debug: dict[str, Any] | None = None,
+        pose_debug: dict[str, Any] | None = None,
+        pose_support: dict[str, Any] | None = None,
+    ) -> bool:
+        debug = dict(density_debug or {})
+        reason = ""
+        if not self._pose_only_pool_enabled():
+            reason = "pool_disabled"
+        elif bool(info.get("is_test", False)):
+            reason = "test_frame"
+        elif not bool(debug.get("active_memory_context", False)):
+            reason = "not_active_memory_context"
+        elif str(debug.get("active_memory_frame_role", "")) != "tracking_only":
+            reason = "not_tracking_only_role"
+        elif desc_kpts is None or Rt is None:
+            reason = "missing_pose_reference_payload"
+
+        if reason:
+            self.pose_reference_pool_events.append(
+                {
+                    "event_type": "pose_only_register",
+                    "frame_id": int(frame_id),
+                    "registered": False,
+                    "block_reason": reason,
+                    "pool_size_after": len(self.pose_only_reference_pool),
+                }
+            )
+            return False
+
+        self._purge_pose_only_references(int(frame_id))
+        desc = self._clone_pose_only_desc(desc_kpts)
+        self._apply_pose_support_to_desc(desc, pose_support)
+        support_count = self._pose_only_support_count(desc)
+        if support_count < int(self.pose_only_reference_min_3d_points):
+            self.pose_reference_pool_events.append(
+                {
+                    "event_type": "pose_only_register",
+                    "frame_id": int(frame_id),
+                    "registered": False,
+                    "block_reason": "insufficient_3d_support",
+                    "pose_only_3d_support_count": support_count,
+                    "pool_size_after": len(self.pose_only_reference_pool),
+                }
+            )
+            return False
+
+        try:
+            r_w2c = Rt[:3, :2].detach().clone()
+            t_w2c = Rt[:3, 3].detach().clone()
+        except Exception:
+            r_w2c = getattr(Rt, "rW2C", None)
+            t_w2c = getattr(Rt, "tW2C", None)
+        ref_info = dict(info)
+        ref_info["_paper_aligned_source_frame_id"] = int(frame_id)
+        ref_info["_paper_aligned_commit_origin"] = "pose_only_reference"
+        ref_info["_paper_aligned_pose_only_reference"] = True
+        ref_info["_paper_aligned_support_eligible_recovery_keyframe"] = False
+        reference = SimpleNamespace(
+            index=-(1_000_000 + int(frame_id)),
+            info=ref_info,
+            desc_kpts=desc,
+            rW2C=r_w2c,
+            tW2C=t_w2c,
+            is_test=bool(info.get("is_test", False)),
+        )
+        self.pose_only_reference_pool.append(reference)
+        if len(self.pose_only_reference_pool) > int(self.pose_only_reference_pool_max_size):
+            self.pose_only_reference_pool = self.pose_only_reference_pool[
+                -int(self.pose_only_reference_pool_max_size) :
+            ]
+        self.pose_only_reference_registered_count += 1
+        self.pose_reference_pool_events.append(
+            {
+                "event_type": "pose_only_register",
+                "frame_id": int(frame_id),
+                "reference_keyframe_id": int(reference.index),
+                "reference_source_frame_id": int(frame_id),
+                "reference_commit_origin": "pose_only_reference",
+                "registered": True,
+                "pose_only_3d_support_count": support_count,
+                "pose_only_pool_size_after": len(self.pose_only_reference_pool),
+                "pose_only_pnp_inliers": int((pose_debug or {}).get("num_pnp_inliers", 0) or 0),
+                "pose_only_miniba_inliers": int((pose_debug or {}).get("num_miniba_inliers", 0) or 0),
+            }
+        )
+        return True
+
+    def select_pose_only_references(
+        self,
+        *,
+        frame_id: int,
+        curr_desc_kpts: Any,
+        matcher: Any,
+        max_refs: int | None = None,
+    ) -> list[Any]:
+        if not self._pose_only_pool_enabled() or curr_desc_kpts is None or matcher is None:
+            return []
+        self._purge_pose_only_references(int(frame_id))
+        limit = int(max_refs or self.pose_only_reference_max_per_query)
+        scored: list[tuple[float, int, Any]] = []
+        candidate_count = 0
+        for ref in self.pose_only_reference_pool:
+            source_frame_id = int(ref.info.get("_paper_aligned_source_frame_id", -1))
+            if source_frame_id >= int(frame_id):
+                continue
+            support_count = self._pose_only_support_count(ref.desc_kpts)
+            score = self._tensor_float(matcher.evaluate_match(ref.desc_kpts, curr_desc_kpts))
+            candidate_count += 1
+            selected = bool(
+                support_count >= int(self.pose_only_reference_min_3d_points)
+                and score >= float(self.pose_only_reference_min_match_score)
+            )
+            if selected:
+                scored.append((score, source_frame_id, ref))
+        scored.sort(key=lambda item: (-item[0], -item[1]))
+        selected_refs = [item[2] for item in scored[:limit]]
+        if candidate_count or selected_refs:
+            self.pose_reference_pool_events.append(
+                {
+                    "event_type": "pose_only_select_summary",
+                    "frame_id": int(frame_id),
+                    "pose_only_pool_size": len(self.pose_only_reference_pool),
+                    "pose_only_candidate_count": int(candidate_count),
+                    "pose_only_selected_count": len(selected_refs),
+                    "pose_only_selected_source_frame_ids": [
+                        int(ref.info.get("_paper_aligned_source_frame_id", -1))
+                        for ref in selected_refs
+                    ],
+                    "pose_only_selected_reference_ids": [int(ref.index) for ref in selected_refs],
+                }
+            )
+            for score, _source_frame_id, ref in scored[:limit]:
+                self.pose_reference_pool_events.append(
+                    {
+                        "event_type": "pose_only_select_reference",
+                        "frame_id": int(frame_id),
+                        "reference_keyframe_id": int(ref.index),
+                        "reference_source_frame_id": int(
+                            ref.info.get("_paper_aligned_source_frame_id", -1)
+                        ),
+                        "reference_commit_origin": "pose_only_reference",
+                        "pose_only_match_score": float(score),
+                        "pose_only_3d_support_count": self._pose_only_support_count(
+                            ref.desc_kpts
+                        ),
+                        "candidate_selected": True,
+                    }
+                )
+        self.pose_only_reference_selected_count += len(selected_refs)
+        return selected_refs
+
+    def pose_only_reference_pool_summary(self) -> dict[str, Any]:
+        return {
+            "enabled": self._pose_only_pool_enabled(),
+            "pool_size": len(self.pose_only_reference_pool),
+            "registered_count": int(self.pose_only_reference_registered_count),
+            "selected_count": int(self.pose_only_reference_selected_count),
+            "max_size": int(self.pose_only_reference_pool_max_size),
+            "ttl_frames": int(self.pose_only_reference_ttl_frames),
+            "max_per_query": int(self.pose_only_reference_max_per_query),
+            "min_3d_points": int(self.pose_only_reference_min_3d_points),
+        }
+
     def flush_trace(self) -> None:
         if not self.trace_path:
             return
@@ -1000,6 +1246,7 @@ class PaperAlignedRuntimeGate:
             "direct_density_control_v2_2_1_events": self.direct_density_control_v2_2_1_events,
             "direct_density_control_v2_2_2_events": self.direct_density_control_v2_2_2_events,
             "direct_density_control_v2_2_2_1_events": self.direct_density_control_v2_2_2_1_events,
+            "pose_only_reference_pool_summary": self.pose_only_reference_pool_summary(),
             "trace_unavailable_reasons": self.trace_unavailable_reasons,
         }
         if self.semantic_policy is not None:

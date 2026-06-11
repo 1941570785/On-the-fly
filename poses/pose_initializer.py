@@ -84,6 +84,7 @@ class PoseInitializer():
         self.last_recovery_2d3d_support: dict[str, object] = {}
         self.last_recovery_pnp_consensus: dict[str, object] = {}
         self.last_recovery_ref_subset: list[dict[str, object]] = []
+        self.last_incremental_pose_support: dict[str, torch.Tensor] = {}
         self.recovery_defer_source_frame_id: int = -1
         self._last_pnp_Rt: torch.Tensor | None = None
         self.recovery_miniba_retry_min_2d3d = 500
@@ -93,6 +94,18 @@ class PoseInitializer():
         self.recovery_consensus_min_refs = 6
         self.recovery_consensus_min_total_valid_2d3d = 120
         self.recovery_probe_min_inlier_ratio = 0.03
+
+    def _record_incremental_pose_support(
+        self,
+        match_indices: torch.Tensor,
+        pts3d: torch.Tensor,
+        pts_conf: torch.Tensor,
+    ) -> None:
+        self.last_incremental_pose_support = {
+            "match_indices": match_indices.detach().clone(),
+            "pts3d": pts3d.detach().clone(),
+            "pts_conf": pts_conf.detach().clone(),
+        }
 
     def build_problem(self,
                       desc_kpts_list: list[DescribedKeypoints],
@@ -264,6 +277,7 @@ class PoseInitializer():
         Returns:
             Rt: 估计的位姿矩阵 [4, 4]，如果失败返回None
         """
+        self.last_incremental_pose_support = {}
         self.last_incremental_debug = {
             "failure_reason": "",
             "num_2d3d_correspondences": 0,
@@ -420,6 +434,16 @@ class PoseInitializer():
         # Check if we have sufficiently many inliers
         # 训练阶段要求足够内点以避免错误注册
         if is_test or mask.sum() > self.min_num_inliers:
+            valid_ba = uvs_ba[:, 0] >= 0
+            if bool(valid_ba.any()):
+                support_match_indices = match_indices[selected_indices][valid_ba] if len(xyz) >= self.num_pts_miniba_incr else match_indices
+                support_pts3d = xyz_ba[valid_ba]
+                support_conf = confs[selected_indices][valid_ba] if len(xyz) >= self.num_pts_miniba_incr else confs
+                self._record_incremental_pose_support(
+                    support_match_indices,
+                    support_pts3d,
+                    support_conf,
+                )
             # Return the pose of the current frame
             self.last_incremental_debug["failure_reason"] = ""
             return Rt

@@ -1521,9 +1521,17 @@ if __name__ == "__main__":
                 prev_keyframes = scene_model.get_prev_keyframes(
                     args.num_prev_keyframes_miniba_incr, True, desc_kpts
                 )
+                pose_only_refs = []
+                if runtime_gate is not None:
+                    pose_only_refs = runtime_gate.select_pose_only_references(
+                        frame_id=int(frameID),
+                        curr_desc_kpts=desc_kpts,
+                        matcher=scene_model.matcher,
+                    )
+                prev_keyframes_for_pose = list(prev_keyframes) + list(pose_only_refs)
                 if runtime_gate is not None:
                     _append_candidate_trace(frameID)
-                    _append_chosen_reference_trace(frameID, frameID, prev_keyframes)
+                    _append_chosen_reference_trace(frameID, frameID, prev_keyframes_for_pose)
                 increment_runtime(runtimes["tri"], start_time)
                 
                 start_time = time.time()
@@ -1531,7 +1539,7 @@ if __name__ == "__main__":
                 if runtime_gate is not None:
                     runtime_gate.mark_pose_attempt(frameID)
                 Rt = pose_initializer.initialize_incremental(
-                    prev_keyframes, desc_kpts, n_keyframes, info["is_test"], image
+                    prev_keyframes_for_pose, desc_kpts, n_keyframes, info["is_test"], image
                 )
                 if runtime_gate is not None:
                     runtime_gate.annotate_pose_debug(
@@ -1542,7 +1550,7 @@ if __name__ == "__main__":
                     if support_bridge_trace is not None:
                         ref_seed_count = sum(
                             1
-                            for kf in prev_keyframes
+                            for kf in prev_keyframes_for_pose
                             if _kf_is_seed(kf)
                         )
                         runtime_gate.append_matching_to_pose_path_bridge_event(
@@ -1651,6 +1659,36 @@ if __name__ == "__main__":
                                 trace_ev["density_hold_recovery_enqueued"] = False
                                 trace_ev["density_hold_recovery_bridge_tag"] = "pose_only_tracking_hold"
                                 density_hold_recovery_bridge_tag = "pose_only_tracking_hold"
+                        pose_only_reference_registered = False
+                        pose_only_reference_pool_size = 0
+                        if (
+                            not direct_keyframe_finalized
+                            and held_bridge
+                            and runtime_gate.direct_density_controller.is_pose_rep_active_memory_v1
+                        ):
+                            pose_only_reference_registered = runtime_gate.register_pose_only_reference(
+                                frame_id=int(frameID),
+                                info=info,
+                                desc_kpts=desc_kpts,
+                                Rt=Rt,
+                                density_debug=dbg,
+                                pose_debug=pose_debug_incr,
+                                pose_support=getattr(
+                                    pose_initializer,
+                                    "last_incremental_pose_support",
+                                    {},
+                                ),
+                            )
+                            pose_only_reference_pool_size = int(
+                                runtime_gate.pose_only_reference_pool_summary()["pool_size"]
+                            )
+                            if trace_ev is not None:
+                                trace_ev["pose_only_reference_registered"] = bool(
+                                    pose_only_reference_registered
+                                )
+                                trace_ev["pose_only_reference_pool_size"] = int(
+                                    pose_only_reference_pool_size
+                                )
                         v2_payload = {
                             "frame_id": int(frameID),
                             "source_frame_id": int(frameID),
@@ -1812,6 +1850,15 @@ if __name__ == "__main__":
                                 density_hold_recovery_enqueued
                             ),
                             "density_hold_recovery_bridge_tag": density_hold_recovery_bridge_tag,
+                            "pose_only_reference_registered": bool(
+                                pose_only_reference_registered
+                            ),
+                            "pose_only_reference_pool_size": int(
+                                pose_only_reference_pool_size
+                            ),
+                            "pose_only_reference_selected_count": int(
+                                len(pose_only_refs) if "pose_only_refs" in locals() else 0
+                            ),
                         }
                         if runtime_gate.direct_density_controller.is_v2221:
                             v2_payload.update(
