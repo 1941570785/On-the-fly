@@ -17,7 +17,7 @@ from poses.feature_detector import DescribedKeypoints
 from poses.pose_initializer import PoseInitializer
 
 
-def _pose_pool_desc(num_keypoints=128, support_count=96, match_score=120):
+def _pose_pool_desc(num_keypoints=768, support_count=512, match_score=220):
     import torch
 
     desc = DescribedKeypoints(
@@ -1242,7 +1242,7 @@ class CoupledInnovationModelTests(unittest.TestCase):
         rejected = gate.register_pose_only_reference(
             frame_id=310,
             info={"is_test": False, "image_name": "rejected"},
-            desc_kpts=_pose_pool_desc(support_count=120, match_score=500),
+            desc_kpts=_pose_pool_desc(support_count=600, match_score=500),
             Rt=rt,
             density_debug={
                 "active_memory_context": False,
@@ -1253,7 +1253,7 @@ class CoupledInnovationModelTests(unittest.TestCase):
         accepted = gate.register_pose_only_reference(
             frame_id=320,
             info={"is_test": False, "image_name": "accepted"},
-            desc_kpts=_pose_pool_desc(support_count=120, match_score=500),
+            desc_kpts=_pose_pool_desc(support_count=600, match_score=500),
             Rt=rt,
             density_debug={
                 "active_memory_context": True,
@@ -1262,14 +1262,20 @@ class CoupledInnovationModelTests(unittest.TestCase):
             pose_debug={"num_pnp_inliers": 100, "num_miniba_inliers": 100},
         )
 
-        selected = gate.select_pose_only_references(
+        immediate = gate.select_pose_only_references(
             frame_id=321,
+            curr_desc_kpts=curr_desc,
+            matcher=_PosePoolMatcher(),
+        )
+        selected = gate.select_pose_only_references(
+            frame_id=330,
             curr_desc_kpts=curr_desc,
             matcher=_PosePoolMatcher(),
         )
 
         self.assertFalse(rejected)
         self.assertTrue(accepted)
+        self.assertEqual(immediate, [])
         self.assertEqual(len(selected), 1)
         self.assertGreaterEqual(selected[0].index, 0)
         self.assertEqual(selected[0].info["_paper_aligned_source_frame_id"], 320)
@@ -1288,8 +1294,8 @@ class CoupledInnovationModelTests(unittest.TestCase):
                 frame_id=frame_id,
                 info={"is_test": False, "image_name": str(frame_id)},
                 desc_kpts=_pose_pool_desc(
-                    support_count=120,
-                    match_score=frame_id,
+                    support_count=600,
+                    match_score=frame_id + 100,
                 ),
                 Rt=rt,
                 density_debug={
@@ -1300,7 +1306,7 @@ class CoupledInnovationModelTests(unittest.TestCase):
             )
 
         selected = gate.select_pose_only_references(
-            frame_id=170,
+            frame_id=180,
             curr_desc_kpts=_pose_pool_desc(match_score=0),
             matcher=_PosePoolMatcher(),
         )
@@ -1311,8 +1317,8 @@ class CoupledInnovationModelTests(unittest.TestCase):
         )
 
         summary = gate.pose_only_reference_pool_summary()
-        self.assertLessEqual(summary["pool_size"], 64)
-        self.assertEqual([ref.info["_paper_aligned_source_frame_id"] for ref in selected], [169, 168])
+        self.assertLessEqual(summary["pool_size"], 32)
+        self.assertEqual([ref.info["_paper_aligned_source_frame_id"] for ref in selected], [169])
         self.assertEqual(expired, [])
         self.assertEqual(gate.pose_only_reference_pool_summary()["pool_size"], 0)
 

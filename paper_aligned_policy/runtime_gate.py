@@ -70,11 +70,12 @@ class PaperAlignedRuntimeGate:
         self.direct_density_control_v2_2_2_events: list[dict[str, Any]] = []
         self.direct_density_control_v2_2_2_1_events: list[dict[str, Any]] = []
         self.pose_only_reference_pool: list[Any] = []
-        self.pose_only_reference_pool_max_size = 64
-        self.pose_only_reference_ttl_frames = 360
-        self.pose_only_reference_min_3d_points = 80
-        self.pose_only_reference_max_per_query = 2
-        self.pose_only_reference_min_match_score = 32.0
+        self.pose_only_reference_pool_max_size = 32
+        self.pose_only_reference_ttl_frames = 180
+        self.pose_only_reference_min_age_frames = 8
+        self.pose_only_reference_min_3d_points = 400
+        self.pose_only_reference_max_per_query = 1
+        self.pose_only_reference_min_match_score = 180.0
         self.pose_only_reference_registered_count = 0
         self.pose_only_reference_selected_count = 0
         self.trace_unavailable_reasons: dict[str, str] = {
@@ -1125,6 +1126,8 @@ class PaperAlignedRuntimeGate:
             source_frame_id = int(ref.info.get("_paper_aligned_source_frame_id", -1))
             if source_frame_id >= int(frame_id):
                 continue
+            if int(frame_id) - source_frame_id < int(self.pose_only_reference_min_age_frames):
+                continue
             support_count = self._pose_only_support_count(ref.desc_kpts)
             score = self._tensor_float(matcher.evaluate_match(ref.desc_kpts, curr_desc_kpts))
             candidate_count += 1
@@ -1179,8 +1182,10 @@ class PaperAlignedRuntimeGate:
             "selected_count": int(self.pose_only_reference_selected_count),
             "max_size": int(self.pose_only_reference_pool_max_size),
             "ttl_frames": int(self.pose_only_reference_ttl_frames),
+            "min_age_frames": int(self.pose_only_reference_min_age_frames),
             "max_per_query": int(self.pose_only_reference_max_per_query),
             "min_3d_points": int(self.pose_only_reference_min_3d_points),
+            "min_match_score": float(self.pose_only_reference_min_match_score),
         }
 
     def flush_trace(self) -> None:
