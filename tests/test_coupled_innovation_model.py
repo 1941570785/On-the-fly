@@ -1271,6 +1271,7 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertFalse(rejected)
         self.assertTrue(accepted)
         self.assertEqual(len(selected), 1)
+        self.assertGreaterEqual(selected[0].index, 0)
         self.assertEqual(selected[0].info["_paper_aligned_source_frame_id"], 320)
         self.assertEqual(selected[0].info["_paper_aligned_commit_origin"], "pose_only_reference")
         self.assertEqual(gate.pose_only_reference_pool_summary()["pool_size"], 1)

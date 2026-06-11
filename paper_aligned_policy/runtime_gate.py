@@ -1078,7 +1078,7 @@ class PaperAlignedRuntimeGate:
         ref_info["_paper_aligned_pose_only_reference"] = True
         ref_info["_paper_aligned_support_eligible_recovery_keyframe"] = False
         reference = SimpleNamespace(
-            index=-(1_000_000 + int(frame_id)),
+            index=1_000_000 + int(frame_id),
             info=ref_info,
             desc_kpts=desc,
             rW2C=r_w2c,
