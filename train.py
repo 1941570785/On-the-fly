@@ -159,6 +159,7 @@ if __name__ == "__main__":
     bootstrap_keyframe_dicts = []
     bootstrap_desc_kpts = []
     recent_pose_success = deque(maxlen=50)
+    viewpoint_pose_history = deque(maxlen=160)
 
     # Dict of runtimes for each step
     runtimes = ["Load", "BAB", "tri", "BAI", "Add", "Init", "Opt", "anc"]
@@ -1608,7 +1609,13 @@ if __name__ == "__main__":
                                 if "prev_keyframes_for_pose" in locals()
                                 else []
                             ),
+                            pose_history=list(viewpoint_pose_history),
                         )
+                        try:
+                            history_Rt = Rt.detach().cpu().clone()
+                        except Exception:
+                            history_Rt = Rt
+                        viewpoint_pose_history.append((int(frameID), history_Rt))
                     pose_debug_incr = getattr(
                         pose_initializer, "last_incremental_debug", {}
                     ) or {}
@@ -1905,6 +1912,31 @@ if __name__ == "__main__":
                             "viewpoint_rotation_deg_to_active_anchor": float(
                                 viewpoint_coverage_event.get(
                                     "viewpoint_rotation_deg_to_active_anchor", 0.0
+                                )
+                            ),
+                            "viewpoint_rotation_deg_window_20": float(
+                                viewpoint_coverage_event.get(
+                                    "viewpoint_rotation_deg_window_20", 0.0
+                                )
+                            ),
+                            "viewpoint_rotation_deg_window_50": float(
+                                viewpoint_coverage_event.get(
+                                    "viewpoint_rotation_deg_window_50", 0.0
+                                )
+                            ),
+                            "viewpoint_rotation_deg_window_100": float(
+                                viewpoint_coverage_event.get(
+                                    "viewpoint_rotation_deg_window_100", 0.0
+                                )
+                            ),
+                            "viewpoint_rotation_deg_window_max": float(
+                                viewpoint_coverage_event.get(
+                                    "viewpoint_rotation_deg_window_max", 0.0
+                                )
+                            ),
+                            "viewpoint_rotation_window_max_size": int(
+                                viewpoint_coverage_event.get(
+                                    "viewpoint_rotation_window_max_size", 0
                                 )
                             ),
                             "inlier_grid_coverage": float(

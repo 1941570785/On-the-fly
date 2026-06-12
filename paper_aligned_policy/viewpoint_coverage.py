@@ -91,6 +91,66 @@ def grid_entropy(kpts: Any, width: int, height: int, grid_size: int = 4) -> floa
     return _clamp01(entropy / max_entropy)
 
 
+def _history_frame_and_pose(item: Any) -> tuple[int, Any] | None:
+    if isinstance(item, dict):
+        frame_id = item.get("frame_id", item.get("source_frame_id", -1))
+        pose = item.get("Rt", item.get("pose", item.get("current_Rt")))
+    elif isinstance(item, (tuple, list)) and len(item) >= 2:
+        frame_id, pose = item[0], item[1]
+    else:
+        return None
+    try:
+        frame_id_int = int(frame_id)
+    except Exception:
+        return None
+    if _rotation_matrix(pose) is None:
+        return None
+    return frame_id_int, pose
+
+
+def windowed_rotation_degrees(
+    *,
+    current_Rt: Any,
+    pose_history: Any,
+    current_frame_id: int,
+    windows: tuple[int, ...] = (20, 50, 100),
+) -> dict[str, Any]:
+    history: list[tuple[int, Any]] = []
+    for item in pose_history or []:
+        parsed = _history_frame_and_pose(item)
+        if parsed is None:
+            continue
+        frame_id, pose = parsed
+        if frame_id < int(current_frame_id):
+            history.append((frame_id, pose))
+
+    out: dict[str, Any] = {}
+    max_rot = 0.0
+    max_window = 0
+    max_source = -1
+    for window in windows:
+        window = max(1, int(window))
+        target_frame = int(current_frame_id) - window
+        eligible = [(fid, pose) for fid, pose in history if fid <= target_frame]
+        if eligible:
+            source_frame, source_pose = max(eligible, key=lambda row: row[0])
+            rotation = rotation_degrees_between(current_Rt, source_pose)
+        else:
+            source_frame = -1
+            rotation = 0.0
+        out[f"viewpoint_rotation_deg_window_{window}"] = float(rotation)
+        out[f"viewpoint_rotation_window_source_{window}"] = int(source_frame)
+        if rotation > max_rot:
+            max_rot = float(rotation)
+            max_window = int(window)
+            max_source = int(source_frame)
+
+    out["viewpoint_rotation_deg_window_max"] = float(max_rot)
+    out["viewpoint_rotation_window_max_size"] = int(max_window)
+    out["viewpoint_rotation_window_max_source"] = int(max_source)
+    return out
+
+
 def build_viewpoint_coverage_event(
     *,
     frame_id: int,
@@ -104,6 +164,8 @@ def build_viewpoint_coverage_event(
     active_anchor_keyframe_count: int = 0,
     selected_reference_count: int = 0,
     grid_size: int = 4,
+    pose_history: Any = None,
+    rotation_windows: tuple[int, ...] = (20, 50, 100),
 ) -> dict[str, Any]:
     pose_debug = dict(pose_debug or {})
     kpt_count = len(_grid_cell_ids(inlier_kpts, image_width, image_height, grid_size))
@@ -112,6 +174,15 @@ def build_viewpoint_coverage_event(
     support_concentration = 1.0 - entropy
     rot_last = rotation_degrees_between(current_Rt, last_keyframe_Rt)
     rot_anchor = rotation_degrees_between(current_Rt, active_anchor_Rt)
+    windowed_rotation = windowed_rotation_degrees(
+        current_Rt=current_Rt,
+        pose_history=pose_history,
+        current_frame_id=int(frame_id),
+        windows=rotation_windows,
+    )
+    windowed_rotation_max = float(
+        windowed_rotation.get("viewpoint_rotation_deg_window_max", 0.0) or 0.0
+    )
     match_total = max(
         _safe_int(pose_debug.get("match_count_total", 0)),
         _safe_int(pose_debug.get("num_2d3d_correspondences", 0)),
@@ -128,7 +199,7 @@ def build_viewpoint_coverage_event(
     anchor_health = _clamp01(
         0.55 * inlier_ratio + 0.25 * reference_health + 0.20 * anchor_size_health
     )
-    rotation_score = _clamp01(max(rot_last, rot_anchor) / 90.0)
+    rotation_score = _clamp01(max(rot_last, rot_anchor, windowed_rotation_max) / 90.0)
     new_view_event_score = _clamp01(
         0.45 * rotation_score
         + 0.20 * (1.0 - anchor_health)
@@ -139,6 +210,7 @@ def build_viewpoint_coverage_event(
         "frame_id": int(frame_id),
         "viewpoint_rotation_deg_to_last_keyframe": float(rot_last),
         "viewpoint_rotation_deg_to_active_anchor": float(rot_anchor),
+        **windowed_rotation,
         "inlier_grid_coverage": float(coverage),
         "inlier_grid_entropy": float(entropy),
         "support_concentration": float(support_concentration),

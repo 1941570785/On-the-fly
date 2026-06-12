@@ -1449,12 +1449,76 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertEqual(event["frame_id"], 42)
         self.assertGreater(event["new_view_event_score"], 0.0)
 
+
+    def test_viewpoint_coverage_reports_windowed_rotation_when_keyframes_are_dense(self):
+        import math
+        import torch
+
+        from paper_aligned_policy.viewpoint_coverage import (
+            build_viewpoint_coverage_event,
+            windowed_rotation_degrees,
+        )
+
+        def rot_z(degrees: float):
+            radians = math.radians(degrees)
+            rt = torch.eye(4)
+            rt[:3, :3] = torch.tensor(
+                [
+                    [math.cos(radians), -math.sin(radians), 0.0],
+                    [math.sin(radians), math.cos(radians), 0.0],
+                    [0.0, 0.0, 1.0],
+                ]
+            )
+            return rt
+
+        current = rot_z(90.0)
+        nearly_adjacent = rot_z(89.0)
+        history = [
+            (0, torch.eye(4)),
+            (50, torch.eye(4)),
+            (80, torch.eye(4)),
+            (99, nearly_adjacent),
+        ]
+
+        windowed = windowed_rotation_degrees(
+            current_Rt=current,
+            pose_history=history,
+            current_frame_id=100,
+            windows=(20, 50, 100),
+        )
+
+        self.assertAlmostEqual(windowed["viewpoint_rotation_deg_window_20"], 90.0, places=3)
+        self.assertAlmostEqual(windowed["viewpoint_rotation_deg_window_50"], 90.0, places=3)
+        self.assertAlmostEqual(windowed["viewpoint_rotation_deg_window_100"], 90.0, places=3)
+        self.assertEqual(windowed["viewpoint_rotation_window_source_20"], 80)
+        self.assertGreater(windowed["viewpoint_rotation_deg_window_max"], 80.0)
+
+        event = build_viewpoint_coverage_event(
+            frame_id=100,
+            current_Rt=current,
+            last_keyframe_Rt=nearly_adjacent,
+            active_anchor_Rt=nearly_adjacent,
+            pose_history=history,
+            inlier_kpts=torch.tensor([[10.0, 10.0], [90.0, 90.0]]),
+            image_width=100,
+            image_height=100,
+            pose_debug={"num_miniba_inliers": 80, "match_count_total": 100},
+            active_anchor_keyframe_count=4,
+            selected_reference_count=2,
+        )
+
+        self.assertLess(event["viewpoint_rotation_deg_to_last_keyframe"], 2.0)
+        self.assertGreater(event["viewpoint_rotation_deg_window_max"], 80.0)
+        self.assertGreater(event["new_view_event_score"], 0.35)
+
     def test_train_records_viewpoint_coverage_as_ssm_only_trace(self):
         train_source = Path("train.py").read_text(encoding="utf-8")
 
         self.assertIn("build_viewpoint_coverage_event", train_source)
         self.assertIn("append_viewpoint_coverage_event", train_source)
         self.assertIn("viewpoint_coverage_event", train_source)
+        self.assertIn("viewpoint_pose_history", train_source)
+        self.assertIn("viewpoint_rotation_deg_window_max", train_source)
         self.assertNotIn("new_view_event_score >= ", train_source)
 
 

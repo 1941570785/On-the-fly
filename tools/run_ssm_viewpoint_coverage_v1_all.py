@@ -72,6 +72,16 @@ FIELDNAMES = [
     "viewpoint_rot_last_p90",
     "viewpoint_rot_anchor_mean",
     "viewpoint_rot_anchor_p90",
+    "viewpoint_rot_window_20_mean",
+    "viewpoint_rot_window_20_p90",
+    "viewpoint_rot_window_50_mean",
+    "viewpoint_rot_window_50_p90",
+    "viewpoint_rot_window_100_mean",
+    "viewpoint_rot_window_100_p90",
+    "viewpoint_rot_window_max_mean",
+    "viewpoint_rot_window_max_p90",
+    "high_window_turn_count",
+    "severe_window_turn_count",
     "inlier_grid_coverage_mean",
     "inlier_grid_coverage_p10",
     "support_concentration_mean",
@@ -234,6 +244,10 @@ def trace_stats(model_dir: Path) -> dict[str, Any]:
             pass
     rot_last = _float_values(viewpoint_events, "viewpoint_rotation_deg_to_last_keyframe")
     rot_anchor = _float_values(viewpoint_events, "viewpoint_rotation_deg_to_active_anchor")
+    rot_window_20 = _float_values(viewpoint_events, "viewpoint_rotation_deg_window_20")
+    rot_window_50 = _float_values(viewpoint_events, "viewpoint_rotation_deg_window_50")
+    rot_window_100 = _float_values(viewpoint_events, "viewpoint_rotation_deg_window_100")
+    rot_window_max = _float_values(viewpoint_events, "viewpoint_rotation_deg_window_max")
     coverage = _float_values(viewpoint_events, "inlier_grid_coverage")
     concentration = _float_values(viewpoint_events, "support_concentration")
     anchor_health = _float_values(viewpoint_events, "anchor_health_score")
@@ -292,6 +306,16 @@ def trace_stats(model_dir: Path) -> dict[str, Any]:
             "viewpoint_rot_last_p90": _quantile(rot_last, 0.9),
             "viewpoint_rot_anchor_mean": _mean(rot_anchor),
             "viewpoint_rot_anchor_p90": _quantile(rot_anchor, 0.9),
+            "viewpoint_rot_window_20_mean": _mean(rot_window_20),
+            "viewpoint_rot_window_20_p90": _quantile(rot_window_20, 0.9),
+            "viewpoint_rot_window_50_mean": _mean(rot_window_50),
+            "viewpoint_rot_window_50_p90": _quantile(rot_window_50, 0.9),
+            "viewpoint_rot_window_100_mean": _mean(rot_window_100),
+            "viewpoint_rot_window_100_p90": _quantile(rot_window_100, 0.9),
+            "viewpoint_rot_window_max_mean": _mean(rot_window_max),
+            "viewpoint_rot_window_max_p90": _quantile(rot_window_max, 0.9),
+            "high_window_turn_count": sum(value > 20.0 for value in rot_window_max),
+            "severe_window_turn_count": sum(value > 45.0 for value in rot_window_max),
             "inlier_grid_coverage_mean": _mean(coverage),
             "inlier_grid_coverage_p10": _quantile(coverage, 0.1),
             "support_concentration_mean": _mean(concentration),
@@ -356,6 +380,16 @@ def write_outputs(rows: list[dict[str, Any]]) -> None:
                 "viewpoint_rot_last_p90",
                 "viewpoint_rot_anchor_mean",
                 "viewpoint_rot_anchor_p90",
+                "viewpoint_rot_window_20_mean",
+                "viewpoint_rot_window_20_p90",
+                "viewpoint_rot_window_50_mean",
+                "viewpoint_rot_window_50_p90",
+                "viewpoint_rot_window_100_mean",
+                "viewpoint_rot_window_100_p90",
+                "viewpoint_rot_window_max_mean",
+                "viewpoint_rot_window_max_p90",
+                "high_window_turn_count",
+                "severe_window_turn_count",
                 "inlier_grid_coverage_mean",
                 "inlier_grid_coverage_p10",
                 "support_concentration_mean",
