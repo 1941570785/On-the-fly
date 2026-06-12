@@ -42,6 +42,7 @@ from webviewer.webviewer import WebViewer
 from graphdecoviewer.types import ViewerMode
 from utils import align_mean_up_fwd, increment_runtime
 from paper_aligned_policy.runtime_gate import PaperAlignedRuntimeGate
+from paper_aligned_policy.viewpoint_coverage import build_viewpoint_coverage_event
 from scene.keyframe import pop_chosen_kfs_resolution_events
 
 if __name__ == "__main__":
@@ -1571,6 +1572,43 @@ if __name__ == "__main__":
                     # 如果使用COLMAP位姿，则覆盖估计的位姿
                     if args.use_colmap_poses:
                         Rt = info["Rt"]
+                    viewpoint_coverage_event: dict[str, Any] = {}
+                    if runtime_gate is not None:
+                        active_anchor_ids = _active_anchor_keyframe_ids()
+                        active_anchor_Rt = None
+                        if active_anchor_ids:
+                            active_anchor_kf = next(
+                                (
+                                    kf
+                                    for kf in scene_model.keyframes
+                                    if int(kf.index) == int(active_anchor_ids[-1])
+                                ),
+                                None,
+                            )
+                            if active_anchor_kf is not None:
+                                active_anchor_Rt = active_anchor_kf.get_Rt()
+                        last_keyframe_Rt = (
+                            prev_keyframe.get_Rt() if "prev_keyframe" in locals() else None
+                        )
+                        viewpoint_coverage_event = build_viewpoint_coverage_event(
+                            frame_id=int(frameID),
+                            current_Rt=Rt,
+                            last_keyframe_Rt=last_keyframe_Rt,
+                            active_anchor_Rt=active_anchor_Rt,
+                            inlier_kpts=curr_prev_matches.kpts,
+                            image_width=int(width),
+                            image_height=int(height),
+                            pose_debug=getattr(
+                                pose_initializer, "last_incremental_debug", {}
+                            )
+                            or {},
+                            active_anchor_keyframe_count=len(active_anchor_ids),
+                            selected_reference_count=len(
+                                prev_keyframes_for_pose
+                                if "prev_keyframes_for_pose" in locals()
+                                else []
+                            ),
+                        )
                     pose_debug_incr = getattr(
                         pose_initializer, "last_incremental_debug", {}
                     ) or {}
@@ -1859,7 +1897,54 @@ if __name__ == "__main__":
                             "pose_only_reference_selected_count": int(
                                 len(pose_only_refs) if "pose_only_refs" in locals() else 0
                             ),
+                            "viewpoint_rotation_deg_to_last_keyframe": float(
+                                viewpoint_coverage_event.get(
+                                    "viewpoint_rotation_deg_to_last_keyframe", 0.0
+                                )
+                            ),
+                            "viewpoint_rotation_deg_to_active_anchor": float(
+                                viewpoint_coverage_event.get(
+                                    "viewpoint_rotation_deg_to_active_anchor", 0.0
+                                )
+                            ),
+                            "inlier_grid_coverage": float(
+                                viewpoint_coverage_event.get("inlier_grid_coverage", 0.0)
+                            ),
+                            "inlier_grid_entropy": float(
+                                viewpoint_coverage_event.get("inlier_grid_entropy", 0.0)
+                            ),
+                            "support_concentration": float(
+                                viewpoint_coverage_event.get("support_concentration", 0.0)
+                            ),
+                            "anchor_health_score": float(
+                                viewpoint_coverage_event.get("anchor_health_score", 0.0)
+                            ),
+                            "new_view_event_score": float(
+                                viewpoint_coverage_event.get("new_view_event_score", 0.0)
+                            ),
                         }
+                        if viewpoint_coverage_event:
+                            viewpoint_coverage_event.update(
+                                {
+                                    "source_frame_id": int(frameID),
+                                    "direct_keyframe_finalized": bool(
+                                        direct_keyframe_finalized
+                                    ),
+                                    "direct_finalization_decision": str(
+                                        fin_dec.decision
+                                    ),
+                                    "direct_finalization_reason": str(fin_dec.reason),
+                                    "active_memory_frame_role": str(
+                                        dbg.get("active_memory_frame_role", "")
+                                    ),
+                                    "value_hold_block_reason": str(
+                                        dbg.get("value_hold_block_reason", "")
+                                    ),
+                                }
+                            )
+                            runtime_gate.append_viewpoint_coverage_event(
+                                viewpoint_coverage_event
+                            )
                         if runtime_gate.direct_density_controller.is_v2221:
                             v2_payload.update(
                                 {

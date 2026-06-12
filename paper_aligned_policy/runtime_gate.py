@@ -69,6 +69,7 @@ class PaperAlignedRuntimeGate:
         self.direct_density_control_v2_2_1_events: list[dict[str, Any]] = []
         self.direct_density_control_v2_2_2_events: list[dict[str, Any]] = []
         self.direct_density_control_v2_2_2_1_events: list[dict[str, Any]] = []
+        self.viewpoint_coverage_events: list[dict[str, Any]] = []
         self.pose_only_reference_pool: list[Any] = []
         self.pose_only_reference_pool_max_size = 32
         self.pose_only_reference_ttl_frames = 180
@@ -948,6 +949,9 @@ class PaperAlignedRuntimeGate:
     def append_direct_density_control_v2_2_2_1_event(self, payload: dict[str, Any]) -> None:
         self.direct_density_control_v2_2_2_1_events.append(dict(payload))
 
+    def append_viewpoint_coverage_event(self, payload: dict[str, Any]) -> None:
+        self.viewpoint_coverage_events.append(dict(payload))
+
     def _pose_only_pool_enabled(self) -> bool:
         return bool(
             getattr(self.direct_density_controller, "is_pose_rep_active_memory_v1", False)
@@ -1251,6 +1255,7 @@ class PaperAlignedRuntimeGate:
             "direct_density_control_v2_2_1_events": self.direct_density_control_v2_2_1_events,
             "direct_density_control_v2_2_2_events": self.direct_density_control_v2_2_2_events,
             "direct_density_control_v2_2_2_1_events": self.direct_density_control_v2_2_2_1_events,
+            "viewpoint_coverage_events": self.viewpoint_coverage_events,
             "pose_only_reference_pool_summary": self.pose_only_reference_pool_summary(),
             "trace_unavailable_reasons": self.trace_unavailable_reasons,
         }

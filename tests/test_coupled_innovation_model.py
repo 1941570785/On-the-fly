@@ -1362,6 +1362,101 @@ class CoupledInnovationModelTests(unittest.TestCase):
             self.assertEqual(payload.get("stage_metric_contract", {}).get("online_quality_metric_fields"), [])
             self.assertIn("absolute_relative_rotation_error", payload.get("stage_metric_contract", {}).get("offline_stage_metric_fields", []))
 
+    def test_runtime_gate_flushes_viewpoint_coverage_events(self):
+        with tempfile.TemporaryDirectory() as td:
+            trace_path = Path(td) / "semantic_trace.json"
+            gate = PaperAlignedRuntimeGate(
+                _args(paper_aligned_contract_trace_path=str(trace_path))
+            )
+
+            gate.append_viewpoint_coverage_event(
+                {
+                    "frame_id": 42,
+                    "viewpoint_rotation_deg_to_last_keyframe": 37.5,
+                    "inlier_grid_coverage": 0.5,
+                    "anchor_health_score": 0.75,
+                }
+            )
+            gate.flush_trace()
+
+            payload = json.loads(trace_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(payload["viewpoint_coverage_events"]), 1)
+            self.assertEqual(payload["viewpoint_coverage_events"][0]["frame_id"], 42)
+
+    def test_viewpoint_coverage_helper_reports_rotation_and_grid_support(self):
+        import torch
+
+        from paper_aligned_policy.viewpoint_coverage import (
+            build_viewpoint_coverage_event,
+            grid_coverage,
+            grid_entropy,
+            rotation_degrees_between,
+        )
+
+        eye = torch.eye(4)
+        rot_z_90 = torch.eye(4)
+        rot_z_90[:3, :3] = torch.tensor(
+            [
+                [0.0, -1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+        spread = torch.tensor(
+            [
+                [10.0, 10.0],
+                [90.0, 10.0],
+                [10.0, 90.0],
+                [90.0, 90.0],
+            ]
+        )
+        concentrated = torch.tensor(
+            [
+                [10.0, 10.0],
+                [11.0, 11.0],
+                [12.0, 12.0],
+                [13.0, 13.0],
+            ]
+        )
+
+        self.assertAlmostEqual(rotation_degrees_between(eye, eye), 0.0, places=4)
+        self.assertAlmostEqual(rotation_degrees_between(eye, rot_z_90), 90.0, places=3)
+        self.assertAlmostEqual(grid_coverage(spread, 100, 100, grid_size=4), 0.25, places=4)
+        self.assertLess(grid_entropy(concentrated, 100, 100, grid_size=4), grid_entropy(spread, 100, 100, grid_size=4))
+
+        event = build_viewpoint_coverage_event(
+            frame_id=42,
+            current_Rt=rot_z_90,
+            last_keyframe_Rt=eye,
+            active_anchor_Rt=eye,
+            inlier_kpts=spread,
+            image_width=100,
+            image_height=100,
+            pose_debug={"num_miniba_inliers": 80, "match_count_total": 100},
+            active_anchor_keyframe_count=4,
+            selected_reference_count=2,
+        )
+        for key in (
+            "viewpoint_rotation_deg_to_last_keyframe",
+            "viewpoint_rotation_deg_to_active_anchor",
+            "inlier_grid_coverage",
+            "inlier_grid_entropy",
+            "support_concentration",
+            "anchor_health_score",
+            "new_view_event_score",
+        ):
+            self.assertIn(key, event)
+        self.assertEqual(event["frame_id"], 42)
+        self.assertGreater(event["new_view_event_score"], 0.0)
+
+    def test_train_records_viewpoint_coverage_as_ssm_only_trace(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        self.assertIn("build_viewpoint_coverage_event", train_source)
+        self.assertIn("append_viewpoint_coverage_event", train_source)
+        self.assertIn("viewpoint_coverage_event", train_source)
+        self.assertNotIn("new_view_event_score >= ", train_source)
+
 
 if __name__ == "__main__":
     unittest.main()
