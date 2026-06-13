@@ -1710,7 +1710,7 @@ if __name__ == "__main__":
                         if (
                             not direct_keyframe_finalized
                             and held_bridge
-                            and runtime_gate.direct_density_controller.is_pose_rep_active_memory_v1
+                            and runtime_gate.direct_density_controller.is_pose_rep_active_memory
                         ):
                             pose_only_reference_registered = runtime_gate.register_pose_only_reference(
                                 frame_id=int(frameID),

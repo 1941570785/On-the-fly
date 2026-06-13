@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import sys
@@ -1416,6 +1416,23 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertEqual(summary["min_age_frames"], 18)
         self.assertEqual(summary["register_min_interval_frames"], 12)
         self.assertEqual(summary["selection_cooldown_frames"], 8)
+
+    def test_training_loop_registers_pose_only_references_for_active_memory_modes(self):
+        train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(
+            encoding="utf-8-sig"
+        )
+        register_call = "runtime_gate.register_pose_only_reference"
+        register_pos = train_source.index(register_call)
+        guard_window = train_source[max(0, register_pos - 360) : register_pos]
+
+        self.assertIn(
+            "runtime_gate.direct_density_controller.is_pose_rep_active_memory",
+            guard_window,
+        )
+        self.assertNotIn(
+            "runtime_gate.direct_density_controller.is_pose_rep_active_memory_v1",
+            guard_window,
+        )
 
     def test_pose_only_reference_pool_expires_caps_and_ranks_by_match_support(self):
         import torch
