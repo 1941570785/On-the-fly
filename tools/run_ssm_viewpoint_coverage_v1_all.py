@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import os
 import subprocess
 import time
 from datetime import datetime
@@ -13,13 +14,16 @@ from typing import Any
 
 REPO = Path("/data2/zxd/3D_Reconstruction/On_the_fly")
 PYTHON = Path("/home/zxd/miniconda3/envs/otf/bin/python")
-OUT_ROOT = REPO / "results/BRANCH_EXPERIMENTS_20260612/ssm-viewpoint-coverage-v1_all"
-SUMMARY_CSV = OUT_ROOT / "ssm_viewpoint_coverage_v1_all_run_summary.csv"
-SUMMARY_JSON = OUT_ROOT / "ssm_viewpoint_coverage_v1_all_run_summary.json"
-TRACE_CSV = OUT_ROOT / "ssm_viewpoint_coverage_v1_all_trace_stats.csv"
-TRACE_JSON = OUT_ROOT / "ssm_viewpoint_coverage_v1_all_trace_stats.json"
+EXPERIMENT_LABEL = os.environ.get(
+    "OTF_EXPERIMENT_LABEL", "ssm-viewpoint-coverage-v1_all"
+)
+OUT_ROOT = REPO / "results/BRANCH_EXPERIMENTS_20260612" / EXPERIMENT_LABEL
+SUMMARY_CSV = OUT_ROOT / f"{EXPERIMENT_LABEL}_run_summary.csv"
+SUMMARY_JSON = OUT_ROOT / f"{EXPERIMENT_LABEL}_run_summary.json"
+TRACE_CSV = OUT_ROOT / f"{EXPERIMENT_LABEL}_trace_stats.csv"
+TRACE_JSON = OUT_ROOT / f"{EXPERIMENT_LABEL}_trace_stats.json"
 MASTER_LOG = OUT_ROOT / "logs/master.log"
-MODE = "pose_rep_active_memory_v1"
+MODE = os.environ.get("OTF_DIRECT_DENSITY_MODE", "pose_rep_active_memory_v1")
 
 DATASETS = [
     ("bonsai", "datasets/MipNeRF360/bonsai", -1),

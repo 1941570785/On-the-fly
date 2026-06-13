@@ -77,6 +77,10 @@ class PaperAlignedRuntimeGate:
         self.pose_only_reference_min_3d_points = 400
         self.pose_only_reference_max_per_query = 1
         self.pose_only_reference_min_match_score = 180.0
+        self.pose_only_reference_register_min_interval_frames = 0
+        self.pose_only_reference_selection_cooldown_frames = 0
+        self.pose_only_reference_age_bonus = 0.0
+        self._last_pose_only_reference_register_frame = -1
         self.pose_only_reference_registered_count = 0
         self.pose_only_reference_selected_count = 0
         self.trace_unavailable_reasons: dict[str, str] = {
@@ -86,6 +90,14 @@ class PaperAlignedRuntimeGate:
         self.semantic_policy: SemanticV1RuntimePolicy | None = None
         self.recovery_commit_controller = RecoveryCommitController(args)
         self.direct_density_controller = DirectDensityController(args)
+        if getattr(self.direct_density_controller, "is_pose_rep_active_memory_v2", False):
+            self.pose_only_reference_pool_max_size = 24
+            self.pose_only_reference_ttl_frames = 140
+            self.pose_only_reference_min_age_frames = 18
+            self.pose_only_reference_min_match_score = 220.0
+            self.pose_only_reference_register_min_interval_frames = 12
+            self.pose_only_reference_selection_cooldown_frames = 8
+            self.pose_only_reference_age_bonus = 30.0
         self._anchor_count_at_last_direct_finalize = 1
         if self.mode == "paper_aligned_semantic_v1":
             cfg = self.coupled_config
@@ -842,6 +854,7 @@ class PaperAlignedRuntimeGate:
         min_num_inliers: int,
         pose_inliers: int,
         semantic_scores: dict[str, Any] | None = None,
+        viewpoint_scores: dict[str, Any] | None = None,
     ):
         if semantic_scores is None:
             event = self._get_event(int(frame_id))
@@ -916,6 +929,7 @@ class PaperAlignedRuntimeGate:
             local_window_gap_max=local_window_gap_max,
             local_window_gap_after_if_hold=local_window_gap_after_if_hold,
             semantic_scores=semantic_scores,
+            viewpoint_scores=viewpoint_scores,
         )
         if ctrl.is_v22:
             decision.debug.update(
@@ -954,7 +968,7 @@ class PaperAlignedRuntimeGate:
 
     def _pose_only_pool_enabled(self) -> bool:
         return bool(
-            getattr(self.direct_density_controller, "is_pose_rep_active_memory_v1", False)
+            getattr(self.direct_density_controller, "is_pose_rep_active_memory", False)
         )
 
     def _clone_pose_only_value(self, value: Any) -> Any:
@@ -1055,6 +1069,26 @@ class PaperAlignedRuntimeGate:
             return False
 
         self._purge_pose_only_references(int(frame_id))
+        register_gap = (
+            int(frame_id) - int(self._last_pose_only_reference_register_frame)
+            if int(self._last_pose_only_reference_register_frame) >= 0
+            else 10**9
+        )
+        if register_gap < int(self.pose_only_reference_register_min_interval_frames):
+            self.pose_reference_pool_events.append(
+                {
+                    "event_type": "pose_only_register",
+                    "frame_id": int(frame_id),
+                    "registered": False,
+                    "block_reason": "pose_only_register_cooldown",
+                    "pose_only_register_gap": int(register_gap),
+                    "pose_only_register_min_interval_frames": int(
+                        self.pose_only_reference_register_min_interval_frames
+                    ),
+                    "pool_size_after": len(self.pose_only_reference_pool),
+                }
+            )
+            return False
         desc = self._clone_pose_only_desc(desc_kpts)
         self._apply_pose_support_to_desc(desc, pose_support)
         support_count = self._pose_only_support_count(desc)
@@ -1095,6 +1129,7 @@ class PaperAlignedRuntimeGate:
             self.pose_only_reference_pool = self.pose_only_reference_pool[
                 -int(self.pose_only_reference_pool_max_size) :
             ]
+        self._last_pose_only_reference_register_frame = int(frame_id)
         self.pose_only_reference_registered_count += 1
         self.pose_reference_pool_events.append(
             {
@@ -1124,13 +1159,25 @@ class PaperAlignedRuntimeGate:
             return []
         self._purge_pose_only_references(int(frame_id))
         limit = int(max_refs or self.pose_only_reference_max_per_query)
-        scored: list[tuple[float, int, Any]] = []
+        scored: list[tuple[float, float, int, int, Any]] = []
         candidate_count = 0
+        cooldown_skip_count = 0
         for ref in self.pose_only_reference_pool:
             source_frame_id = int(ref.info.get("_paper_aligned_source_frame_id", -1))
             if source_frame_id >= int(frame_id):
                 continue
             if int(frame_id) - source_frame_id < int(self.pose_only_reference_min_age_frames):
+                continue
+            age = int(frame_id) - source_frame_id
+            last_selected = int(
+                ref.info.get("_paper_aligned_pose_only_last_selected_frame", -1)
+            )
+            if (
+                last_selected >= 0
+                and int(frame_id) - last_selected
+                < int(self.pose_only_reference_selection_cooldown_frames)
+            ):
+                cooldown_skip_count += 1
                 continue
             support_count = self._pose_only_support_count(ref.desc_kpts)
             score = self._tensor_float(matcher.evaluate_match(ref.desc_kpts, curr_desc_kpts))
@@ -1140,9 +1187,15 @@ class PaperAlignedRuntimeGate:
                 and score >= float(self.pose_only_reference_min_match_score)
             )
             if selected:
-                scored.append((score, source_frame_id, ref))
-        scored.sort(key=lambda item: (-item[0], -item[1]))
-        selected_refs = [item[2] for item in scored[:limit]]
+                age_bonus = min(float(age), float(self.pose_only_reference_ttl_frames)) / max(
+                    float(self.pose_only_reference_ttl_frames), 1.0
+                )
+                diversity_score = score + float(self.pose_only_reference_age_bonus) * age_bonus
+                scored.append((diversity_score, score, age, source_frame_id, ref))
+        scored.sort(key=lambda item: (-item[0], -item[2]))
+        selected_refs = [item[4] for item in scored[:limit]]
+        for ref in selected_refs:
+            ref.info["_paper_aligned_pose_only_last_selected_frame"] = int(frame_id)
         if candidate_count or selected_refs:
             self.pose_reference_pool_events.append(
                 {
@@ -1151,6 +1204,7 @@ class PaperAlignedRuntimeGate:
                     "pose_only_pool_size": len(self.pose_only_reference_pool),
                     "pose_only_candidate_count": int(candidate_count),
                     "pose_only_selected_count": len(selected_refs),
+                    "pose_only_cooldown_skip_count": int(cooldown_skip_count),
                     "pose_only_selected_source_frame_ids": [
                         int(ref.info.get("_paper_aligned_source_frame_id", -1))
                         for ref in selected_refs
@@ -1158,7 +1212,7 @@ class PaperAlignedRuntimeGate:
                     "pose_only_selected_reference_ids": [int(ref.index) for ref in selected_refs],
                 }
             )
-            for score, _source_frame_id, ref in scored[:limit]:
+            for diversity_score, score, age, _source_frame_id, ref in scored[:limit]:
                 self.pose_reference_pool_events.append(
                     {
                         "event_type": "pose_only_select_reference",
@@ -1169,6 +1223,8 @@ class PaperAlignedRuntimeGate:
                         ),
                         "reference_commit_origin": "pose_only_reference",
                         "pose_only_match_score": float(score),
+                        "pose_only_diversity_score": float(diversity_score),
+                        "pose_only_reference_age": int(age),
                         "pose_only_3d_support_count": self._pose_only_support_count(
                             ref.desc_kpts
                         ),
@@ -1190,6 +1246,13 @@ class PaperAlignedRuntimeGate:
             "max_per_query": int(self.pose_only_reference_max_per_query),
             "min_3d_points": int(self.pose_only_reference_min_3d_points),
             "min_match_score": float(self.pose_only_reference_min_match_score),
+            "register_min_interval_frames": int(
+                self.pose_only_reference_register_min_interval_frames
+            ),
+            "selection_cooldown_frames": int(
+                self.pose_only_reference_selection_cooldown_frames
+            ),
+            "age_bonus": float(self.pose_only_reference_age_bonus),
         }
 
     def flush_trace(self) -> None:

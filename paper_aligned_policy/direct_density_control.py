@@ -91,6 +91,7 @@ class DirectDensityController:
             "pose_rep_value_decouple_v2",
             "pose_rep_value_decouple_v3",
             "pose_rep_active_memory_v1",
+            "pose_rep_active_memory_v2",
         }:
             self.density_lower = 16.0
             self.density_target = 30.0
@@ -153,6 +154,7 @@ class DirectDensityController:
             "pose_rep_value_decouple_v2",
             "pose_rep_value_decouple_v3",
             "pose_rep_active_memory_v1",
+            "pose_rep_active_memory_v2",
         }:
             self.local_density_lower = 12.0
             self.soft_gap_threshold = 8
@@ -170,7 +172,7 @@ class DirectDensityController:
                 getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 5)
                 or 5
             )
-        if self.mode in {"pose_rep_value_decouple_v3", "pose_rep_active_memory_v1"}:
+        if self.mode in {"pose_rep_value_decouple_v3", "pose_rep_active_memory_v1", "pose_rep_active_memory_v2"}:
             self.value_hold_budget_per_100 = int(
                 getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 48)
                 or 48
@@ -183,7 +185,7 @@ class DirectDensityController:
                 getattr(args, "paper_aligned_direct_pose_reference_value_min", 0.65)
                 or 0.65
             )
-        if self.mode == "pose_rep_active_memory_v1":
+        if self.mode in {"pose_rep_active_memory_v1", "pose_rep_active_memory_v2"}:
             self.value_hold_budget_per_100 = int(
                 getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 85)
                 or 85
@@ -237,6 +239,7 @@ class DirectDensityController:
             "pose_rep_value_decouple_v2",
             "pose_rep_value_decouple_v3",
             "pose_rep_active_memory_v1",
+            "pose_rep_active_memory_v2",
         }
 
     @property
@@ -245,6 +248,7 @@ class DirectDensityController:
             "pose_rep_value_decouple_v2",
             "pose_rep_value_decouple_v3",
             "pose_rep_active_memory_v1",
+            "pose_rep_active_memory_v2",
         }
 
     @property
@@ -252,11 +256,20 @@ class DirectDensityController:
         return self.mode in {
             "pose_rep_value_decouple_v3",
             "pose_rep_active_memory_v1",
+            "pose_rep_active_memory_v2",
         }
 
     @property
     def is_pose_rep_active_memory_v1(self) -> bool:
         return self.mode == "pose_rep_active_memory_v1"
+
+    @property
+    def is_pose_rep_active_memory_v2(self) -> bool:
+        return self.mode == "pose_rep_active_memory_v2"
+
+    @property
+    def is_pose_rep_active_memory(self) -> bool:
+        return self.mode in {"pose_rep_active_memory_v1", "pose_rep_active_memory_v2"}
 
     @property
     def is_v222_family(self) -> bool:
@@ -353,6 +366,7 @@ class DirectDensityController:
         local_window_gap_max: float = 0.0,
         local_window_gap_after_if_hold: float = 0.0,
         semantic_scores: dict[str, Any] | None = None,
+        viewpoint_scores: dict[str, Any] | None = None,
     ) -> DirectFinalizationDecision:
         if self.is_pose_rep_value_decouple:
             return self._decide_pose_rep_value_v2(
@@ -382,6 +396,7 @@ class DirectDensityController:
                 novelty_proxy=novelty_proxy,
                 current_keyframe_count=current_keyframe_count,
                 semantic_scores=semantic_scores,
+                viewpoint_scores=viewpoint_scores,
             )
         if self.is_pose_rep_decouple or self.is_v221 or self.is_v222_family or self.mode == "target_band_v2_2":
             return self._decide_v22(
@@ -507,6 +522,7 @@ class DirectDensityController:
         novelty_proxy: float,
         current_keyframe_count: int,
         semantic_scores: dict[str, Any] | None,
+        viewpoint_scores: dict[str, Any] | None = None,
     ) -> DirectFinalizationDecision:
         self._sync_budget_window(frame_id)
         min_growth_window = max(1, int(self.min_growth_per_100 * 0.5))
@@ -516,6 +532,13 @@ class DirectDensityController:
         baseline_min_kf = self.baseline_relative_lower_ratio * baseline_expected_kf
 
         scores = dict(semantic_scores or {})
+        viewpoint = dict(viewpoint_scores or {})
+        viewpoint_rotation_window_max = _f(
+            viewpoint.get("viewpoint_rotation_deg_window_max"), 0.0
+        )
+        viewpoint_grid_coverage = _clamp01(
+            viewpoint.get("inlier_grid_coverage"), 0.0
+        )
         semantic_R = _clamp01(scores.get("R_t"), 0.5)
         semantic_V = _clamp01(scores.get("V_t"), 0.0)
         semantic_Q = _clamp01(scores.get("Q_t"), 0.5)
@@ -636,11 +659,25 @@ class DirectDensityController:
         value_hold_budget_available = bool(
             self._budget.value_hold_used < self.value_hold_budget_per_100
         )
-        active_memory_context_candidate = bool(
-            self.is_pose_rep_active_memory_v1
+        active_memory_low_turn_dense_context = bool(
+            self.is_pose_rep_active_memory_v2
             and int(frame_id) >= 300
             and density_before >= 55.0
-            and local_density_before >= 45.0
+            and local_density_before >= 35.0
+            and viewpoint_rotation_window_max <= 8.0
+            and viewpoint_grid_coverage >= 0.95
+            and active_memory_stable_pose_reference
+            and active_memory_low_marginal_representation
+            and not anchor_changed
+            and gap_safe
+            and not starvation_risk
+            and density_state != "below_lower"
+        )
+        active_memory_context_candidate = bool(
+            self.is_pose_rep_active_memory
+            and int(frame_id) >= 300
+            and density_before >= 55.0
+            and (local_density_before >= 45.0 or active_memory_low_turn_dense_context)
             and active_memory_stable_pose_reference
             and active_memory_low_marginal_representation
             and not anchor_changed
@@ -752,6 +789,9 @@ class DirectDensityController:
             "pose_support_score": pose_support,
             "active_memory_context": active_memory_context,
             "active_memory_context_candidate": active_memory_context_candidate,
+            "active_memory_low_turn_dense_context": active_memory_low_turn_dense_context,
+            "viewpoint_rotation_window_max": viewpoint_rotation_window_max,
+            "viewpoint_grid_coverage": viewpoint_grid_coverage,
             "active_memory_frame_role": active_memory_frame_role,
             "active_memory_marginal_value": active_memory_marginal_value,
             "active_memory_redundancy_pressure": active_memory_redundancy_pressure,

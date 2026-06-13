@@ -1656,6 +1656,7 @@ if __name__ == "__main__":
                             num_matches=int(len(curr_prev_matches.kpts)),
                             min_num_inliers=int(args.min_num_inliers),
                             pose_inliers=pose_inliers,
+                            viewpoint_scores=viewpoint_coverage_event,
                         )
                         direct_keyframe_finalized = bool(fin_dec.finalize)
                         dbg = dict(fin_dec.debug or {})

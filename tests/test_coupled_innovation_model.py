@@ -197,6 +197,23 @@ class CoupledInnovationModelTests(unittest.TestCase):
 
         self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_active_memory_v1")
 
+    def test_cli_accepts_active_memory_v2_direct_density_mode(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_direct_density_control",
+                "pose_rep_active_memory_v2",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_active_memory_v2")
+
     def test_runtime_gate_applies_coupled_preset_to_args_before_subsystems_use_them(self):
         args = _args(paper_aligned_tau_R_low=0.31, paper_aligned_recovery_delay_frames=4)
 
@@ -1230,6 +1247,56 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertFalse(decision.debug["active_memory_context"])
         self.assertGreaterEqual(decision.debug["active_memory_marginal_value"], 0.35)
 
+    def test_active_memory_v2_holds_low_turn_dense_context_frame(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v2")
+        )
+
+        decision = controller.decide(
+            frame_id=392,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=75.5,
+            local_density_before=44.0,
+            local_window_density=44.0,
+            local_window_keyframes=44,
+            local_window_gap_max=3.0,
+            local_window_gap_after_if_hold=3.0,
+            keyframe_growth_recent=36,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=2,
+            main_chain_gap_before=2.0,
+            main_chain_gap_after_if_hold=3.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=18.0,
+            displacement_threshold=30.0,
+            num_matches=2600,
+            min_num_inliers=100,
+            pose_inliers=1800,
+            novelty_proxy=0.08,
+            current_keyframe_count=296,
+            semantic_scores={
+                "R_t": 0.0,
+                "V_t": 0.92,
+                "Q_t": 0.997,
+                "C_t": 1.0,
+                "B_R_t": 1.0,
+            },
+            viewpoint_scores={
+                "viewpoint_rotation_deg_window_max": 2.0,
+                "inlier_grid_coverage": 1.0,
+            },
+        )
+
+        self.assertFalse(decision.finalize)
+        self.assertEqual(decision.decision, "hold_low_representation_value")
+        self.assertTrue(decision.debug["active_memory_low_turn_dense_context"])
+        self.assertTrue(decision.debug["active_memory_context"])
+        self.assertEqual(decision.debug["active_memory_frame_role"], "tracking_only")
+
     def test_pose_only_reference_pool_registers_and_selects_tracking_only_frames(self):
         import torch
 
@@ -1281,6 +1348,74 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertEqual(selected[0].info["_paper_aligned_source_frame_id"], 320)
         self.assertEqual(selected[0].info["_paper_aligned_commit_origin"], "pose_only_reference")
         self.assertEqual(gate.pose_only_reference_pool_summary()["pool_size"], 1)
+
+    def test_pose_only_reference_pool_v2_uses_register_and_selection_cooldown(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v2")
+        )
+        rt = torch.eye(4)
+        density_debug = {
+            "active_memory_context": True,
+            "active_memory_frame_role": "tracking_only",
+        }
+
+        first = gate.register_pose_only_reference(
+            frame_id=320,
+            info={"is_test": False, "image_name": "first"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=rt,
+            density_debug=density_debug,
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+        cooldown = gate.register_pose_only_reference(
+            frame_id=325,
+            info={"is_test": False, "image_name": "cooldown"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=520),
+            Rt=rt,
+            density_debug=density_debug,
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+        second = gate.register_pose_only_reference(
+            frame_id=333,
+            info={"is_test": False, "image_name": "second"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=520),
+            Rt=rt,
+            density_debug=density_debug,
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        selected_first = gate.select_pose_only_references(
+            frame_id=352,
+            curr_desc_kpts=_pose_pool_desc(match_score=0),
+            matcher=_PosePoolMatcher(),
+        )
+        selected_second = gate.select_pose_only_references(
+            frame_id=353,
+            curr_desc_kpts=_pose_pool_desc(match_score=0),
+            matcher=_PosePoolMatcher(),
+        )
+
+        self.assertTrue(first)
+        self.assertFalse(cooldown)
+        self.assertTrue(second)
+        self.assertEqual(
+            gate.pose_reference_pool_events[1]["block_reason"],
+            "pose_only_register_cooldown",
+        )
+        self.assertEqual(
+            [ref.info["_paper_aligned_source_frame_id"] for ref in selected_first],
+            [333],
+        )
+        self.assertEqual(
+            [ref.info["_paper_aligned_source_frame_id"] for ref in selected_second],
+            [320],
+        )
+        summary = gate.pose_only_reference_pool_summary()
+        self.assertEqual(summary["min_age_frames"], 18)
+        self.assertEqual(summary["register_min_interval_frames"], 12)
+        self.assertEqual(summary["selection_cooldown_frames"], 8)
 
     def test_pose_only_reference_pool_expires_caps_and_ranks_by_match_support(self):
         import torch
