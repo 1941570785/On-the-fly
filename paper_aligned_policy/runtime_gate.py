@@ -87,6 +87,10 @@ class PaperAlignedRuntimeGate:
         self.pose_only_reference_high_new_view_support_min = 0.10
         self.pose_only_reference_high_new_view_anchor_health_max = 0.70
         self.pose_only_reference_growth_stall_max = 0
+        self.pose_only_reference_require_negative_growth = False
+        self.pose_only_reference_allow_high_new_view_rescue = True
+        self.pose_only_reference_repetitive_entropy_min = 1.01
+        self.pose_only_reference_repetitive_entropy_support_max = 0.0
         self._last_pose_only_reference_register_frame = -1
         self.pose_only_reference_registered_count = 0
         self.pose_only_reference_selected_count = 0
@@ -101,6 +105,7 @@ class PaperAlignedRuntimeGate:
             getattr(self.direct_density_controller, "is_pose_rep_active_memory_v2", False)
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v4", False)
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v5", False)
+            or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v6", False)
         ):
             self.pose_only_reference_pool_max_size = 24
             self.pose_only_reference_ttl_frames = 140
@@ -132,6 +137,24 @@ class PaperAlignedRuntimeGate:
             self.pose_only_reference_high_new_view_min = 0.20
             self.pose_only_reference_high_new_view_support_min = 0.11
             self.pose_only_reference_high_new_view_anchor_health_max = 0.70
+        if getattr(self.direct_density_controller, "is_pose_rep_active_memory_v6", False):
+            self.pose_only_reference_pool_max_size = 12
+            self.pose_only_reference_ttl_frames = 100
+            self.pose_only_reference_min_age_frames = 28
+            self.pose_only_reference_min_match_score = 260.0
+            self.pose_only_reference_register_min_interval_frames = 24
+            self.pose_only_reference_selection_cooldown_frames = 16
+            self.pose_only_reference_age_bonus = 12.0
+            self.pose_only_reference_risk_gate_enabled = True
+            self.pose_only_reference_min_support_concentration = 0.08
+            self.pose_only_reference_low_new_view_max = 0.165
+            self.pose_only_reference_high_new_view_min = 0.20
+            self.pose_only_reference_high_new_view_support_min = 0.11
+            self.pose_only_reference_high_new_view_anchor_health_max = 0.70
+            self.pose_only_reference_require_negative_growth = True
+            self.pose_only_reference_allow_high_new_view_rescue = False
+            self.pose_only_reference_repetitive_entropy_min = 0.94
+            self.pose_only_reference_repetitive_entropy_support_max = 0.08
         self._anchor_count_at_last_direct_finalize = 1
         if self.mode == "paper_aligned_semantic_v1":
             cfg = self.coupled_config
@@ -1050,6 +1073,7 @@ class PaperAlignedRuntimeGate:
         support_concentration = self._tensor_float(debug.get("support_concentration"), 1.0)
         new_view_event = self._tensor_float(debug.get("new_view_event_score"), 0.0)
         anchor_health = self._tensor_float(debug.get("anchor_health_score"), 0.0)
+        inlier_grid_entropy = self._tensor_float(debug.get("inlier_grid_entropy"), 0.0)
         growth_recent = self._tensor_float(
             debug.get("keyframe_growth_recent", debug.get("recent_keyframe_growth", 0.0)),
             0.0,
@@ -1059,21 +1083,37 @@ class PaperAlignedRuntimeGate:
             "pose_only_new_view_event_score": float(new_view_event),
             "pose_only_anchor_health_score": float(anchor_health),
             "pose_only_keyframe_growth_recent": float(growth_recent),
+            "pose_only_inlier_grid_entropy": float(inlier_grid_entropy),
         }
-        if growth_recent > float(self.pose_only_reference_growth_stall_max):
+        if bool(self.pose_only_reference_require_negative_growth):
+            if growth_recent >= 0.0:
+                return False, "pose_only_growth_not_stalled", metrics
+        elif growth_recent > float(self.pose_only_reference_growth_stall_max):
             return False, "pose_only_growth_not_stalled", metrics
+        if (
+            inlier_grid_entropy >= float(self.pose_only_reference_repetitive_entropy_min)
+            and support_concentration < float(self.pose_only_reference_repetitive_entropy_support_max)
+        ):
+            return False, "pose_only_repetitive_entropy_low_support", metrics
         if support_concentration < float(self.pose_only_reference_min_support_concentration):
             return False, "pose_only_low_support_diversity", metrics
         low_new_view_context = new_view_event <= float(self.pose_only_reference_low_new_view_max)
+        high_new_view_candidate = new_view_event >= float(
+            self.pose_only_reference_high_new_view_min
+        )
+        if high_new_view_candidate and not bool(
+            self.pose_only_reference_allow_high_new_view_rescue
+        ):
+            return False, "pose_only_high_new_view_pnp_disabled", metrics
         high_new_view_rescue = (
-            new_view_event >= float(self.pose_only_reference_high_new_view_min)
+            high_new_view_candidate
             and support_concentration >= float(self.pose_only_reference_high_new_view_support_min)
             and anchor_health <= float(self.pose_only_reference_high_new_view_anchor_health_max)
         )
         if low_new_view_context or high_new_view_rescue:
             return True, "", metrics
         if (
-            new_view_event >= float(self.pose_only_reference_high_new_view_min)
+            high_new_view_candidate
             and anchor_health > float(self.pose_only_reference_high_new_view_anchor_health_max)
         ):
             return False, "pose_only_anchor_healthy_high_new_view", metrics
@@ -1350,6 +1390,18 @@ class PaperAlignedRuntimeGate:
                 self.pose_only_reference_high_new_view_anchor_health_max
             ),
             "growth_stall_max": int(self.pose_only_reference_growth_stall_max),
+            "requires_negative_growth": bool(
+                self.pose_only_reference_require_negative_growth
+            ),
+            "allow_high_new_view_rescue": bool(
+                self.pose_only_reference_allow_high_new_view_rescue
+            ),
+            "repetitive_entropy_min": float(
+                self.pose_only_reference_repetitive_entropy_min
+            ),
+            "repetitive_entropy_support_max": float(
+                self.pose_only_reference_repetitive_entropy_support_max
+            ),
         }
 
     def flush_trace(self) -> None:

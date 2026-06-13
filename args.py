@@ -268,6 +268,7 @@ def get_args():
             'pose_rep_active_memory_v2',
             'pose_rep_active_memory_v4',
             'pose_rep_active_memory_v5',
+            'pose_rep_active_memory_v6',
         ],
         help='Direct keyframe finalization density guard (not R/V/Q admission).',
     )

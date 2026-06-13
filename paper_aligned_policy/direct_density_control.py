@@ -94,6 +94,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v2",
             "pose_rep_active_memory_v4",
             "pose_rep_active_memory_v5",
+            "pose_rep_active_memory_v6",
         }:
             self.density_lower = 16.0
             self.density_target = 30.0
@@ -159,6 +160,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v2",
             "pose_rep_active_memory_v4",
             "pose_rep_active_memory_v5",
+            "pose_rep_active_memory_v6",
         }:
             self.local_density_lower = 12.0
             self.soft_gap_threshold = 8
@@ -182,6 +184,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v2",
             "pose_rep_active_memory_v4",
             "pose_rep_active_memory_v5",
+            "pose_rep_active_memory_v6",
         }:
             self.value_hold_budget_per_100 = int(
                 getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 48)
@@ -252,6 +255,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v2",
             "pose_rep_active_memory_v4",
             "pose_rep_active_memory_v5",
+            "pose_rep_active_memory_v6",
         }
 
     @property
@@ -263,6 +267,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v2",
             "pose_rep_active_memory_v4",
             "pose_rep_active_memory_v5",
+            "pose_rep_active_memory_v6",
         }
 
     @property
@@ -273,6 +278,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v2",
             "pose_rep_active_memory_v4",
             "pose_rep_active_memory_v5",
+            "pose_rep_active_memory_v6",
         }
 
     @property
@@ -292,12 +298,17 @@ class DirectDensityController:
         return self.mode == "pose_rep_active_memory_v5"
 
     @property
+    def is_pose_rep_active_memory_v6(self) -> bool:
+        return self.mode == "pose_rep_active_memory_v6"
+
+    @property
     def is_pose_rep_active_memory(self) -> bool:
         return self.mode in {
             "pose_rep_active_memory_v1",
             "pose_rep_active_memory_v2",
             "pose_rep_active_memory_v4",
             "pose_rep_active_memory_v5",
+            "pose_rep_active_memory_v6",
         }
 
     @property
@@ -693,6 +704,7 @@ class DirectDensityController:
                 self.is_pose_rep_active_memory_v2
                 or self.is_pose_rep_active_memory_v4
                 or self.is_pose_rep_active_memory_v5
+                or self.is_pose_rep_active_memory_v6
             )
             and int(frame_id) >= 300
             and density_before >= 55.0

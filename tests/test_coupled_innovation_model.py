@@ -231,6 +231,23 @@ class CoupledInnovationModelTests(unittest.TestCase):
 
         self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_active_memory_v4")
 
+    def test_cli_accepts_active_memory_v6_direct_density_mode(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_direct_density_control",
+                "pose_rep_active_memory_v6",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_active_memory_v6")
+
     def test_runtime_gate_applies_coupled_preset_to_args_before_subsystems_use_them(self):
         args = _args(paper_aligned_tau_R_low=0.31, paper_aligned_recovery_delay_frames=4)
 
@@ -1603,6 +1620,122 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertEqual(
             gate.pose_reference_pool_events[-1]["block_reason"],
             "pose_only_risk_gate_not_met",
+        )
+
+    def test_pose_only_reference_pool_v6_blocks_zero_growth_refs(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v6")
+        )
+        accepted = gate.register_pose_only_reference(
+            frame_id=320,
+            info={"is_test": False, "image_name": "zero_growth_reference"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=torch.eye(4),
+            density_debug={
+                "active_memory_context": True,
+                "active_memory_frame_role": "tracking_only",
+                "support_concentration": 0.10,
+                "new_view_event_score": 0.15,
+                "anchor_health_score": 0.60,
+                "keyframe_growth_recent": 0,
+                "inlier_grid_entropy": 0.92,
+            },
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(
+            gate.pose_reference_pool_events[-1]["block_reason"],
+            "pose_only_growth_not_stalled",
+        )
+
+    def test_pose_only_reference_pool_v6_blocks_repetitive_entropy_low_support_refs(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v6")
+        )
+        accepted = gate.register_pose_only_reference(
+            frame_id=320,
+            info={"is_test": False, "image_name": "forest_repetitive_reference"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=torch.eye(4),
+            density_debug={
+                "active_memory_context": True,
+                "active_memory_frame_role": "tracking_only",
+                "support_concentration": 0.075,
+                "new_view_event_score": 0.14,
+                "anchor_health_score": 0.60,
+                "keyframe_growth_recent": -8,
+                "inlier_grid_entropy": 0.955,
+            },
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(
+            gate.pose_reference_pool_events[-1]["block_reason"],
+            "pose_only_repetitive_entropy_low_support",
+        )
+
+    def test_pose_only_reference_pool_v6_accepts_strict_university_refs(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v6")
+        )
+        accepted = gate.register_pose_only_reference(
+            frame_id=320,
+            info={"is_test": False, "image_name": "university_low_growth_reference"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=torch.eye(4),
+            density_debug={
+                "active_memory_context": True,
+                "active_memory_frame_role": "tracking_only",
+                "support_concentration": 0.09,
+                "new_view_event_score": 0.15,
+                "anchor_health_score": 0.60,
+                "keyframe_growth_recent": -8,
+                "inlier_grid_entropy": 0.92,
+            },
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertTrue(accepted)
+        summary = gate.pose_only_reference_pool_summary()
+        self.assertEqual(summary["pool_size"], 1)
+        self.assertEqual(summary["min_support_concentration"], 0.08)
+        self.assertTrue(summary["requires_negative_growth"])
+
+    def test_pose_only_reference_pool_v6_blocks_high_new_view_pnp_rescue(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v6")
+        )
+        accepted = gate.register_pose_only_reference(
+            frame_id=320,
+            info={"is_test": False, "image_name": "high_new_view_pnp_reference"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=torch.eye(4),
+            density_debug={
+                "active_memory_context": True,
+                "active_memory_frame_role": "tracking_only",
+                "support_concentration": 0.13,
+                "new_view_event_score": 0.25,
+                "anchor_health_score": 0.60,
+                "keyframe_growth_recent": -8,
+                "inlier_grid_entropy": 0.88,
+            },
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(
+            gate.pose_reference_pool_events[-1]["block_reason"],
+            "pose_only_high_new_view_pnp_disabled",
         )
 
     def test_training_loop_registers_pose_only_references_for_active_memory_modes(self):
