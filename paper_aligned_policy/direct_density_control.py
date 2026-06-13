@@ -92,6 +92,7 @@ class DirectDensityController:
             "pose_rep_value_decouple_v3",
             "pose_rep_active_memory_v1",
             "pose_rep_active_memory_v2",
+            "pose_rep_active_memory_v4",
         }:
             self.density_lower = 16.0
             self.density_target = 30.0
@@ -155,6 +156,7 @@ class DirectDensityController:
             "pose_rep_value_decouple_v3",
             "pose_rep_active_memory_v1",
             "pose_rep_active_memory_v2",
+            "pose_rep_active_memory_v4",
         }:
             self.local_density_lower = 12.0
             self.soft_gap_threshold = 8
@@ -172,7 +174,12 @@ class DirectDensityController:
                 getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 5)
                 or 5
             )
-        if self.mode in {"pose_rep_value_decouple_v3", "pose_rep_active_memory_v1", "pose_rep_active_memory_v2"}:
+        if self.mode in {
+            "pose_rep_value_decouple_v3",
+            "pose_rep_active_memory_v1",
+            "pose_rep_active_memory_v2",
+            "pose_rep_active_memory_v4",
+        }:
             self.value_hold_budget_per_100 = int(
                 getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 48)
                 or 48
@@ -240,6 +247,7 @@ class DirectDensityController:
             "pose_rep_value_decouple_v3",
             "pose_rep_active_memory_v1",
             "pose_rep_active_memory_v2",
+            "pose_rep_active_memory_v4",
         }
 
     @property
@@ -249,6 +257,7 @@ class DirectDensityController:
             "pose_rep_value_decouple_v3",
             "pose_rep_active_memory_v1",
             "pose_rep_active_memory_v2",
+            "pose_rep_active_memory_v4",
         }
 
     @property
@@ -257,6 +266,7 @@ class DirectDensityController:
             "pose_rep_value_decouple_v3",
             "pose_rep_active_memory_v1",
             "pose_rep_active_memory_v2",
+            "pose_rep_active_memory_v4",
         }
 
     @property
@@ -268,8 +278,16 @@ class DirectDensityController:
         return self.mode == "pose_rep_active_memory_v2"
 
     @property
+    def is_pose_rep_active_memory_v4(self) -> bool:
+        return self.mode == "pose_rep_active_memory_v4"
+
+    @property
     def is_pose_rep_active_memory(self) -> bool:
-        return self.mode in {"pose_rep_active_memory_v1", "pose_rep_active_memory_v2"}
+        return self.mode in {
+            "pose_rep_active_memory_v1",
+            "pose_rep_active_memory_v2",
+            "pose_rep_active_memory_v4",
+        }
 
     @property
     def is_v222_family(self) -> bool:
@@ -660,7 +678,7 @@ class DirectDensityController:
             self._budget.value_hold_used < self.value_hold_budget_per_100
         )
         active_memory_low_turn_dense_context = bool(
-            self.is_pose_rep_active_memory_v2
+            (self.is_pose_rep_active_memory_v2 or self.is_pose_rep_active_memory_v4)
             and int(frame_id) >= 300
             and density_before >= 55.0
             and local_density_before >= 35.0

@@ -214,6 +214,23 @@ class CoupledInnovationModelTests(unittest.TestCase):
 
         self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_active_memory_v2")
 
+    def test_cli_accepts_active_memory_v4_direct_density_mode(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_direct_density_control",
+                "pose_rep_active_memory_v4",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_active_memory_v4")
+
     def test_runtime_gate_applies_coupled_preset_to_args_before_subsystems_use_them(self):
         args = _args(paper_aligned_tau_R_low=0.31, paper_aligned_recovery_delay_frames=4)
 
@@ -1416,6 +1433,93 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertEqual(summary["min_age_frames"], 18)
         self.assertEqual(summary["register_min_interval_frames"], 12)
         self.assertEqual(summary["selection_cooldown_frames"], 8)
+
+    def test_pose_only_reference_pool_v4_gates_repetitive_low_diversity_refs(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v4")
+        )
+        density_debug = {
+            "active_memory_context": True,
+            "active_memory_frame_role": "tracking_only",
+            "support_concentration": 0.04,
+            "new_view_event_score": 0.14,
+            "anchor_health_score": 0.60,
+            "keyframe_growth_recent": -10,
+        }
+
+        accepted = gate.register_pose_only_reference(
+            frame_id=320,
+            info={"is_test": False, "image_name": "forest_like"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=torch.eye(4),
+            density_debug=density_debug,
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(
+            gate.pose_reference_pool_events[-1]["block_reason"],
+            "pose_only_low_support_diversity",
+        )
+
+    def test_pose_only_reference_pool_v4_accepts_growth_stall_diverse_refs(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v4")
+        )
+        density_debug = {
+            "active_memory_context": True,
+            "active_memory_frame_role": "tracking_only",
+            "support_concentration": 0.09,
+            "new_view_event_score": 0.15,
+            "anchor_health_score": 0.60,
+            "keyframe_growth_recent": -8,
+        }
+
+        accepted = gate.register_pose_only_reference(
+            frame_id=320,
+            info={"is_test": False, "image_name": "university_like"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=torch.eye(4),
+            density_debug=density_debug,
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertTrue(accepted)
+        self.assertEqual(gate.pose_only_reference_pool_summary()["pool_size"], 1)
+
+    def test_pose_only_reference_pool_v4_blocks_healthy_anchor_high_new_view_refs(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v4")
+        )
+        density_debug = {
+            "active_memory_context": True,
+            "active_memory_frame_role": "tracking_only",
+            "support_concentration": 0.14,
+            "new_view_event_score": 0.30,
+            "anchor_health_score": 0.74,
+            "keyframe_growth_recent": -6,
+        }
+
+        accepted = gate.register_pose_only_reference(
+            frame_id=320,
+            info={"is_test": False, "image_name": "desk1_like"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=torch.eye(4),
+            density_debug=density_debug,
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(
+            gate.pose_reference_pool_events[-1]["block_reason"],
+            "pose_only_anchor_healthy_high_new_view",
+        )
 
     def test_training_loop_registers_pose_only_references_for_active_memory_modes(self):
         train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(

@@ -80,6 +80,13 @@ class PaperAlignedRuntimeGate:
         self.pose_only_reference_register_min_interval_frames = 0
         self.pose_only_reference_selection_cooldown_frames = 0
         self.pose_only_reference_age_bonus = 0.0
+        self.pose_only_reference_risk_gate_enabled = False
+        self.pose_only_reference_min_support_concentration = 0.065
+        self.pose_only_reference_low_new_view_max = 0.18
+        self.pose_only_reference_high_new_view_min = 0.20
+        self.pose_only_reference_high_new_view_support_min = 0.10
+        self.pose_only_reference_high_new_view_anchor_health_max = 0.70
+        self.pose_only_reference_growth_stall_max = 0
         self._last_pose_only_reference_register_frame = -1
         self.pose_only_reference_registered_count = 0
         self.pose_only_reference_selected_count = 0
@@ -90,7 +97,10 @@ class PaperAlignedRuntimeGate:
         self.semantic_policy: SemanticV1RuntimePolicy | None = None
         self.recovery_commit_controller = RecoveryCommitController(args)
         self.direct_density_controller = DirectDensityController(args)
-        if getattr(self.direct_density_controller, "is_pose_rep_active_memory_v2", False):
+        if (
+            getattr(self.direct_density_controller, "is_pose_rep_active_memory_v2", False)
+            or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v4", False)
+        ):
             self.pose_only_reference_pool_max_size = 24
             self.pose_only_reference_ttl_frames = 140
             self.pose_only_reference_min_age_frames = 18
@@ -98,6 +108,15 @@ class PaperAlignedRuntimeGate:
             self.pose_only_reference_register_min_interval_frames = 12
             self.pose_only_reference_selection_cooldown_frames = 8
             self.pose_only_reference_age_bonus = 30.0
+        if getattr(self.direct_density_controller, "is_pose_rep_active_memory_v4", False):
+            self.pose_only_reference_pool_max_size = 16
+            self.pose_only_reference_ttl_frames = 120
+            self.pose_only_reference_min_age_frames = 24
+            self.pose_only_reference_min_match_score = 240.0
+            self.pose_only_reference_register_min_interval_frames = 18
+            self.pose_only_reference_selection_cooldown_frames = 12
+            self.pose_only_reference_age_bonus = 20.0
+            self.pose_only_reference_risk_gate_enabled = True
         self._anchor_count_at_last_direct_finalize = 1
         if self.mode == "paper_aligned_semantic_v1":
             cfg = self.coupled_config
@@ -1012,6 +1031,39 @@ class PaperAlignedRuntimeGate:
             if int(ref.info.get("_paper_aligned_source_frame_id", -1)) >= min_source_frame
         ]
 
+    def _pose_only_reference_risk_gate_decision(self, debug: dict[str, Any]) -> tuple[bool, str, dict[str, float]]:
+        support_concentration = self._tensor_float(debug.get("support_concentration"), 1.0)
+        new_view_event = self._tensor_float(debug.get("new_view_event_score"), 0.0)
+        anchor_health = self._tensor_float(debug.get("anchor_health_score"), 0.0)
+        growth_recent = self._tensor_float(
+            debug.get("keyframe_growth_recent", debug.get("recent_keyframe_growth", 0.0)),
+            0.0,
+        )
+        metrics = {
+            "pose_only_support_concentration": float(support_concentration),
+            "pose_only_new_view_event_score": float(new_view_event),
+            "pose_only_anchor_health_score": float(anchor_health),
+            "pose_only_keyframe_growth_recent": float(growth_recent),
+        }
+        if growth_recent > float(self.pose_only_reference_growth_stall_max):
+            return False, "pose_only_growth_not_stalled", metrics
+        if support_concentration < float(self.pose_only_reference_min_support_concentration):
+            return False, "pose_only_low_support_diversity", metrics
+        low_new_view_context = new_view_event <= float(self.pose_only_reference_low_new_view_max)
+        high_new_view_rescue = (
+            new_view_event >= float(self.pose_only_reference_high_new_view_min)
+            and support_concentration >= float(self.pose_only_reference_high_new_view_support_min)
+            and anchor_health <= float(self.pose_only_reference_high_new_view_anchor_health_max)
+        )
+        if low_new_view_context or high_new_view_rescue:
+            return True, "", metrics
+        if (
+            new_view_event >= float(self.pose_only_reference_high_new_view_min)
+            and anchor_health > float(self.pose_only_reference_high_new_view_anchor_health_max)
+        ):
+            return False, "pose_only_anchor_healthy_high_new_view", metrics
+        return False, "pose_only_risk_gate_not_met", metrics
+
     def _apply_pose_support_to_desc(self, desc_kpts: Any, pose_support: dict[str, Any] | None) -> None:
         if not pose_support or not hasattr(desc_kpts, "update_3D_pts"):
             return
@@ -1068,6 +1120,24 @@ class PaperAlignedRuntimeGate:
             )
             return False
 
+        risk_gate_metrics: dict[str, float] = {}
+        if self.pose_only_reference_risk_gate_enabled:
+            risk_gate_ok, risk_gate_reason, risk_gate_metrics = (
+                self._pose_only_reference_risk_gate_decision(debug)
+            )
+            if not risk_gate_ok:
+                self.pose_reference_pool_events.append(
+                    {
+                        "event_type": "pose_only_register",
+                        "frame_id": int(frame_id),
+                        "registered": False,
+                        "block_reason": risk_gate_reason,
+                        "pool_size_after": len(self.pose_only_reference_pool),
+                        **risk_gate_metrics,
+                    }
+                )
+                return False
+
         self._purge_pose_only_references(int(frame_id))
         register_gap = (
             int(frame_id) - int(self._last_pose_only_reference_register_frame)
@@ -1116,6 +1186,8 @@ class PaperAlignedRuntimeGate:
         ref_info["_paper_aligned_commit_origin"] = "pose_only_reference"
         ref_info["_paper_aligned_pose_only_reference"] = True
         ref_info["_paper_aligned_support_eligible_recovery_keyframe"] = False
+        for key, value in risk_gate_metrics.items():
+            ref_info[f"_paper_aligned_{key}"] = value
         reference = SimpleNamespace(
             index=1_000_000 + int(frame_id),
             info=ref_info,
@@ -1141,6 +1213,7 @@ class PaperAlignedRuntimeGate:
                 "registered": True,
                 "pose_only_3d_support_count": support_count,
                 "pose_only_pool_size_after": len(self.pose_only_reference_pool),
+                **risk_gate_metrics,
                 "pose_only_pnp_inliers": int((pose_debug or {}).get("num_pnp_inliers", 0) or 0),
                 "pose_only_miniba_inliers": int((pose_debug or {}).get("num_miniba_inliers", 0) or 0),
             }
@@ -1253,6 +1326,15 @@ class PaperAlignedRuntimeGate:
                 self.pose_only_reference_selection_cooldown_frames
             ),
             "age_bonus": float(self.pose_only_reference_age_bonus),
+            "risk_gate_enabled": bool(self.pose_only_reference_risk_gate_enabled),
+            "min_support_concentration": float(self.pose_only_reference_min_support_concentration),
+            "low_new_view_max": float(self.pose_only_reference_low_new_view_max),
+            "high_new_view_min": float(self.pose_only_reference_high_new_view_min),
+            "high_new_view_support_min": float(self.pose_only_reference_high_new_view_support_min),
+            "high_new_view_anchor_health_max": float(
+                self.pose_only_reference_high_new_view_anchor_health_max
+            ),
+            "growth_stall_max": int(self.pose_only_reference_growth_stall_max),
         }
 
     def flush_trace(self) -> None:
