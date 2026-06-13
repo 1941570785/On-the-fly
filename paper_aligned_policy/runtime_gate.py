@@ -100,6 +100,7 @@ class PaperAlignedRuntimeGate:
         if (
             getattr(self.direct_density_controller, "is_pose_rep_active_memory_v2", False)
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v4", False)
+            or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v5", False)
         ):
             self.pose_only_reference_pool_max_size = 24
             self.pose_only_reference_ttl_frames = 140
@@ -117,6 +118,20 @@ class PaperAlignedRuntimeGate:
             self.pose_only_reference_selection_cooldown_frames = 12
             self.pose_only_reference_age_bonus = 20.0
             self.pose_only_reference_risk_gate_enabled = True
+        if getattr(self.direct_density_controller, "is_pose_rep_active_memory_v5", False):
+            self.pose_only_reference_pool_max_size = 12
+            self.pose_only_reference_ttl_frames = 100
+            self.pose_only_reference_min_age_frames = 28
+            self.pose_only_reference_min_match_score = 260.0
+            self.pose_only_reference_register_min_interval_frames = 24
+            self.pose_only_reference_selection_cooldown_frames = 16
+            self.pose_only_reference_age_bonus = 12.0
+            self.pose_only_reference_risk_gate_enabled = True
+            self.pose_only_reference_min_support_concentration = 0.08
+            self.pose_only_reference_low_new_view_max = 0.165
+            self.pose_only_reference_high_new_view_min = 0.20
+            self.pose_only_reference_high_new_view_support_min = 0.11
+            self.pose_only_reference_high_new_view_anchor_health_max = 0.70
         self._anchor_count_at_last_direct_finalize = 1
         if self.mode == "paper_aligned_semantic_v1":
             cfg = self.coupled_config

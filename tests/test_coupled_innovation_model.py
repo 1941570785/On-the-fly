@@ -1521,6 +1521,90 @@ class CoupledInnovationModelTests(unittest.TestCase):
             "pose_only_anchor_healthy_high_new_view",
         )
 
+    def test_pose_only_reference_pool_v5_blocks_borderline_low_diversity_refs(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v5")
+        )
+        accepted = gate.register_pose_only_reference(
+            frame_id=320,
+            info={"is_test": False, "image_name": "forest_borderline"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=torch.eye(4),
+            density_debug={
+                "active_memory_context": True,
+                "active_memory_frame_role": "tracking_only",
+                "support_concentration": 0.075,
+                "new_view_event_score": 0.14,
+                "anchor_health_score": 0.60,
+                "keyframe_growth_recent": -10,
+            },
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(
+            gate.pose_reference_pool_events[-1]["block_reason"],
+            "pose_only_low_support_diversity",
+        )
+
+    def test_pose_only_reference_pool_v5_accepts_strong_low_new_view_refs(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v5")
+        )
+        accepted = gate.register_pose_only_reference(
+            frame_id=320,
+            info={"is_test": False, "image_name": "university_strong"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=torch.eye(4),
+            density_debug={
+                "active_memory_context": True,
+                "active_memory_frame_role": "tracking_only",
+                "support_concentration": 0.09,
+                "new_view_event_score": 0.15,
+                "anchor_health_score": 0.60,
+                "keyframe_growth_recent": -8,
+            },
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertTrue(accepted)
+        summary = gate.pose_only_reference_pool_summary()
+        self.assertEqual(summary["pool_size"], 1)
+        self.assertEqual(summary["min_support_concentration"], 0.08)
+        self.assertEqual(summary["low_new_view_max"], 0.165)
+
+    def test_pose_only_reference_pool_v5_blocks_mid_new_view_refs(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v5")
+        )
+        accepted = gate.register_pose_only_reference(
+            frame_id=320,
+            info={"is_test": False, "image_name": "forest2_mid_view"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=torch.eye(4),
+            density_debug={
+                "active_memory_context": True,
+                "active_memory_frame_role": "tracking_only",
+                "support_concentration": 0.10,
+                "new_view_event_score": 0.18,
+                "anchor_health_score": 0.60,
+                "keyframe_growth_recent": -8,
+            },
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(
+            gate.pose_reference_pool_events[-1]["block_reason"],
+            "pose_only_risk_gate_not_met",
+        )
+
     def test_training_loop_registers_pose_only_references_for_active_memory_modes(self):
         train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(
             encoding="utf-8-sig"
