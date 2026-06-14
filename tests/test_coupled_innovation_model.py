@@ -299,6 +299,23 @@ class CoupledInnovationModelTests(unittest.TestCase):
 
         self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_active_memory_v24")
 
+    def test_cli_accepts_active_memory_v25_direct_density_mode(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_direct_density_control",
+                "pose_rep_active_memory_v25",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_active_memory_v25")
+
     def test_runtime_gate_applies_coupled_preset_to_args_before_subsystems_use_them(self):
         args = _args(paper_aligned_tau_R_low=0.31, paper_aligned_recovery_delay_frames=4)
 
@@ -2098,6 +2115,51 @@ class CoupledInnovationModelTests(unittest.TestCase):
             select_events[0]["pose_only_geometry_score"],
             select_events[1]["pose_only_geometry_score"],
         )
+
+    def test_pose_only_reference_pool_v25_keeps_risk_aware_scoring_single_reference(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v25")
+        )
+        rt = torch.eye(4)
+        for frame_id, name, match_score, support, new_view, anchor, entropy in [
+            (420, "raw_match_only", 540, 0.081, 0.15, 0.62, 0.910),
+            (448, "turn_bridge", 500, 0.130, 0.24, 0.64, 0.875),
+            (476, "recent_raw_match", 560, 0.082, 0.14, 0.61, 0.905),
+        ]:
+            self.assertTrue(
+                gate.register_pose_only_reference(
+                    frame_id=frame_id,
+                    info={"is_test": False, "image_name": name},
+                    desc_kpts=_pose_pool_desc(support_count=700, match_score=match_score),
+                    Rt=rt,
+                    density_debug={
+                        "active_memory_context": True,
+                        "active_memory_frame_role": "tracking_only",
+                        "support_concentration": support,
+                        "new_view_event_score": new_view,
+                        "anchor_health_score": anchor,
+                        "keyframe_growth_recent": -8,
+                        "inlier_grid_entropy": entropy,
+                    },
+                    pose_debug={"num_pnp_inliers": 320, "num_miniba_inliers": 300},
+                )
+            )
+
+        selected = gate.select_pose_only_references(
+            frame_id=520,
+            curr_desc_kpts=_pose_pool_desc(match_score=0),
+            matcher=_PosePoolMatcher(),
+        )
+
+        self.assertEqual(
+            [ref.info["_paper_aligned_source_frame_id"] for ref in selected],
+            [448],
+        )
+        summary = gate.pose_only_reference_pool_summary()
+        self.assertEqual(summary["max_per_query"], 1)
+        self.assertEqual(summary["selection_strategy"], "risk_aware")
 
     def test_training_loop_registers_pose_only_references_for_active_memory_modes(self):
         train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(
