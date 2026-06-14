@@ -99,6 +99,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v9",
             "pose_rep_active_memory_v24",
             "pose_rep_active_memory_v25",
+            "pose_rep_active_memory_v26",
         }:
             self.density_lower = 16.0
             self.density_target = 30.0
@@ -169,6 +170,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v9",
             "pose_rep_active_memory_v24",
             "pose_rep_active_memory_v25",
+            "pose_rep_active_memory_v26",
         }:
             self.local_density_lower = 12.0
             self.soft_gap_threshold = 8
@@ -197,6 +199,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v9",
             "pose_rep_active_memory_v24",
             "pose_rep_active_memory_v25",
+            "pose_rep_active_memory_v26",
         }:
             self.value_hold_budget_per_100 = int(
                 getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 48)
@@ -272,6 +275,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v9",
             "pose_rep_active_memory_v24",
             "pose_rep_active_memory_v25",
+            "pose_rep_active_memory_v26",
         }
 
     @property
@@ -288,6 +292,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v9",
             "pose_rep_active_memory_v24",
             "pose_rep_active_memory_v25",
+            "pose_rep_active_memory_v26",
         }
 
     @property
@@ -303,6 +308,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v9",
             "pose_rep_active_memory_v24",
             "pose_rep_active_memory_v25",
+            "pose_rep_active_memory_v26",
         }
 
     @property
@@ -342,6 +348,10 @@ class DirectDensityController:
         return self.mode == "pose_rep_active_memory_v25"
 
     @property
+    def is_pose_rep_active_memory_v26(self) -> bool:
+        return self.mode == "pose_rep_active_memory_v26"
+
+    @property
     def is_pose_rep_active_memory(self) -> bool:
         return self.mode in {
             "pose_rep_active_memory_v1",
@@ -353,6 +363,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v9",
             "pose_rep_active_memory_v24",
             "pose_rep_active_memory_v25",
+            "pose_rep_active_memory_v26",
         }
 
     @property
@@ -765,6 +776,7 @@ class DirectDensityController:
                 or self.is_pose_rep_active_memory_v9
                 or self.is_pose_rep_active_memory_v24
                 or self.is_pose_rep_active_memory_v25
+                or self.is_pose_rep_active_memory_v26
             )
             and int(frame_id) >= 300
             and density_before >= 55.0

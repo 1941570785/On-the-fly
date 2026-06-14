@@ -316,6 +316,23 @@ class CoupledInnovationModelTests(unittest.TestCase):
 
         self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_active_memory_v25")
 
+    def test_cli_accepts_active_memory_v26_direct_density_mode(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_direct_density_control",
+                "pose_rep_active_memory_v26",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_active_memory_v26")
+
     def test_runtime_gate_applies_coupled_preset_to_args_before_subsystems_use_them(self):
         args = _args(paper_aligned_tau_R_low=0.31, paper_aligned_recovery_delay_frames=4)
 
@@ -2160,6 +2177,73 @@ class CoupledInnovationModelTests(unittest.TestCase):
         summary = gate.pose_only_reference_pool_summary()
         self.assertEqual(summary["max_per_query"], 1)
         self.assertEqual(summary["selection_strategy"], "risk_aware")
+
+    def test_pose_only_reference_pool_v26_blocks_only_late_extreme_new_view_thin_support(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v26")
+        )
+        accepted = gate.register_pose_only_reference(
+            frame_id=1272,
+            info={"is_test": False, "image_name": "long_late_extreme_new_view"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=torch.eye(4),
+            density_debug={
+                "active_memory_context": True,
+                "active_memory_frame_role": "tracking_only",
+                "support_concentration": 0.102,
+                "new_view_event_score": 0.454,
+                "anchor_health_score": 0.665,
+                "keyframe_growth_recent": -1,
+                "inlier_grid_entropy": 0.898,
+                "viewpoint_rotation_deg_window_max": 74.4,
+            },
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(
+            gate.pose_reference_pool_events[-1]["block_reason"],
+            "pose_only_late_extreme_new_view_thin_support",
+        )
+        summary = gate.pose_only_reference_pool_summary()
+        self.assertEqual(summary["late_extreme_new_view_frame_min"], 1200)
+        self.assertEqual(summary["late_extreme_new_view_support_min"], 0.15)
+
+    def test_pose_only_reference_pool_v26_does_not_enable_v10_early_turn_bridge(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v26")
+        )
+        accepted = gate.register_pose_only_reference(
+            frame_id=752,
+            info={"is_test": False, "image_name": "early_turn_not_bridged"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=torch.eye(4),
+            density_debug={
+                "active_memory_context": True,
+                "active_memory_frame_role": "tracking_only",
+                "support_concentration": 0.104,
+                "new_view_event_score": 0.30,
+                "anchor_health_score": 0.715,
+                "keyframe_growth_recent": -15,
+                "inlier_grid_entropy": 0.896,
+                "viewpoint_rotation_deg_window_max": 45.6,
+            },
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(
+            gate.pose_reference_pool_events[-1]["block_reason"],
+            "pose_only_anchor_healthy_high_new_view",
+        )
+        self.assertEqual(
+            gate.pose_only_reference_pool_summary()["early_turn_bridge_frame_max"],
+            0,
+        )
 
     def test_training_loop_registers_pose_only_references_for_active_memory_modes(self):
         train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(
