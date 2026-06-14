@@ -86,6 +86,7 @@ class PaperAlignedRuntimeGate:
         self.pose_only_reference_high_new_view_min = 0.20
         self.pose_only_reference_high_new_view_support_min = 0.10
         self.pose_only_reference_high_new_view_anchor_health_max = 0.70
+        self.pose_only_reference_high_new_view_entropy_max = 1.01
         self.pose_only_reference_growth_stall_max = 0
         self.pose_only_reference_require_negative_growth = False
         self.pose_only_reference_allow_high_new_view_rescue = True
@@ -107,6 +108,7 @@ class PaperAlignedRuntimeGate:
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v5", False)
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v6", False)
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v8", False)
+            or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v9", False)
         ):
             self.pose_only_reference_pool_max_size = 24
             self.pose_only_reference_ttl_frames = 140
@@ -141,6 +143,7 @@ class PaperAlignedRuntimeGate:
         if (
             getattr(self.direct_density_controller, "is_pose_rep_active_memory_v6", False)
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v8", False)
+            or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v9", False)
         ):
             self.pose_only_reference_pool_max_size = 12
             self.pose_only_reference_ttl_frames = 100
@@ -159,6 +162,11 @@ class PaperAlignedRuntimeGate:
             self.pose_only_reference_allow_high_new_view_rescue = False
             self.pose_only_reference_repetitive_entropy_min = 0.94
             self.pose_only_reference_repetitive_entropy_support_max = 0.08
+        if getattr(self.direct_density_controller, "is_pose_rep_active_memory_v9", False):
+            self.pose_only_reference_allow_high_new_view_rescue = True
+            self.pose_only_reference_high_new_view_support_min = 0.10
+            self.pose_only_reference_high_new_view_anchor_health_max = 0.70
+            self.pose_only_reference_high_new_view_entropy_max = 0.92
         self._anchor_count_at_last_direct_finalize = 1
         if self.mode == "paper_aligned_semantic_v1":
             cfg = self.coupled_config
@@ -1113,6 +1121,7 @@ class PaperAlignedRuntimeGate:
             high_new_view_candidate
             and support_concentration >= float(self.pose_only_reference_high_new_view_support_min)
             and anchor_health <= float(self.pose_only_reference_high_new_view_anchor_health_max)
+            and inlier_grid_entropy <= float(self.pose_only_reference_high_new_view_entropy_max)
         )
         if low_new_view_context or high_new_view_rescue:
             return True, "", metrics
@@ -1392,6 +1401,9 @@ class PaperAlignedRuntimeGate:
             "high_new_view_support_min": float(self.pose_only_reference_high_new_view_support_min),
             "high_new_view_anchor_health_max": float(
                 self.pose_only_reference_high_new_view_anchor_health_max
+            ),
+            "high_new_view_entropy_max": float(
+                self.pose_only_reference_high_new_view_entropy_max
             ),
             "growth_stall_max": int(self.pose_only_reference_growth_stall_max),
             "requires_negative_growth": bool(

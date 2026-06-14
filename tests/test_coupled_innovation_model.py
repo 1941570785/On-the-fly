@@ -265,6 +265,23 @@ class CoupledInnovationModelTests(unittest.TestCase):
 
         self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_active_memory_v8")
 
+    def test_cli_accepts_active_memory_v9_direct_density_mode(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_direct_density_control",
+                "pose_rep_active_memory_v9",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_active_memory_v9")
+
     def test_runtime_gate_applies_coupled_preset_to_args_before_subsystems_use_them(self):
         args = _args(paper_aligned_tau_R_low=0.31, paper_aligned_recovery_delay_frames=4)
 
@@ -1922,6 +1939,92 @@ class CoupledInnovationModelTests(unittest.TestCase):
 
         self.assertTrue(accepted)
         self.assertEqual(gate.pose_only_reference_pool_summary()["pool_size"], 1)
+
+    def test_pose_only_reference_pool_v9_accepts_supported_high_new_view_refs(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v9")
+        )
+        accepted = gate.register_pose_only_reference(
+            frame_id=420,
+            info={"is_test": False, "image_name": "long_supported_high_new_view"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=torch.eye(4),
+            density_debug={
+                "active_memory_context": True,
+                "active_memory_frame_role": "tracking_only",
+                "support_concentration": 0.105,
+                "new_view_event_score": 0.25,
+                "anchor_health_score": 0.66,
+                "keyframe_growth_recent": -8,
+                "inlier_grid_entropy": 0.895,
+            },
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertTrue(accepted)
+        summary = gate.pose_only_reference_pool_summary()
+        self.assertTrue(summary["allow_high_new_view_rescue"])
+        self.assertEqual(summary["high_new_view_entropy_max"], 0.92)
+
+    def test_pose_only_reference_pool_v9_blocks_healthy_anchor_high_new_view_refs(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v9")
+        )
+        accepted = gate.register_pose_only_reference(
+            frame_id=420,
+            info={"is_test": False, "image_name": "desk_healthy_high_new_view"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=torch.eye(4),
+            density_debug={
+                "active_memory_context": True,
+                "active_memory_frame_role": "tracking_only",
+                "support_concentration": 0.13,
+                "new_view_event_score": 0.27,
+                "anchor_health_score": 0.76,
+                "keyframe_growth_recent": -8,
+                "inlier_grid_entropy": 0.87,
+            },
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(
+            gate.pose_reference_pool_events[-1]["block_reason"],
+            "pose_only_anchor_healthy_high_new_view",
+        )
+
+    def test_pose_only_reference_pool_v9_blocks_high_entropy_high_new_view_refs(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v9")
+        )
+        accepted = gate.register_pose_only_reference(
+            frame_id=420,
+            info={"is_test": False, "image_name": "forest_entropy_high_new_view"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=torch.eye(4),
+            density_debug={
+                "active_memory_context": True,
+                "active_memory_frame_role": "tracking_only",
+                "support_concentration": 0.105,
+                "new_view_event_score": 0.25,
+                "anchor_health_score": 0.66,
+                "keyframe_growth_recent": -8,
+                "inlier_grid_entropy": 0.945,
+            },
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(
+            gate.pose_reference_pool_events[-1]["block_reason"],
+            "pose_only_risk_gate_not_met",
+        )
 
     def test_training_loop_registers_pose_only_references_for_active_memory_modes(self):
         train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(
