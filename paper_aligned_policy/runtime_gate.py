@@ -106,6 +106,7 @@ class PaperAlignedRuntimeGate:
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v4", False)
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v5", False)
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v6", False)
+            or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v8", False)
         ):
             self.pose_only_reference_pool_max_size = 24
             self.pose_only_reference_ttl_frames = 140
@@ -137,7 +138,10 @@ class PaperAlignedRuntimeGate:
             self.pose_only_reference_high_new_view_min = 0.20
             self.pose_only_reference_high_new_view_support_min = 0.11
             self.pose_only_reference_high_new_view_anchor_health_max = 0.70
-        if getattr(self.direct_density_controller, "is_pose_rep_active_memory_v6", False):
+        if (
+            getattr(self.direct_density_controller, "is_pose_rep_active_memory_v6", False)
+            or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v8", False)
+        ):
             self.pose_only_reference_pool_max_size = 12
             self.pose_only_reference_ttl_frames = 100
             self.pose_only_reference_min_age_frames = 28

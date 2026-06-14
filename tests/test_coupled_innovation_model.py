@@ -248,6 +248,23 @@ class CoupledInnovationModelTests(unittest.TestCase):
 
         self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_active_memory_v6")
 
+    def test_cli_accepts_active_memory_v8_direct_density_mode(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_direct_density_control",
+                "pose_rep_active_memory_v8",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_active_memory_v8")
+
     def test_runtime_gate_applies_coupled_preset_to_args_before_subsystems_use_them(self):
         args = _args(paper_aligned_tau_R_low=0.31, paper_aligned_recovery_delay_frames=4)
 
@@ -1737,6 +1754,174 @@ class CoupledInnovationModelTests(unittest.TestCase):
             gate.pose_reference_pool_events[-1]["block_reason"],
             "pose_only_high_new_view_pnp_disabled",
         )
+
+    def test_active_memory_v8_debug_carries_ssm_reference_gate_metrics(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v8")
+        )
+
+        decision = controller.decide(
+            frame_id=420,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=86.0,
+            local_density_before=72.0,
+            local_window_density=72.0,
+            local_window_keyframes=72,
+            local_window_gap_max=2.0,
+            local_window_gap_after_if_hold=2.0,
+            keyframe_growth_recent=-8,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=1,
+            main_chain_gap_before=1.0,
+            main_chain_gap_after_if_hold=2.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=20.0,
+            displacement_threshold=30.0,
+            num_matches=2400,
+            min_num_inliers=100,
+            pose_inliers=1600,
+            novelty_proxy=0.02,
+            current_keyframe_count=360,
+            semantic_scores={"R_t": 0.05, "V_t": 0.99, "Q_t": 0.98, "C_t": 0.99, "B_R_t": 0.95},
+            viewpoint_scores={
+                "viewpoint_rotation_deg_window_max": 4.0,
+                "inlier_grid_coverage": 0.98,
+                "inlier_grid_entropy": 0.955,
+                "support_concentration": 0.075,
+                "anchor_health_score": 0.60,
+                "new_view_event_score": 0.14,
+            },
+        )
+
+        self.assertFalse(decision.finalize)
+        self.assertEqual(decision.decision, "hold_low_representation_value")
+        self.assertEqual(decision.debug["support_concentration"], 0.075)
+        self.assertEqual(decision.debug["inlier_grid_entropy"], 0.955)
+        self.assertEqual(decision.debug["anchor_health_score"], 0.60)
+        self.assertEqual(decision.debug["new_view_event_score"], 0.14)
+
+    def test_pose_only_reference_pool_v8_uses_real_ssm_metrics_to_block_forest_like_refs(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v8")
+        )
+        controller = gate.direct_density_controller
+        decision = controller.decide(
+            frame_id=420,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=86.0,
+            local_density_before=72.0,
+            local_window_density=72.0,
+            local_window_keyframes=72,
+            local_window_gap_max=2.0,
+            local_window_gap_after_if_hold=2.0,
+            keyframe_growth_recent=-8,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=1,
+            main_chain_gap_before=1.0,
+            main_chain_gap_after_if_hold=2.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=20.0,
+            displacement_threshold=30.0,
+            num_matches=2400,
+            min_num_inliers=100,
+            pose_inliers=1600,
+            novelty_proxy=0.02,
+            current_keyframe_count=360,
+            semantic_scores={"R_t": 0.05, "V_t": 0.99, "Q_t": 0.98, "C_t": 0.99, "B_R_t": 0.95},
+            viewpoint_scores={
+                "viewpoint_rotation_deg_window_max": 4.0,
+                "inlier_grid_coverage": 0.98,
+                "inlier_grid_entropy": 0.955,
+                "support_concentration": 0.075,
+                "anchor_health_score": 0.60,
+                "new_view_event_score": 0.14,
+            },
+        )
+
+        accepted = gate.register_pose_only_reference(
+            frame_id=420,
+            info={"is_test": False, "image_name": "forest_metric_block"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=torch.eye(4),
+            density_debug=decision.debug,
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(
+            gate.pose_reference_pool_events[-1]["block_reason"],
+            "pose_only_repetitive_entropy_low_support",
+        )
+        self.assertAlmostEqual(
+            gate.pose_reference_pool_events[-1]["pose_only_support_concentration"],
+            0.075,
+        )
+
+    def test_pose_only_reference_pool_v8_accepts_real_ssm_university_like_refs(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v8")
+        )
+        controller = gate.direct_density_controller
+        decision = controller.decide(
+            frame_id=420,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=86.0,
+            local_density_before=72.0,
+            local_window_density=72.0,
+            local_window_keyframes=72,
+            local_window_gap_max=2.0,
+            local_window_gap_after_if_hold=2.0,
+            keyframe_growth_recent=-8,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=1,
+            main_chain_gap_before=1.0,
+            main_chain_gap_after_if_hold=2.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=20.0,
+            displacement_threshold=30.0,
+            num_matches=2400,
+            min_num_inliers=100,
+            pose_inliers=1600,
+            novelty_proxy=0.02,
+            current_keyframe_count=360,
+            semantic_scores={"R_t": 0.05, "V_t": 0.99, "Q_t": 0.98, "C_t": 0.99, "B_R_t": 0.95},
+            viewpoint_scores={
+                "viewpoint_rotation_deg_window_max": 4.0,
+                "inlier_grid_coverage": 0.98,
+                "inlier_grid_entropy": 0.91,
+                "support_concentration": 0.09,
+                "anchor_health_score": 0.60,
+                "new_view_event_score": 0.15,
+            },
+        )
+
+        accepted = gate.register_pose_only_reference(
+            frame_id=420,
+            info={"is_test": False, "image_name": "university_metric_accept"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=480),
+            Rt=torch.eye(4),
+            density_debug=decision.debug,
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertTrue(accepted)
+        self.assertEqual(gate.pose_only_reference_pool_summary()["pool_size"], 1)
 
     def test_training_loop_registers_pose_only_references_for_active_memory_modes(self):
         train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(

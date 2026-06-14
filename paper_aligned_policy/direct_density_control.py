@@ -95,6 +95,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v4",
             "pose_rep_active_memory_v5",
             "pose_rep_active_memory_v6",
+            "pose_rep_active_memory_v8",
         }:
             self.density_lower = 16.0
             self.density_target = 30.0
@@ -161,6 +162,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v4",
             "pose_rep_active_memory_v5",
             "pose_rep_active_memory_v6",
+            "pose_rep_active_memory_v8",
         }:
             self.local_density_lower = 12.0
             self.soft_gap_threshold = 8
@@ -185,6 +187,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v4",
             "pose_rep_active_memory_v5",
             "pose_rep_active_memory_v6",
+            "pose_rep_active_memory_v8",
         }:
             self.value_hold_budget_per_100 = int(
                 getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 48)
@@ -256,6 +259,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v4",
             "pose_rep_active_memory_v5",
             "pose_rep_active_memory_v6",
+            "pose_rep_active_memory_v8",
         }
 
     @property
@@ -268,6 +272,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v4",
             "pose_rep_active_memory_v5",
             "pose_rep_active_memory_v6",
+            "pose_rep_active_memory_v8",
         }
 
     @property
@@ -279,6 +284,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v4",
             "pose_rep_active_memory_v5",
             "pose_rep_active_memory_v6",
+            "pose_rep_active_memory_v8",
         }
 
     @property
@@ -302,6 +308,10 @@ class DirectDensityController:
         return self.mode == "pose_rep_active_memory_v6"
 
     @property
+    def is_pose_rep_active_memory_v8(self) -> bool:
+        return self.mode == "pose_rep_active_memory_v8"
+
+    @property
     def is_pose_rep_active_memory(self) -> bool:
         return self.mode in {
             "pose_rep_active_memory_v1",
@@ -309,6 +319,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v4",
             "pose_rep_active_memory_v5",
             "pose_rep_active_memory_v6",
+            "pose_rep_active_memory_v8",
         }
 
     @property
@@ -579,6 +590,18 @@ class DirectDensityController:
         viewpoint_grid_coverage = _clamp01(
             viewpoint.get("inlier_grid_coverage"), 0.0
         )
+        inlier_grid_entropy = _clamp01(
+            viewpoint.get("inlier_grid_entropy"), 0.0
+        )
+        support_concentration = _clamp01(
+            viewpoint.get("support_concentration"), 0.0
+        )
+        anchor_health_score = _clamp01(
+            viewpoint.get("anchor_health_score"), 0.0
+        )
+        new_view_event_score = _clamp01(
+            viewpoint.get("new_view_event_score"), 0.0
+        )
         semantic_R = _clamp01(scores.get("R_t"), 0.5)
         semantic_V = _clamp01(scores.get("V_t"), 0.0)
         semantic_Q = _clamp01(scores.get("Q_t"), 0.5)
@@ -705,6 +728,7 @@ class DirectDensityController:
                 or self.is_pose_rep_active_memory_v4
                 or self.is_pose_rep_active_memory_v5
                 or self.is_pose_rep_active_memory_v6
+                or self.is_pose_rep_active_memory_v8
             )
             and int(frame_id) >= 300
             and density_before >= 55.0
@@ -837,6 +861,10 @@ class DirectDensityController:
             "active_memory_low_turn_dense_context": active_memory_low_turn_dense_context,
             "viewpoint_rotation_window_max": viewpoint_rotation_window_max,
             "viewpoint_grid_coverage": viewpoint_grid_coverage,
+            "inlier_grid_entropy": inlier_grid_entropy,
+            "support_concentration": support_concentration,
+            "anchor_health_score": anchor_health_score,
+            "new_view_event_score": new_view_event_score,
             "active_memory_frame_role": active_memory_frame_role,
             "active_memory_marginal_value": active_memory_marginal_value,
             "active_memory_redundancy_pressure": active_memory_redundancy_pressure,
