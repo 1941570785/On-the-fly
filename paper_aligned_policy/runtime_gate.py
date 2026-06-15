@@ -117,6 +117,7 @@ class PaperAlignedRuntimeGate:
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v24", False)
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v25", False)
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v26", False)
+            or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v30", False)
         ):
             self.pose_only_reference_pool_max_size = 24
             self.pose_only_reference_ttl_frames = 140
@@ -155,6 +156,7 @@ class PaperAlignedRuntimeGate:
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v24", False)
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v25", False)
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v26", False)
+            or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v30", False)
         ):
             self.pose_only_reference_pool_max_size = 12
             self.pose_only_reference_ttl_frames = 100
@@ -178,6 +180,7 @@ class PaperAlignedRuntimeGate:
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v24", False)
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v25", False)
             or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v26", False)
+            or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v30", False)
         ):
             self.pose_only_reference_allow_high_new_view_rescue = True
             self.pose_only_reference_high_new_view_support_min = 0.10
@@ -189,13 +192,19 @@ class PaperAlignedRuntimeGate:
             self.pose_only_reference_selection_cooldown_frames = 12
             self.pose_only_reference_age_bonus = 8.0
             self.pose_only_reference_selection_strategy = "risk_aware"
-        if getattr(self.direct_density_controller, "is_pose_rep_active_memory_v25", False):
+        if (
+            getattr(self.direct_density_controller, "is_pose_rep_active_memory_v25", False)
+            or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v30", False)
+        ):
             self.pose_only_reference_max_per_query = 1
             self.pose_only_reference_min_match_score = 280.0
             self.pose_only_reference_selection_cooldown_frames = 12
             self.pose_only_reference_age_bonus = 8.0
             self.pose_only_reference_selection_strategy = "risk_aware"
-        if getattr(self.direct_density_controller, "is_pose_rep_active_memory_v26", False):
+        if (
+            getattr(self.direct_density_controller, "is_pose_rep_active_memory_v26", False)
+            or getattr(self.direct_density_controller, "is_pose_rep_active_memory_v30", False)
+        ):
             self.pose_only_reference_late_extreme_new_view_frame_min = 1200
             self.pose_only_reference_late_extreme_new_view_min = 0.35
             self.pose_only_reference_late_extreme_new_view_support_min = 0.15

@@ -2245,6 +2245,105 @@ class CoupledInnovationModelTests(unittest.TestCase):
             0,
         )
 
+    def test_pose_only_reference_pool_v30_inherits_strict_health_gate(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v30")
+        )
+
+        summary = gate.pose_only_reference_pool_summary()
+        self.assertEqual(summary["max_size"], 12)
+        self.assertEqual(summary["ttl_frames"], 100)
+        self.assertEqual(summary["min_age_frames"], 28)
+        self.assertEqual(summary["min_match_score"], 280.0)
+        self.assertEqual(summary["register_min_interval_frames"], 24)
+        self.assertEqual(summary["selection_cooldown_frames"], 12)
+        self.assertTrue(summary["risk_gate_enabled"])
+        self.assertTrue(summary["requires_negative_growth"])
+        self.assertTrue(summary["allow_high_new_view_rescue"])
+        self.assertEqual(summary["high_new_view_entropy_max"], 0.92)
+        self.assertEqual(summary["late_extreme_new_view_frame_min"], 1200)
+        self.assertEqual(summary["late_extreme_new_view_support_min"], 0.15)
+        self.assertEqual(summary["selection_strategy"], "risk_aware")
+
+        accepted = gate.register_pose_only_reference(
+            frame_id=520,
+            info={"is_test": False, "image_name": "default_pool_would_accept"},
+            desc_kpts=_pose_pool_desc(support_count=700, match_score=500),
+            Rt=torch.eye(4),
+            density_debug={
+                "active_memory_context": True,
+                "active_memory_frame_role": "tracking_only",
+                "support_concentration": 0.04,
+                "new_view_event_score": 0.14,
+                "anchor_health_score": 0.60,
+                "keyframe_growth_recent": -8,
+                "inlier_grid_entropy": 0.955,
+            },
+            pose_debug={"num_pnp_inliers": 300, "num_miniba_inliers": 300},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(
+            gate.pose_reference_pool_events[-1]["block_reason"],
+            "pose_only_repetitive_entropy_low_support",
+        )
+
+    def test_active_memory_v30_keeps_v29_hard_window_without_utility_hold(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v30")
+        )
+
+        decision = controller.decide(
+            frame_id=620,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=86.0,
+            local_density_before=82.0,
+            local_window_density=82.0,
+            local_window_keyframes=82,
+            local_window_gap_max=5.0,
+            local_window_gap_after_if_hold=5.0,
+            keyframe_growth_recent=16,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=1,
+            main_chain_gap_before=2.0,
+            main_chain_gap_after_if_hold=3.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=20.0,
+            displacement_threshold=30.0,
+            num_matches=2200,
+            min_num_inliers=100,
+            pose_inliers=1600,
+            novelty_proxy=0.10,
+            current_keyframe_count=520,
+            semantic_scores={
+                "R_t": 0.04,
+                "V_t": 0.92,
+                "Q_t": 0.94,
+                "C_t": 0.92,
+                "B_R_t": 0.91,
+            },
+            viewpoint_scores={
+                "viewpoint_rotation_deg_window_max": 24.0,
+                "inlier_grid_coverage": 0.91,
+                "support_concentration": 0.12,
+                "anchor_health_score": 0.52,
+                "new_view_event_score": 0.32,
+            },
+        )
+
+        self.assertTrue(decision.finalize)
+        self.assertEqual(decision.decision, "finalize_high_representation_value")
+        self.assertEqual(decision.reason, "utility_hard_window_representation_guard")
+        self.assertTrue(decision.debug["utility_hard_window_guard"])
+        self.assertTrue(decision.debug["utility_representation_role"])
+        self.assertFalse(decision.debug["utility_tracking_only_role"])
+
     def test_training_loop_registers_pose_only_references_for_active_memory_modes(self):
         train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(
             encoding="utf-8-sig"
