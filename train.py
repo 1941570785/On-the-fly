@@ -1820,6 +1820,12 @@ if __name__ == "__main__":
                             "utility_recovery_pressure_context": bool(
                                 dbg.get("utility_recovery_pressure_context", False)
                             ),
+                            "utility_hard_window_guard": bool(
+                                dbg.get("utility_hard_window_guard", False)
+                            ),
+                            "utility_tracking_safe_context": bool(
+                                dbg.get("utility_tracking_safe_context", False)
+                            ),
                             "pose_risk_score": float(dbg.get("pose_risk_score", 0.0)),
                             "motion_value_score": float(dbg.get("motion_value_score", 0.0)),
                             "match_support_score": float(dbg.get("match_support_score", 0.0)),
@@ -2025,6 +2031,12 @@ if __name__ == "__main__":
                                     ),
                                     "utility_drift_risk": float(
                                         dbg.get("utility_drift_risk", 0.0)
+                                    ),
+                                    "utility_hard_window_guard": bool(
+                                        dbg.get("utility_hard_window_guard", False)
+                                    ),
+                                    "utility_tracking_safe_context": bool(
+                                        dbg.get("utility_tracking_safe_context", False)
                                     ),
                                     "value_hold_block_reason": str(
                                         dbg.get("value_hold_block_reason", "")

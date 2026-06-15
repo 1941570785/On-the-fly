@@ -101,6 +101,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v25",
             "pose_rep_active_memory_v26",
             "pose_rep_active_memory_v27",
+            "pose_rep_active_memory_v28",
         }:
             self.density_lower = 16.0
             self.density_target = 30.0
@@ -173,6 +174,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v25",
             "pose_rep_active_memory_v26",
             "pose_rep_active_memory_v27",
+            "pose_rep_active_memory_v28",
         }:
             self.local_density_lower = 12.0
             self.soft_gap_threshold = 8
@@ -203,6 +205,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v25",
             "pose_rep_active_memory_v26",
             "pose_rep_active_memory_v27",
+            "pose_rep_active_memory_v28",
         }:
             self.value_hold_budget_per_100 = int(
                 getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 48)
@@ -238,6 +241,29 @@ class DirectDensityController:
             self.utility_pose_reference_min = float(
                 getattr(args, "paper_aligned_direct_utility_pose_reference_min", 0.58)
                 or 0.58
+            )
+        if self.mode == "pose_rep_active_memory_v28":
+            self.density_upper = 72.0
+            self.density_hard_upper = 94.0
+            self.value_hold_budget_per_100 = int(
+                getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 40)
+                or 40
+            )
+            self.representation_value_hold_max = float(
+                getattr(args, "paper_aligned_direct_representation_value_hold_max", 0.38)
+                or 0.38
+            )
+            self.pose_reference_value_min = float(
+                getattr(args, "paper_aligned_direct_pose_reference_value_min", 0.60)
+                or 0.60
+            )
+            self.utility_representation_min = float(
+                getattr(args, "paper_aligned_direct_utility_representation_min", 0.40)
+                or 0.40
+            )
+            self.utility_pose_reference_min = float(
+                getattr(args, "paper_aligned_direct_utility_pose_reference_min", 0.60)
+                or 0.60
             )
         if self.mode in {"pose_rep_active_memory_v1", "pose_rep_active_memory_v2"}:
             self.value_hold_budget_per_100 = int(
@@ -303,6 +329,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v25",
             "pose_rep_active_memory_v26",
             "pose_rep_active_memory_v27",
+            "pose_rep_active_memory_v28",
         }
 
     @property
@@ -321,6 +348,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v25",
             "pose_rep_active_memory_v26",
             "pose_rep_active_memory_v27",
+            "pose_rep_active_memory_v28",
         }
 
     @property
@@ -338,6 +366,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v25",
             "pose_rep_active_memory_v26",
             "pose_rep_active_memory_v27",
+            "pose_rep_active_memory_v28",
         }
 
     @property
@@ -385,6 +414,10 @@ class DirectDensityController:
         return self.mode == "pose_rep_active_memory_v27"
 
     @property
+    def is_pose_rep_active_memory_v28(self) -> bool:
+        return self.mode == "pose_rep_active_memory_v28"
+
+    @property
     def is_pose_rep_active_memory(self) -> bool:
         return self.mode in {
             "pose_rep_active_memory_v1",
@@ -398,6 +431,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v25",
             "pose_rep_active_memory_v26",
             "pose_rep_active_memory_v27",
+            "pose_rep_active_memory_v28",
         }
 
     @property
@@ -817,15 +851,43 @@ class DirectDensityController:
             - 0.12 * utility_drift_risk
             - 0.10 * utility_compute_cost
         )
+        utility_mode = bool(
+            self.is_pose_rep_active_memory_v27 or self.is_pose_rep_active_memory_v28
+        )
+        utility_hard_window_guard = bool(
+            self.is_pose_rep_active_memory_v28
+            and (
+                viewpoint_rotation_window_max >= 18.0
+                or new_view_event_score >= 0.55
+                or viewpoint_grid_coverage < 0.75
+                or utility_view_change >= 0.42
+                or utility_recovery_pressure_score >= 0.25
+            )
+        )
+        utility_tracking_safe_context = bool(
+            self.is_pose_rep_active_memory_v28
+            and source_redundancy > 0.0
+            and viewpoint_rotation_window_max <= 8.0
+            and new_view_event_score <= 0.30
+            and utility_view_change <= 0.34
+            and viewpoint_grid_coverage >= 0.90
+            and anchor_health_score >= 0.55
+            and support_concentration <= 0.45
+            and utility_recovery_pressure_score <= 0.10
+            and semantic_C >= 0.85
+            and not support_triggered
+        )
         utility_recovery_pressure_context = bool(
-            self.is_pose_rep_active_memory_v27
+            utility_mode
             and recovery_pool_size >= 6
             and utility_recovery_gain >= 0.35
             and utility_coverage_gain >= 0.45
         )
         utility_representation_role = bool(
-            self.is_pose_rep_active_memory_v27
+            utility_mode
             and (
+                utility_hard_window_guard
+                or
                 utility_representation >= self.utility_representation_min
                 or utility_recovery_pressure_context
                 or (anchor_changed and utility_coverage_gain >= 0.35)
@@ -836,12 +898,20 @@ class DirectDensityController:
                 )
             )
         )
-        utility_tracking_only_role = bool(
-            self.is_pose_rep_active_memory_v27
-            and utility_pose_reference >= self.utility_pose_reference_min
-            and utility_representation < self.utility_representation_min
-            and utility_drift_risk < 0.55
-        )
+        if self.is_pose_rep_active_memory_v28:
+            utility_tracking_only_role = bool(
+                utility_tracking_safe_context
+                and utility_pose_reference >= self.utility_pose_reference_min
+                and utility_representation < self.utility_representation_min
+                and utility_drift_risk < 0.55
+            )
+        else:
+            utility_tracking_only_role = bool(
+                self.is_pose_rep_active_memory_v27
+                and utility_pose_reference >= self.utility_pose_reference_min
+                and utility_representation < self.utility_representation_min
+                and utility_drift_risk < 0.55
+            )
         high_recent_growth_representation_guard = bool(
             self.is_pose_rep_value_v3
             and keyframe_growth_recent >= max(24, int(self.min_growth_per_100 * 2.5))
@@ -909,6 +979,7 @@ class DirectDensityController:
                 or self.is_pose_rep_active_memory_v25
                 or self.is_pose_rep_active_memory_v26
                 or self.is_pose_rep_active_memory_v27
+                or self.is_pose_rep_active_memory_v28
             )
             and int(frame_id) >= 300
             and density_before >= 55.0
@@ -961,7 +1032,7 @@ class DirectDensityController:
             )
         )
         bootstrap_value_hold_guard = int(frame_id) <= 100
-        if self.is_pose_rep_active_memory_v27:
+        if utility_mode:
             value_hold_allowed = bool(
                 utility_tracking_only_role
                 and not utility_representation_role
@@ -990,11 +1061,13 @@ class DirectDensityController:
                 )
             )
         block_reason = ""
-        if self.is_pose_rep_active_memory_v27 and value_hold_allowed:
+        if utility_mode and value_hold_allowed:
             block_reason = "utility_tracking_only_role"
-        elif self.is_pose_rep_active_memory_v27 and utility_representation_role:
+        elif self.is_pose_rep_active_memory_v28 and utility_hard_window_guard:
+            block_reason = "utility_hard_window_representation_guard"
+        elif utility_mode and utility_representation_role:
             block_reason = "utility_representation_gain"
-        elif self.is_pose_rep_active_memory_v27 and not utility_tracking_only_role:
+        elif utility_mode and not utility_tracking_only_role:
             block_reason = "utility_tracking_role_low"
         elif high_recent_growth_representation_guard and not active_memory_context:
             block_reason = "high_recent_growth_representation_guard"
@@ -1094,6 +1167,8 @@ class DirectDensityController:
             "utility_tracking_only_role": utility_tracking_only_role,
             "utility_representation_role": utility_representation_role,
             "utility_recovery_pressure_context": utility_recovery_pressure_context,
+            "utility_hard_window_guard": utility_hard_window_guard,
+            "utility_tracking_safe_context": utility_tracking_safe_context,
             "representation_value_hold_max": self.representation_value_hold_max,
             "pose_reference_value_min": self.pose_reference_value_min,
             "value_hold_budget_per_100": self.value_hold_budget_per_100,
@@ -1166,8 +1241,11 @@ class DirectDensityController:
             return _finalize("finalize_pose_risk_reference", "pose_risk_high")
         if representation_value_high:
             reason = (
+                "utility_hard_window_representation_guard"
+                if self.is_pose_rep_active_memory_v28 and utility_hard_window_guard
+                else
                 "utility_representation_gain"
-                if self.is_pose_rep_active_memory_v27 and utility_representation_role
+                if utility_mode and utility_representation_role
                 else "representation_value_high"
             )
             return _finalize("finalize_high_representation_value", reason)
