@@ -2321,6 +2321,119 @@ class CoupledInnovationModelTests(unittest.TestCase):
         pts3d[0, 0] = 42.0
         self.assertNotEqual(float(support["pts3d"][0, 0]), 42.0)
 
+    def test_active_memory_v27_holds_high_pose_low_representation_utility(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v27")
+        )
+
+        decision = controller.decide(
+            frame_id=520,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=88.0,
+            local_density_before=84.0,
+            local_window_density=84.0,
+            local_window_keyframes=84,
+            local_window_gap_max=2.0,
+            local_window_gap_after_if_hold=2.0,
+            keyframe_growth_recent=18,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=1,
+            main_chain_gap_before=1.0,
+            main_chain_gap_after_if_hold=2.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=18.0,
+            displacement_threshold=30.0,
+            num_matches=2100,
+            min_num_inliers=100,
+            pose_inliers=1500,
+            novelty_proxy=0.12,
+            current_keyframe_count=430,
+            semantic_scores={
+                "R_t": 0.06,
+                "V_t": 0.22,
+                "Q_t": 0.96,
+                "C_t": 0.72,
+                "B_R_t": 0.94,
+                "recovery_pool_size": 1,
+            },
+            viewpoint_scores={
+                "viewpoint_rotation_deg_window_max": 2.0,
+                "inlier_grid_coverage": 0.90,
+                "inlier_grid_entropy": 0.86,
+                "support_concentration": 0.10,
+                "anchor_health_score": 0.92,
+                "new_view_event_score": 0.08,
+            },
+        )
+
+        self.assertFalse(decision.finalize)
+        self.assertEqual(decision.decision, "hold_low_representation_value")
+        self.assertEqual(decision.debug["utility_frame_role"], "tracking_only")
+        self.assertGreaterEqual(decision.debug["utility_pose_reference"], 0.58)
+        self.assertLess(decision.debug["utility_representation"], 0.38)
+        self.assertGreater(decision.debug["utility_compute_cost"], 0.45)
+        self.assertEqual(decision.debug["value_hold_block_reason"], "utility_tracking_only_role")
+
+    def test_active_memory_v27_finalizes_new_view_recovery_pressure_representation(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v27")
+        )
+
+        decision = controller.decide(
+            frame_id=520,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=86.0,
+            local_density_before=82.0,
+            local_window_density=82.0,
+            local_window_keyframes=82,
+            local_window_gap_max=4.0,
+            local_window_gap_after_if_hold=4.0,
+            keyframe_growth_recent=16,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=4,
+            main_chain_gap_before=3.0,
+            main_chain_gap_after_if_hold=4.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=68.0,
+            displacement_threshold=30.0,
+            num_matches=1600,
+            min_num_inliers=100,
+            pose_inliers=980,
+            novelty_proxy=0.86,
+            current_keyframe_count=420,
+            semantic_scores={
+                "R_t": 0.08,
+                "V_t": 0.92,
+                "Q_t": 0.91,
+                "C_t": 0.63,
+                "B_R_t": 0.86,
+                "recovery_pool_size": 9,
+            },
+            viewpoint_scores={
+                "viewpoint_rotation_deg_window_max": 34.0,
+                "inlier_grid_coverage": 0.56,
+                "inlier_grid_entropy": 0.58,
+                "support_concentration": 0.42,
+                "anchor_health_score": 0.62,
+                "new_view_event_score": 0.82,
+            },
+        )
+
+        self.assertTrue(decision.finalize)
+        self.assertEqual(decision.decision, "finalize_high_representation_value")
+        self.assertEqual(decision.reason, "utility_representation_gain")
+        self.assertEqual(decision.debug["utility_frame_role"], "representation")
+        self.assertGreaterEqual(decision.debug["utility_representation"], 0.38)
+        self.assertTrue(decision.debug["utility_recovery_pressure_context"])
+
     def test_trace_flush_records_coupled_contract_and_stage_metric_contract(self):
         with tempfile.TemporaryDirectory() as td:
             trace_path = Path(td) / "semantic_trace.json"

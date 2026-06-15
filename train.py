@@ -1779,6 +1779,47 @@ if __name__ == "__main__":
                             "pose_reference_value_score": float(
                                 dbg.get("pose_reference_value_score", 0.0)
                             ),
+                            "recovery_pool_size": int(dbg.get("recovery_pool_size", 0)),
+                            "utility_pose_reference": float(
+                                dbg.get("utility_pose_reference", 0.0)
+                            ),
+                            "utility_representation": float(
+                                dbg.get("utility_representation", 0.0)
+                            ),
+                            "utility_coverage_gain": float(
+                                dbg.get("utility_coverage_gain", 0.0)
+                            ),
+                            "utility_recovery_gain": float(
+                                dbg.get("utility_recovery_gain", 0.0)
+                            ),
+                            "utility_recovery_pressure_score": float(
+                                dbg.get("utility_recovery_pressure_score", 0.0)
+                            ),
+                            "utility_compute_cost": float(
+                                dbg.get("utility_compute_cost", 0.0)
+                            ),
+                            "utility_drift_risk": float(
+                                dbg.get("utility_drift_risk", 0.0)
+                            ),
+                            "utility_view_change": float(
+                                dbg.get("utility_view_change", 0.0)
+                            ),
+                            "utility_gap_pressure": float(
+                                dbg.get("utility_gap_pressure", 0.0)
+                            ),
+                            "utility_total": float(dbg.get("utility_total", 0.0)),
+                            "utility_frame_role": str(
+                                dbg.get("utility_frame_role", "")
+                            ),
+                            "utility_tracking_only_role": bool(
+                                dbg.get("utility_tracking_only_role", False)
+                            ),
+                            "utility_representation_role": bool(
+                                dbg.get("utility_representation_role", False)
+                            ),
+                            "utility_recovery_pressure_context": bool(
+                                dbg.get("utility_recovery_pressure_context", False)
+                            ),
                             "pose_risk_score": float(dbg.get("pose_risk_score", 0.0)),
                             "motion_value_score": float(dbg.get("motion_value_score", 0.0)),
                             "match_support_score": float(dbg.get("match_support_score", 0.0)),
@@ -1969,6 +2010,21 @@ if __name__ == "__main__":
                                     "direct_finalization_reason": str(fin_dec.reason),
                                     "active_memory_frame_role": str(
                                         dbg.get("active_memory_frame_role", "")
+                                    ),
+                                    "utility_frame_role": str(
+                                        dbg.get("utility_frame_role", "")
+                                    ),
+                                    "utility_pose_reference": float(
+                                        dbg.get("utility_pose_reference", 0.0)
+                                    ),
+                                    "utility_representation": float(
+                                        dbg.get("utility_representation", 0.0)
+                                    ),
+                                    "utility_compute_cost": float(
+                                        dbg.get("utility_compute_cost", 0.0)
+                                    ),
+                                    "utility_drift_risk": float(
+                                        dbg.get("utility_drift_risk", 0.0)
                                     ),
                                     "value_hold_block_reason": str(
                                         dbg.get("value_hold_block_reason", "")
