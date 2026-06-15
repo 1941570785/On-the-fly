@@ -2344,6 +2344,121 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertTrue(decision.debug["utility_representation_role"])
         self.assertFalse(decision.debug["utility_tracking_only_role"])
 
+    def test_active_memory_v31_ignores_short_window_turns_for_hard_guard(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v31")
+        )
+
+        decision = controller.decide(
+            frame_id=620,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=86.0,
+            local_density_before=82.0,
+            local_window_density=82.0,
+            local_window_keyframes=82,
+            local_window_gap_max=5.0,
+            local_window_gap_after_if_hold=5.0,
+            keyframe_growth_recent=16,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=1,
+            main_chain_gap_before=2.0,
+            main_chain_gap_after_if_hold=3.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=20.0,
+            displacement_threshold=30.0,
+            num_matches=2200,
+            min_num_inliers=100,
+            pose_inliers=1600,
+            novelty_proxy=0.10,
+            current_keyframe_count=520,
+            semantic_scores={
+                "R_t": 0.04,
+                "V_t": 0.92,
+                "Q_t": 0.94,
+                "C_t": 0.92,
+                "B_R_t": 0.91,
+            },
+            viewpoint_scores={
+                "viewpoint_rotation_deg_window_20": 24.0,
+                "viewpoint_rotation_deg_window_50": 6.0,
+                "viewpoint_rotation_deg_window_100": 4.0,
+                "viewpoint_rotation_deg_window_max": 24.0,
+                "viewpoint_rotation_window_max_size": 20,
+                "inlier_grid_coverage": 0.91,
+                "support_concentration": 0.12,
+                "anchor_health_score": 0.52,
+                "new_view_event_score": 0.32,
+            },
+        )
+
+        self.assertFalse(decision.debug["utility_hard_window_guard"])
+        self.assertFalse(decision.debug["utility_representation_role"])
+        self.assertFalse(decision.debug["utility_tracking_only_role"])
+        self.assertNotEqual(decision.reason, "utility_hard_window_representation_guard")
+
+    def test_active_memory_v31_preserves_persistent_long_turn_hard_guard(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v31")
+        )
+
+        decision = controller.decide(
+            frame_id=1220,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=86.0,
+            local_density_before=82.0,
+            local_window_density=82.0,
+            local_window_keyframes=82,
+            local_window_gap_max=5.0,
+            local_window_gap_after_if_hold=5.0,
+            keyframe_growth_recent=16,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=1,
+            main_chain_gap_before=2.0,
+            main_chain_gap_after_if_hold=3.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=20.0,
+            displacement_threshold=30.0,
+            num_matches=2200,
+            min_num_inliers=100,
+            pose_inliers=1600,
+            novelty_proxy=0.10,
+            current_keyframe_count=720,
+            semantic_scores={
+                "R_t": 0.04,
+                "V_t": 0.92,
+                "Q_t": 0.94,
+                "C_t": 0.92,
+                "B_R_t": 0.91,
+            },
+            viewpoint_scores={
+                "viewpoint_rotation_deg_window_20": 18.0,
+                "viewpoint_rotation_deg_window_50": 26.0,
+                "viewpoint_rotation_deg_window_100": 32.0,
+                "viewpoint_rotation_deg_window_max": 32.0,
+                "viewpoint_rotation_window_max_size": 100,
+                "inlier_grid_coverage": 0.91,
+                "support_concentration": 0.12,
+                "anchor_health_score": 0.52,
+                "new_view_event_score": 0.42,
+            },
+        )
+
+        self.assertTrue(decision.finalize)
+        self.assertEqual(decision.decision, "finalize_high_representation_value")
+        self.assertEqual(decision.reason, "utility_hard_window_representation_guard")
+        self.assertTrue(decision.debug["utility_hard_window_guard"])
+        self.assertTrue(decision.debug["utility_persistent_long_turn_context"])
+        self.assertTrue(decision.debug["utility_representation_role"])
+        self.assertFalse(decision.debug["utility_tracking_only_role"])
+
     def test_training_loop_registers_pose_only_references_for_active_memory_modes(self):
         train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(
             encoding="utf-8-sig"

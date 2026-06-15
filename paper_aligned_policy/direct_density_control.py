@@ -104,6 +104,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v28",
             "pose_rep_active_memory_v29",
             "pose_rep_active_memory_v30",
+            "pose_rep_active_memory_v31",
         }:
             self.density_lower = 16.0
             self.density_target = 30.0
@@ -179,6 +180,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v28",
             "pose_rep_active_memory_v29",
             "pose_rep_active_memory_v30",
+            "pose_rep_active_memory_v31",
         }:
             self.local_density_lower = 12.0
             self.soft_gap_threshold = 8
@@ -212,6 +214,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v28",
             "pose_rep_active_memory_v29",
             "pose_rep_active_memory_v30",
+            "pose_rep_active_memory_v31",
         }:
             self.value_hold_budget_per_100 = int(
                 getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 48)
@@ -271,7 +274,11 @@ class DirectDensityController:
                 getattr(args, "paper_aligned_direct_utility_pose_reference_min", 0.60)
                 or 0.60
             )
-        if self.mode in {"pose_rep_active_memory_v29", "pose_rep_active_memory_v30"}:
+        if self.mode in {
+            "pose_rep_active_memory_v29",
+            "pose_rep_active_memory_v30",
+            "pose_rep_active_memory_v31",
+        }:
             self.density_upper = 70.0
             self.density_hard_upper = 92.0
             self.value_hold_budget_per_100 = int(
@@ -361,6 +368,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v28",
             "pose_rep_active_memory_v29",
             "pose_rep_active_memory_v30",
+            "pose_rep_active_memory_v31",
         }
 
     @property
@@ -382,6 +390,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v28",
             "pose_rep_active_memory_v29",
             "pose_rep_active_memory_v30",
+            "pose_rep_active_memory_v31",
         }
 
     @property
@@ -402,6 +411,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v28",
             "pose_rep_active_memory_v29",
             "pose_rep_active_memory_v30",
+            "pose_rep_active_memory_v31",
         }
 
     @property
@@ -461,6 +471,10 @@ class DirectDensityController:
         return self.mode == "pose_rep_active_memory_v30"
 
     @property
+    def is_pose_rep_active_memory_v31(self) -> bool:
+        return self.mode == "pose_rep_active_memory_v31"
+
+    @property
     def is_pose_rep_active_memory(self) -> bool:
         return self.mode in {
             "pose_rep_active_memory_v1",
@@ -477,6 +491,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v28",
             "pose_rep_active_memory_v29",
             "pose_rep_active_memory_v30",
+            "pose_rep_active_memory_v31",
         }
 
     @property
@@ -744,6 +759,18 @@ class DirectDensityController:
         viewpoint_rotation_window_max = _f(
             viewpoint.get("viewpoint_rotation_deg_window_max"), 0.0
         )
+        viewpoint_rotation_window_20 = _f(
+            viewpoint.get("viewpoint_rotation_deg_window_20"), 0.0
+        )
+        viewpoint_rotation_window_50 = _f(
+            viewpoint.get("viewpoint_rotation_deg_window_50"), 0.0
+        )
+        viewpoint_rotation_window_100 = _f(
+            viewpoint.get("viewpoint_rotation_deg_window_100"), 0.0
+        )
+        viewpoint_rotation_window_max_size = int(
+            _f(viewpoint.get("viewpoint_rotation_window_max_size"), 0.0)
+        )
         viewpoint_grid_coverage = _clamp01(
             viewpoint.get("inlier_grid_coverage"), 0.0
         )
@@ -901,19 +928,49 @@ class DirectDensityController:
             or self.is_pose_rep_active_memory_v28
             or self.is_pose_rep_active_memory_v29
             or self.is_pose_rep_active_memory_v30
+            or self.is_pose_rep_active_memory_v31
+        )
+        utility_persistent_long_turn_context = bool(
+            self.is_pose_rep_active_memory_v31
+            and int(frame_id) >= 600
+            and (
+                viewpoint_rotation_window_100 >= 24.0
+                or (
+                    viewpoint_rotation_window_50 >= 24.0
+                    and viewpoint_rotation_window_max_size >= 50
+                )
+                or (
+                    viewpoint_rotation_window_max >= 30.0
+                    and viewpoint_rotation_window_max_size >= 50
+                )
+            )
         )
         utility_hard_window_guard = bool(
             (
-                self.is_pose_rep_active_memory_v28
-                or self.is_pose_rep_active_memory_v29
-                or self.is_pose_rep_active_memory_v30
+                self.is_pose_rep_active_memory_v31
+                and utility_persistent_long_turn_context
+                and (
+                    viewpoint_rotation_window_100 >= 30.0
+                    or viewpoint_rotation_window_50 >= 26.0
+                    or new_view_event_score >= 0.38
+                    or viewpoint_grid_coverage < 0.75
+                    or utility_view_change >= 0.42
+                    or utility_recovery_pressure_score >= 0.25
+                )
             )
-            and (
-                viewpoint_rotation_window_max >= 18.0
-                or new_view_event_score >= 0.55
-                or viewpoint_grid_coverage < 0.75
-                or utility_view_change >= 0.42
-                or utility_recovery_pressure_score >= 0.25
+            or (
+                (
+                    self.is_pose_rep_active_memory_v28
+                    or self.is_pose_rep_active_memory_v29
+                    or self.is_pose_rep_active_memory_v30
+                )
+                and (
+                    viewpoint_rotation_window_max >= 18.0
+                    or new_view_event_score >= 0.55
+                    or viewpoint_grid_coverage < 0.75
+                    or utility_view_change >= 0.42
+                    or utility_recovery_pressure_score >= 0.25
+                )
             )
         )
         utility_tracking_safe_context = bool(
@@ -938,7 +995,11 @@ class DirectDensityController:
         utility_representation_role = bool(
             (
                 (
-                    (self.is_pose_rep_active_memory_v29 or self.is_pose_rep_active_memory_v30)
+                    (
+                        self.is_pose_rep_active_memory_v29
+                        or self.is_pose_rep_active_memory_v30
+                        or self.is_pose_rep_active_memory_v31
+                    )
                     and utility_hard_window_guard
                 )
                 or (
@@ -964,7 +1025,11 @@ class DirectDensityController:
                 and utility_representation < self.utility_representation_min
                 and utility_drift_risk < 0.55
             )
-        elif self.is_pose_rep_active_memory_v29 or self.is_pose_rep_active_memory_v30:
+        elif (
+            self.is_pose_rep_active_memory_v29
+            or self.is_pose_rep_active_memory_v30
+            or self.is_pose_rep_active_memory_v31
+        ):
             utility_tracking_only_role = False
         else:
             utility_tracking_only_role = bool(
@@ -1043,6 +1108,7 @@ class DirectDensityController:
                 or self.is_pose_rep_active_memory_v28
                 or self.is_pose_rep_active_memory_v29
                 or self.is_pose_rep_active_memory_v30
+                or self.is_pose_rep_active_memory_v31
             )
             and int(frame_id) >= 300
             and density_before >= 55.0
@@ -1133,6 +1199,7 @@ class DirectDensityController:
             self.is_pose_rep_active_memory_v28
             or self.is_pose_rep_active_memory_v29
             or self.is_pose_rep_active_memory_v30
+            or self.is_pose_rep_active_memory_v31
         ) and utility_hard_window_guard:
             block_reason = "utility_hard_window_representation_guard"
         elif utility_hold_mode and utility_representation_role:
@@ -1238,6 +1305,7 @@ class DirectDensityController:
             "utility_representation_role": utility_representation_role,
             "utility_recovery_pressure_context": utility_recovery_pressure_context,
             "utility_hard_window_guard": utility_hard_window_guard,
+            "utility_persistent_long_turn_context": utility_persistent_long_turn_context,
             "utility_tracking_safe_context": utility_tracking_safe_context,
             "representation_value_hold_max": self.representation_value_hold_max,
             "pose_reference_value_min": self.pose_reference_value_min,
@@ -1316,6 +1384,7 @@ class DirectDensityController:
                     self.is_pose_rep_active_memory_v28
                     or self.is_pose_rep_active_memory_v29
                     or self.is_pose_rep_active_memory_v30
+                    or self.is_pose_rep_active_memory_v31
                 )
                 and utility_hard_window_guard
                 else
