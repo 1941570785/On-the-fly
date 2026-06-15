@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
+
+REPO = Path("/data2/zxd/3D_Reconstruction/On_the_fly")
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
 
 os.environ.setdefault(
     "OTF_EXPERIMENT_LABEL", "pose-rep-active-memory-v27-utility-controller_all"
