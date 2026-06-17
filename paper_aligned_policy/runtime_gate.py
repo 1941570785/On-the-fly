@@ -218,6 +218,14 @@ class PaperAlignedRuntimeGate:
             self.pose_only_reference_late_extreme_new_view_frame_min = 1200
             self.pose_only_reference_late_extreme_new_view_min = 0.35
             self.pose_only_reference_late_extreme_new_view_support_min = 0.15
+        if getattr(self.direct_density_controller, "is_pose_memory_geometry_context_v1", False):
+            self.pose_only_reference_max_per_query = 2
+            self.pose_only_reference_ttl_frames = 140
+            self.pose_only_reference_min_age_frames = 16
+            self.pose_only_reference_min_match_score = 240.0
+            self.pose_only_reference_register_min_interval_frames = 16
+            self.pose_only_reference_selection_cooldown_frames = 6
+            self.pose_only_reference_selection_strategy = "risk_aware"
         self._anchor_count_at_last_direct_finalize = 1
         if self.mode == "paper_aligned_semantic_v1":
             cfg = self.coupled_config
@@ -1210,6 +1218,24 @@ class PaperAlignedRuntimeGate:
             "pose_only_viewpoint_rotation_window_max": float(viewpoint_rotation_window_max),
             "pose_only_frame_id": float(frame_index),
         }
+        geometry_seed_context = bool(
+            getattr(self.direct_density_controller, "is_pose_memory_geometry_context_v1", False)
+            and bool(debug.get("pose_memory_geometry_context_enabled", False))
+            and bool(debug.get("active_memory_stable_pose_reference", False))
+            and bool(debug.get("active_memory_low_marginal_representation", False))
+            and self._tensor_float(debug.get("pose_support_score"), 0.0) >= 0.75
+            and self._tensor_float(debug.get("match_support_score"), 0.0) >= 0.75
+            and self._tensor_float(debug.get("viewpoint_grid_coverage"), 0.0) >= 0.90
+            and inlier_grid_entropy >= 0.88
+            and support_concentration <= 0.18
+            and new_view_event <= 0.32
+            and anchor_health >= 0.45
+            and viewpoint_rotation_window_max <= 38.0
+            and growth_recent <= 24.0
+        )
+        metrics["pose_memory_geometry_seed_context"] = float(geometry_seed_context)
+        if geometry_seed_context:
+            return True, "", metrics
         if bool(self.pose_only_reference_require_negative_growth):
             if growth_recent >= 0.0:
                 return False, "pose_only_growth_not_stalled", metrics

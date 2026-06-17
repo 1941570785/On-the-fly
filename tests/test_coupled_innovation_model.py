@@ -2666,6 +2666,63 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertFalse(decision.debug["pose_memory_geometry_tracking_context"])
         self.assertTrue(decision.debug["pose_memory_geometry_guard"])
 
+    def test_pose_memory_geometry_context_seeds_distributed_stable_pose_memory(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(
+                paper_aligned_direct_density_control="pose_rep_active_memory_v33",
+                paper_aligned_pose_memory_geometry_context="v1",
+            )
+        )
+
+        ok, reason, metrics = gate._pose_only_reference_risk_gate_decision(
+            {
+                "pose_memory_geometry_context_enabled": True,
+                "active_memory_stable_pose_reference": True,
+                "active_memory_low_marginal_representation": True,
+                "pose_support_score": 0.90,
+                "match_support_score": 0.92,
+                "viewpoint_grid_coverage": 0.98,
+                "support_concentration": 0.04,
+                "inlier_grid_entropy": 0.96,
+                "anchor_health_score": 0.62,
+                "new_view_event_score": 0.18,
+                "keyframe_growth_recent": 12,
+                "viewpoint_rotation_deg_window_max": 24.0,
+            },
+            frame_id=420,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+        self.assertEqual(metrics["pose_memory_geometry_seed_context"], 1.0)
+
+    def test_active_memory_v33_without_geometry_keeps_original_pose_memory_growth_gate(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_active_memory_v33")
+        )
+
+        ok, reason, metrics = gate._pose_only_reference_risk_gate_decision(
+            {
+                "pose_memory_geometry_context_enabled": False,
+                "active_memory_stable_pose_reference": True,
+                "active_memory_low_marginal_representation": True,
+                "pose_support_score": 0.90,
+                "match_support_score": 0.92,
+                "viewpoint_grid_coverage": 0.98,
+                "support_concentration": 0.04,
+                "inlier_grid_entropy": 0.96,
+                "anchor_health_score": 0.62,
+                "new_view_event_score": 0.18,
+                "keyframe_growth_recent": 12,
+                "viewpoint_rotation_deg_window_max": 24.0,
+            },
+            frame_id=420,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "pose_only_growth_not_stalled")
+        self.assertEqual(metrics["pose_memory_geometry_seed_context"], 0.0)
+
     def test_active_memory_v33_holds_late_long_turn_low_representation_frames(self):
         controller = DirectDensityController(
             _args(paper_aligned_direct_density_control="pose_rep_active_memory_v33")
