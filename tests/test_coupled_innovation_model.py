@@ -48,6 +48,7 @@ def _args(**overrides):
         "paper_aligned_defer_recovery_support_bridge": None,
         "paper_aligned_recovery_commit_control": None,
         "paper_aligned_direct_density_control": None,
+        "paper_aligned_pose_memory_geometry_context": None,
         "paper_aligned_direct_update_prev_desc_on_hold": None,
         "paper_aligned_direct_density_upper_per_100": None,
         "paper_aligned_direct_density_hard_upper_per_100": None,
@@ -332,6 +333,25 @@ class CoupledInnovationModelTests(unittest.TestCase):
                 args = get_args()
 
         self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_active_memory_v26")
+
+    def test_cli_accepts_pose_memory_geometry_context_knob(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_direct_density_control",
+                "pose_rep_active_memory_v33",
+                "--paper_aligned_pose_memory_geometry_context",
+                "v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(args.paper_aligned_pose_memory_geometry_context, "v1")
 
     def test_runtime_gate_applies_coupled_preset_to_args_before_subsystems_use_them(self):
         args = _args(paper_aligned_tau_R_low=0.31, paper_aligned_recovery_delay_frames=4)
@@ -2516,6 +2536,136 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertFalse(decision.debug["utility_representation_role"])
         self.assertNotEqual(decision.reason, "utility_hard_window_representation_guard")
 
+    def test_pose_memory_geometry_context_holds_forest_scale_low_representation_frames(self):
+        controller = DirectDensityController(
+            _args(
+                paper_aligned_direct_density_control="pose_rep_active_memory_v33",
+                paper_aligned_pose_memory_geometry_context="v1",
+            )
+        )
+
+        decision = controller.decide(
+            frame_id=1180,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=86.0,
+            local_density_before=82.0,
+            local_window_density=82.0,
+            local_window_keyframes=82,
+            local_window_gap_max=5.0,
+            local_window_gap_after_if_hold=5.0,
+            keyframe_growth_recent=16,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=1,
+            main_chain_gap_before=2.0,
+            main_chain_gap_after_if_hold=3.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=18.0,
+            displacement_threshold=32.0,
+            num_matches=2400,
+            min_num_inliers=100,
+            pose_inliers=1800,
+            novelty_proxy=0.08,
+            current_keyframe_count=740,
+            semantic_scores={
+                "R_t": 0.03,
+                "V_t": 0.24,
+                "Q_t": 0.94,
+                "C_t": 0.93,
+                "B_R_t": 0.92,
+            },
+            viewpoint_scores={
+                "viewpoint_rotation_deg_window_20": 18.0,
+                "viewpoint_rotation_deg_window_50": 26.0,
+                "viewpoint_rotation_deg_window_100": 32.0,
+                "viewpoint_rotation_deg_window_max": 32.0,
+                "viewpoint_rotation_window_max_size": 100,
+                "inlier_grid_coverage": 0.96,
+                "support_concentration": 0.10,
+                "anchor_health_score": 0.72,
+                "new_view_event_score": 0.24,
+                "pose_memory_reference_count": 1,
+                "pose_memory_pool_size": 3,
+                "pose_memory_candidate_pool_size": 0,
+            },
+        )
+
+        self.assertFalse(decision.finalize)
+        self.assertEqual(decision.decision, "hold_low_representation_value")
+        self.assertEqual(decision.reason, "pose_memory_geometry_tracking_context")
+        self.assertTrue(decision.debug["pose_memory_geometry_context_enabled"])
+        self.assertTrue(decision.debug["pose_memory_geometry_tracking_context"])
+        self.assertTrue(decision.debug["pose_memory_context_without_candidate_pool"])
+        self.assertTrue(decision.debug["active_memory_context"])
+        self.assertEqual(decision.debug["active_memory_frame_role"], "tracking_only")
+
+    def test_pose_memory_geometry_context_blocks_weak_geometry_tracking_hold(self):
+        controller = DirectDensityController(
+            _args(
+                paper_aligned_direct_density_control="pose_rep_active_memory_v33",
+                paper_aligned_pose_memory_geometry_context="v1",
+            )
+        )
+
+        decision = controller.decide(
+            frame_id=1180,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=86.0,
+            local_density_before=82.0,
+            local_window_density=82.0,
+            local_window_keyframes=82,
+            local_window_gap_max=5.0,
+            local_window_gap_after_if_hold=5.0,
+            keyframe_growth_recent=16,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=1,
+            main_chain_gap_before=2.0,
+            main_chain_gap_after_if_hold=3.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=18.0,
+            displacement_threshold=32.0,
+            num_matches=900,
+            min_num_inliers=100,
+            pose_inliers=650,
+            novelty_proxy=0.08,
+            current_keyframe_count=740,
+            semantic_scores={
+                "R_t": 0.03,
+                "V_t": 0.24,
+                "Q_t": 0.94,
+                "C_t": 0.93,
+                "B_R_t": 0.92,
+            },
+            viewpoint_scores={
+                "viewpoint_rotation_deg_window_20": 18.0,
+                "viewpoint_rotation_deg_window_50": 26.0,
+                "viewpoint_rotation_deg_window_100": 32.0,
+                "viewpoint_rotation_deg_window_max": 32.0,
+                "viewpoint_rotation_window_max_size": 100,
+                "inlier_grid_coverage": 0.55,
+                "support_concentration": 0.38,
+                "anchor_health_score": 0.46,
+                "new_view_event_score": 0.54,
+                "pose_memory_reference_count": 0,
+                "pose_memory_pool_size": 0,
+                "pose_memory_candidate_pool_size": 0,
+            },
+        )
+
+        self.assertTrue(decision.finalize)
+        self.assertEqual(decision.decision, "finalize_high_representation_value")
+        self.assertEqual(decision.reason, "pose_memory_geometry_guard")
+        self.assertTrue(decision.debug["pose_memory_geometry_context_enabled"])
+        self.assertFalse(decision.debug["pose_memory_geometry_tracking_context"])
+        self.assertTrue(decision.debug["pose_memory_geometry_guard"])
+
     def test_active_memory_v33_holds_late_long_turn_low_representation_frames(self):
         controller = DirectDensityController(
             _args(paper_aligned_direct_density_control="pose_rep_active_memory_v33")
@@ -2650,6 +2800,14 @@ class CoupledInnovationModelTests(unittest.TestCase):
             "runtime_gate.direct_density_controller.is_pose_rep_active_memory_v1",
             guard_window,
         )
+
+    def test_training_loop_exports_pose_memory_geometry_context_to_viewpoint_scores(self):
+        train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(
+            encoding="utf-8-sig"
+        )
+        self.assertIn("pose_memory_reference_count", train_source)
+        self.assertIn("pose_memory_pool_size", train_source)
+        self.assertIn("pose_memory_candidate_pool_size", train_source)
 
     def test_pose_only_reference_pool_expires_caps_and_ranks_by_match_support(self):
         import torch

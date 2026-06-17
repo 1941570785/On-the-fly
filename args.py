@@ -284,6 +284,13 @@ def get_args():
         help='Direct keyframe finalization density guard (not R/V/Q admission).',
     )
     parser.add_argument(
+        '--paper_aligned_pose_memory_geometry_context',
+        type=str,
+        default='off',
+        choices=['off', 'v1'],
+        help='Use online pose-memory geometry context to calibrate pose/representation decoupling.',
+    )
+    parser.add_argument(
         '--paper_aligned_direct_v2_2_2_1_post500_gap_rescue_budget_per_100',
         type=int,
         default=4,

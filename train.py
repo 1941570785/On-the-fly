@@ -1611,6 +1611,21 @@ if __name__ == "__main__":
                             ),
                             pose_history=list(viewpoint_pose_history),
                         )
+                        pose_memory_pool_summary = runtime_gate.pose_only_reference_pool_summary()
+                        pose_memory_candidate_pool_size = len(
+                            getattr(runtime_gate, "_pending_true_source_commits", [])
+                        ) + len(getattr(runtime_gate, "_held_true_source_commits", []))
+                        viewpoint_coverage_event.update(
+                            {
+                                "pose_memory_reference_count": int(len(pose_only_refs)),
+                                "pose_memory_pool_size": int(
+                                    pose_memory_pool_summary.get("pool_size", 0)
+                                ),
+                                "pose_memory_candidate_pool_size": int(
+                                    pose_memory_candidate_pool_size
+                                ),
+                            }
+                        )
                         try:
                             history_Rt = Rt.detach().cpu().clone()
                         except Exception:
@@ -1825,6 +1840,36 @@ if __name__ == "__main__":
                             ),
                             "utility_tracking_safe_context": bool(
                                 dbg.get("utility_tracking_safe_context", False)
+                            ),
+                            "pose_memory_geometry_context_enabled": bool(
+                                dbg.get("pose_memory_geometry_context_enabled", False)
+                            ),
+                            "pose_memory_geometry_context_score": float(
+                                dbg.get("pose_memory_geometry_context_score", 0.0)
+                            ),
+                            "pose_memory_geometry_quality": float(
+                                dbg.get("pose_memory_geometry_quality", 0.0)
+                            ),
+                            "pose_memory_geometry_new_view_risk": float(
+                                dbg.get("pose_memory_geometry_new_view_risk", 0.0)
+                            ),
+                            "pose_memory_geometry_tracking_context": bool(
+                                dbg.get("pose_memory_geometry_tracking_context", False)
+                            ),
+                            "pose_memory_geometry_guard": bool(
+                                dbg.get("pose_memory_geometry_guard", False)
+                            ),
+                            "pose_memory_reference_count": int(
+                                dbg.get("pose_memory_reference_count", 0)
+                            ),
+                            "pose_memory_pool_size": int(
+                                dbg.get("pose_memory_pool_size", 0)
+                            ),
+                            "pose_memory_candidate_pool_size": int(
+                                dbg.get("pose_memory_candidate_pool_size", 0)
+                            ),
+                            "pose_memory_context_without_candidate_pool": bool(
+                                dbg.get("pose_memory_context_without_candidate_pool", False)
                             ),
                             "pose_risk_score": float(dbg.get("pose_risk_score", 0.0)),
                             "motion_value_score": float(dbg.get("motion_value_score", 0.0)),

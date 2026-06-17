@@ -42,6 +42,9 @@ class DirectDensityController:
 
     def __init__(self, args: Any) -> None:
         self.mode = str(getattr(args, "paper_aligned_direct_density_control", "off") or "off")
+        self.pose_memory_geometry_context = str(
+            getattr(args, "paper_aligned_pose_memory_geometry_context", "off") or "off"
+        )
         self.density_lower = float(getattr(args, "paper_aligned_direct_density_lower_per_100", 25.0) or 25.0)
         self.density_target = float(getattr(args, "paper_aligned_direct_density_target_per_100", 35.0) or 35.0)
         self.density_upper = float(getattr(args, "paper_aligned_direct_density_upper_per_100", 75.0) or 75.0)
@@ -507,6 +510,13 @@ class DirectDensityController:
         }
 
     @property
+    def is_pose_memory_geometry_context_v1(self) -> bool:
+        return (
+            self.pose_memory_geometry_context == "v1"
+            and self.is_pose_rep_active_memory_v33
+        )
+
+    @property
     def is_v222_family(self) -> bool:
         return self.is_v222 or self.is_v2221
 
@@ -935,6 +945,99 @@ class DirectDensityController:
             - 0.12 * utility_drift_risk
             - 0.10 * utility_compute_cost
         )
+        pose_memory_geometry_context_enabled = bool(
+            self.is_pose_memory_geometry_context_v1
+        )
+        pose_memory_reference_count = max(
+            0,
+            int(
+                _f(
+                    viewpoint.get(
+                        "pose_memory_reference_count",
+                        viewpoint.get("selected_pose_only_reference_count", 0),
+                    ),
+                    0.0,
+                )
+            ),
+        )
+        pose_memory_pool_size = max(
+            0,
+            int(
+                _f(
+                    viewpoint.get(
+                        "pose_memory_pool_size",
+                        viewpoint.get("pose_only_reference_pool_size", 0),
+                    ),
+                    0.0,
+                )
+            ),
+        )
+        pose_memory_candidate_pool_size = max(
+            0,
+            int(
+                _f(
+                    viewpoint.get(
+                        "pose_memory_candidate_pool_size",
+                        scores.get("recovery_pool_size", recovery_pool_size),
+                    ),
+                    0.0,
+                )
+            ),
+        )
+        selected_reference_count = max(
+            0, int(_f(viewpoint.get("selected_reference_count"), 0.0))
+        )
+        pose_memory_reference_presence = _clamp01(
+            0.70 * (min(float(pose_memory_reference_count), 2.0) / 2.0)
+            + 0.30 * (min(float(pose_memory_pool_size), 6.0) / 6.0)
+        )
+        pose_memory_geometry_quality = _clamp01(
+            0.22 * pose_support
+            + 0.18 * match_support
+            + 0.20 * viewpoint_grid_coverage
+            + 0.12 * inlier_grid_entropy
+            + 0.18 * (1.0 - support_concentration)
+            + 0.10 * semantic_Q
+        )
+        pose_memory_geometry_context_score = _clamp01(
+            0.58 * pose_memory_reference_presence
+            + 0.42 * pose_memory_geometry_quality
+        )
+        pose_memory_geometry_new_view_risk = _clamp01(
+            max(
+                new_view_event_score,
+                viewpoint_rotation_window_100 / 36.0,
+                viewpoint_rotation_window_50 / 32.0,
+                viewpoint_rotation_window_max / 45.0,
+                1.0 - viewpoint_grid_coverage,
+                support_concentration,
+            )
+        )
+        pose_memory_geometry_turn_context = bool(
+            pose_memory_geometry_context_enabled
+            and int(frame_id) >= 300
+            and (
+                viewpoint_rotation_window_100 >= 20.0
+                or viewpoint_rotation_window_50 >= 22.0
+                or viewpoint_rotation_window_max >= 26.0
+                or new_view_event_score >= 0.44
+            )
+        )
+        pose_memory_context_without_candidate_pool = bool(
+            pose_memory_geometry_context_enabled
+            and pose_memory_candidate_pool_size == 0
+            and pose_memory_reference_presence > 0.0
+        )
+        pose_memory_geometry_guard = bool(
+            pose_memory_geometry_turn_context
+            and pose_memory_geometry_new_view_risk >= 0.52
+            and pose_memory_geometry_context_score < 0.55
+            and (
+                new_view_event_score >= 0.44
+                or viewpoint_grid_coverage < 0.70
+                or support_concentration >= 0.30
+            )
+        )
         utility_mode = bool(
             self.is_pose_rep_active_memory_v27
             or self.is_pose_rep_active_memory_v28
@@ -1139,6 +1242,23 @@ class DirectDensityController:
         value_hold_budget_available = bool(
             self._budget.value_hold_used < self.value_hold_budget_per_100
         )
+        pose_memory_geometry_tracking_context = bool(
+            pose_memory_geometry_turn_context
+            and pose_memory_reference_presence > 0.0
+            and pose_memory_geometry_context_score >= 0.60
+            and pose_memory_geometry_new_view_risk >= 0.40
+            and pose_memory_geometry_new_view_risk <= 0.95
+            and density_before >= 55.0
+            and local_density_before >= 35.0
+            and active_memory_stable_pose_reference
+            and active_memory_low_marginal_representation
+            and utility_drift_risk < 0.45
+            and not pose_memory_geometry_guard
+            and not anchor_changed
+            and gap_safe
+            and not starvation_risk
+            and density_state != "below_lower"
+        )
         active_memory_low_turn_dense_context = bool(
             (
                 self.is_pose_rep_active_memory_v2
@@ -1194,6 +1314,7 @@ class DirectDensityController:
                 local_density_before >= 45.0
                 or active_memory_low_turn_dense_context
                 or active_memory_late_long_turn_tracking_context
+                or pose_memory_geometry_tracking_context
             )
             and active_memory_stable_pose_reference
             and active_memory_low_marginal_representation
@@ -1214,6 +1335,7 @@ class DirectDensityController:
         representation_value_high = bool(
             representation_value >= self.representation_value_hold_max
             or utility_representation_role
+            or pose_memory_geometry_guard
             or (high_recent_growth_representation_guard and not active_memory_context)
             or low_semantic_coverage_representation_guard
             or anchor_boundary_representation_guard
@@ -1271,6 +1393,8 @@ class DirectDensityController:
             or self.is_pose_rep_active_memory_v33
         ) and utility_hard_window_guard:
             block_reason = "utility_hard_window_representation_guard"
+        elif pose_memory_geometry_guard:
+            block_reason = "pose_memory_geometry_guard"
         elif utility_hold_mode and utility_representation_role:
             block_reason = "utility_representation_gain"
         elif utility_hold_mode and not utility_tracking_only_role:
@@ -1381,6 +1505,20 @@ class DirectDensityController:
             "utility_tracking_safe_context": utility_tracking_safe_context,
             "representation_value_hold_max": self.representation_value_hold_max,
             "pose_reference_value_min": self.pose_reference_value_min,
+            "pose_memory_geometry_context_enabled": pose_memory_geometry_context_enabled,
+            "pose_memory_geometry_context_mode": self.pose_memory_geometry_context,
+            "pose_memory_reference_count": pose_memory_reference_count,
+            "pose_memory_pool_size": pose_memory_pool_size,
+            "pose_memory_candidate_pool_size": pose_memory_candidate_pool_size,
+            "pose_memory_selected_reference_count": selected_reference_count,
+            "pose_memory_reference_presence": pose_memory_reference_presence,
+            "pose_memory_geometry_quality": pose_memory_geometry_quality,
+            "pose_memory_geometry_context_score": pose_memory_geometry_context_score,
+            "pose_memory_geometry_new_view_risk": pose_memory_geometry_new_view_risk,
+            "pose_memory_geometry_turn_context": pose_memory_geometry_turn_context,
+            "pose_memory_geometry_tracking_context": pose_memory_geometry_tracking_context,
+            "pose_memory_geometry_guard": pose_memory_geometry_guard,
+            "pose_memory_context_without_candidate_pool": pose_memory_context_without_candidate_pool,
             "value_hold_budget_per_100": self.value_hold_budget_per_100,
             "value_hold_budget_used": self._budget.value_hold_used,
             "value_hold_budget_available": value_hold_budget_available,
@@ -1461,6 +1599,9 @@ class DirectDensityController:
                 )
                 and utility_hard_window_guard
                 else
+                "pose_memory_geometry_guard"
+                if pose_memory_geometry_guard
+                else
                 "utility_representation_gain"
                 if utility_mode and utility_representation_role
                 else "representation_value_high"
@@ -1475,10 +1616,15 @@ class DirectDensityController:
             dbg["hold_low_representation_value"] = True
             dbg["direct_keyframe_finalized"] = False
             dbg["keyframe_finalized"] = False
+            hold_reason = (
+                "pose_memory_geometry_tracking_context"
+                if pose_memory_geometry_tracking_context
+                else "pose_reference_only_low_representation_value"
+            )
             return DirectFinalizationDecision(
                 False,
                 "hold_low_representation_value",
-                "pose_reference_only_low_representation_value",
+                hold_reason,
                 dbg,
             )
 
