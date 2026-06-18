@@ -1698,12 +1698,29 @@ if __name__ == "__main__":
                             trace_ev["direct_keyframe_finalized"] = bool(direct_keyframe_finalized)
                             trace_ev["direct_finalization_decision"] = str(fin_dec.decision)
                             trace_ev["direct_finalization_reason"] = str(fin_dec.reason)
+                            trace_ev["stream_memory_controller_enabled"] = bool(
+                                dbg.get("stream_memory_controller_enabled", False)
+                            )
+                            trace_ev["stream_memory_frame_identity"] = str(
+                                dbg.get("stream_memory_frame_identity", "")
+                            )
+                            trace_ev["stream_memory_memory_identity"] = str(
+                                dbg.get("stream_memory_memory_identity", "")
+                            )
+                            trace_ev["stream_memory_write_action"] = str(
+                                dbg.get("stream_memory_write_action", "")
+                            )
+                            trace_ev["stream_memory_candidate_verification_required"] = bool(
+                                dbg.get("stream_memory_candidate_verification_required", False)
+                            )
                             if not direct_keyframe_finalized:
                                 trace_ev["direct_admit_but_held_for_density"] = True
                         density_hold_recovery_enqueued = False
                         density_hold_recovery_bridge_tag = ""
                         if not direct_keyframe_finalized:
-                            if runtime_gate.direct_density_controller.should_enqueue_hold_recovery():
+                            if runtime_gate.direct_density_controller.should_enqueue_hold_recovery(
+                                str(fin_dec.decision)
+                            ):
                                 density_hold_recovery_enqueued = runtime_gate.enqueue_density_hold_recovery_candidate(
                                     frame_id=int(frameID),
                                     info=info,
@@ -1870,6 +1887,45 @@ if __name__ == "__main__":
                             ),
                             "pose_memory_context_without_candidate_pool": bool(
                                 dbg.get("pose_memory_context_without_candidate_pool", False)
+                            ),
+                            "stream_memory_controller_enabled": bool(
+                                dbg.get("stream_memory_controller_enabled", False)
+                            ),
+                            "stream_memory_frame_identity": str(
+                                dbg.get("stream_memory_frame_identity", "")
+                            ),
+                            "stream_memory_memory_identity": str(
+                                dbg.get("stream_memory_memory_identity", "")
+                            ),
+                            "stream_memory_write_action": str(
+                                dbg.get("stream_memory_write_action", "")
+                            ),
+                            "stream_memory_new_view_risk": float(
+                                dbg.get("stream_memory_new_view_risk", 0.0)
+                            ),
+                            "stream_memory_geometry_safety": float(
+                                dbg.get("stream_memory_geometry_safety", 0.0)
+                            ),
+                            "stream_memory_representation_need": float(
+                                dbg.get("stream_memory_representation_need", 0.0)
+                            ),
+                            "stream_memory_pose_need": float(
+                                dbg.get("stream_memory_pose_need", 0.0)
+                            ),
+                            "stream_memory_candidate_score": float(
+                                dbg.get("stream_memory_candidate_score", 0.0)
+                            ),
+                            "stream_memory_candidate_verification_required": bool(
+                                dbg.get("stream_memory_candidate_verification_required", False)
+                            ),
+                            "stream_memory_candidate_budget_used": int(
+                                dbg.get("stream_memory_candidate_budget_used", 0)
+                            ),
+                            "stream_memory_pose_only_context": bool(
+                                dbg.get("stream_memory_pose_only_context", False)
+                            ),
+                            "stream_memory_sparse_write": bool(
+                                dbg.get("stream_memory_sparse_write", False)
                             ),
                             "pose_risk_score": float(dbg.get("pose_risk_score", 0.0)),
                             "motion_value_score": float(dbg.get("motion_value_score", 0.0)),
@@ -2082,6 +2138,36 @@ if __name__ == "__main__":
                                     ),
                                     "utility_tracking_safe_context": bool(
                                         dbg.get("utility_tracking_safe_context", False)
+                                    ),
+                                    "stream_memory_controller_enabled": bool(
+                                        dbg.get("stream_memory_controller_enabled", False)
+                                    ),
+                                    "stream_memory_frame_identity": str(
+                                        dbg.get("stream_memory_frame_identity", "")
+                                    ),
+                                    "stream_memory_memory_identity": str(
+                                        dbg.get("stream_memory_memory_identity", "")
+                                    ),
+                                    "stream_memory_write_action": str(
+                                        dbg.get("stream_memory_write_action", "")
+                                    ),
+                                    "stream_memory_new_view_risk": float(
+                                        dbg.get("stream_memory_new_view_risk", 0.0)
+                                    ),
+                                    "stream_memory_geometry_safety": float(
+                                        dbg.get("stream_memory_geometry_safety", 0.0)
+                                    ),
+                                    "stream_memory_representation_need": float(
+                                        dbg.get("stream_memory_representation_need", 0.0)
+                                    ),
+                                    "stream_memory_pose_need": float(
+                                        dbg.get("stream_memory_pose_need", 0.0)
+                                    ),
+                                    "stream_memory_candidate_verification_required": bool(
+                                        dbg.get(
+                                            "stream_memory_candidate_verification_required",
+                                            False,
+                                        )
                                     ),
                                     "value_hold_block_reason": str(
                                         dbg.get("value_hold_block_reason", "")

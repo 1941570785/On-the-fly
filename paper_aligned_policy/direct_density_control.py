@@ -35,6 +35,7 @@ class _BudgetWindow:
     gap_rescue_used: int = 0
     post500_gap_rescue_used: int = 0
     value_hold_used: int = 0
+    candidate_verify_used: int = 0
 
 
 class DirectDensityController:
@@ -109,6 +110,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v30",
             "pose_rep_active_memory_v31",
             "pose_rep_active_memory_v33",
+            "pose_rep_streaming_memory_v1",
         }:
             self.density_lower = 16.0
             self.density_target = 30.0
@@ -186,6 +188,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v30",
             "pose_rep_active_memory_v31",
             "pose_rep_active_memory_v33",
+            "pose_rep_streaming_memory_v1",
         }:
             self.local_density_lower = 12.0
             self.soft_gap_threshold = 8
@@ -221,6 +224,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v30",
             "pose_rep_active_memory_v31",
             "pose_rep_active_memory_v33",
+            "pose_rep_streaming_memory_v1",
         }:
             self.value_hold_budget_per_100 = int(
                 getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 48)
@@ -285,6 +289,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v30",
             "pose_rep_active_memory_v31",
             "pose_rep_active_memory_v33",
+            "pose_rep_streaming_memory_v1",
         }:
             self.density_upper = 70.0
             self.density_hard_upper = 92.0
@@ -316,6 +321,36 @@ class DirectDensityController:
             self.representation_value_hold_max = float(
                 getattr(args, "paper_aligned_direct_representation_value_hold_max", 0.38)
                 or 0.38
+            )
+        self.candidate_verification_budget_per_100 = int(
+            getattr(args, "paper_aligned_stream_memory_candidate_budget_per_100", 0) or 0
+        )
+        if self.mode == "pose_rep_streaming_memory_v1":
+            self.density_upper = 70.0
+            self.density_hard_upper = 92.0
+            self.value_hold_budget_per_100 = int(
+                getattr(args, "paper_aligned_direct_value_hold_budget_per_100", 44)
+                or 44
+            )
+            self.representation_value_hold_max = float(
+                getattr(args, "paper_aligned_direct_representation_value_hold_max", 0.36)
+                or 0.36
+            )
+            self.pose_reference_value_min = float(
+                getattr(args, "paper_aligned_direct_pose_reference_value_min", 0.60)
+                or 0.60
+            )
+            self.utility_representation_min = float(
+                getattr(args, "paper_aligned_direct_utility_representation_min", 0.47)
+                or 0.47
+            )
+            self.utility_pose_reference_min = float(
+                getattr(args, "paper_aligned_direct_utility_pose_reference_min", 0.60)
+                or 0.60
+            )
+            self.candidate_verification_budget_per_100 = int(
+                getattr(args, "paper_aligned_stream_memory_candidate_budget_per_100", 10)
+                or 10
             )
         if self.mode in {"target_band_v2_2_1", "target_band_v2_2_2", "target_band_v2_2_2_1"}:
             self.gap_critical_limit = self.hard_gap_threshold
@@ -377,6 +412,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v30",
             "pose_rep_active_memory_v31",
             "pose_rep_active_memory_v33",
+            "pose_rep_streaming_memory_v1",
         }
 
     @property
@@ -400,6 +436,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v30",
             "pose_rep_active_memory_v31",
             "pose_rep_active_memory_v33",
+            "pose_rep_streaming_memory_v1",
         }
 
     @property
@@ -422,6 +459,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v30",
             "pose_rep_active_memory_v31",
             "pose_rep_active_memory_v33",
+            "pose_rep_streaming_memory_v1",
         }
 
     @property
@@ -489,6 +527,14 @@ class DirectDensityController:
         return self.mode == "pose_rep_active_memory_v33"
 
     @property
+    def is_pose_rep_streaming_memory_v1(self) -> bool:
+        return self.mode == "pose_rep_streaming_memory_v1"
+
+    @property
+    def is_streaming_memory_controller_v1(self) -> bool:
+        return self.is_pose_rep_streaming_memory_v1
+
+    @property
     def is_pose_rep_active_memory(self) -> bool:
         return self.mode in {
             "pose_rep_active_memory_v1",
@@ -507,11 +553,12 @@ class DirectDensityController:
             "pose_rep_active_memory_v30",
             "pose_rep_active_memory_v31",
             "pose_rep_active_memory_v33",
+            "pose_rep_streaming_memory_v1",
         }
 
     @property
     def is_pose_memory_geometry_context_v1(self) -> bool:
-        return (
+        return self.is_pose_rep_streaming_memory_v1 or (
             self.pose_memory_geometry_context == "v1"
             and self.is_pose_rep_active_memory_v33
         )
@@ -540,11 +587,14 @@ class DirectDensityController:
                     "hold_redundant",
                     "hold_density_high",
                     "hold_low_representation_value",
+                    "hold_candidate_verification",
                 }
             return decision == "hold_redundant" and density_state == "in_band"
         return False
 
-    def should_enqueue_hold_recovery(self) -> bool:
+    def should_enqueue_hold_recovery(self, decision: str | None = None) -> bool:
+        if self.is_pose_rep_streaming_memory_v1:
+            return str(decision or "") == "hold_candidate_verification"
         return self.enabled and not self.is_pose_rep_decouple
 
     def _window_id(self, frame_id: int) -> int:
@@ -1045,9 +1095,10 @@ class DirectDensityController:
             or self.is_pose_rep_active_memory_v30
             or self.is_pose_rep_active_memory_v31
             or self.is_pose_rep_active_memory_v33
+            or self.is_pose_rep_streaming_memory_v1
         )
         utility_late_long_turn_context = bool(
-            self.is_pose_rep_active_memory_v33
+            (self.is_pose_rep_active_memory_v33 or self.is_pose_rep_streaming_memory_v1)
             and int(frame_id) >= 1200
             and int(current_keyframe_count) >= 800
             and (
@@ -1147,6 +1198,7 @@ class DirectDensityController:
                         or self.is_pose_rep_active_memory_v30
                         or self.is_pose_rep_active_memory_v31
                         or self.is_pose_rep_active_memory_v33
+                        or self.is_pose_rep_streaming_memory_v1
                     )
                     and utility_hard_window_guard
                 )
@@ -1178,6 +1230,7 @@ class DirectDensityController:
             or self.is_pose_rep_active_memory_v30
             or self.is_pose_rep_active_memory_v31
             or self.is_pose_rep_active_memory_v33
+            or self.is_pose_rep_streaming_memory_v1
         ):
             utility_tracking_only_role = False
         else:
@@ -1242,6 +1295,72 @@ class DirectDensityController:
         value_hold_budget_available = bool(
             self._budget.value_hold_used < self.value_hold_budget_per_100
         )
+        stream_memory_controller_enabled = bool(self.is_pose_rep_streaming_memory_v1)
+        stream_memory_sparse_write = bool(stream_memory_controller_enabled and value_hold_budget_available)
+        stream_memory_new_view_risk = _clamp01(
+            max(
+                new_view_event_score,
+                viewpoint_rotation_window_max / 45.0,
+                1.0 - viewpoint_grid_coverage,
+                support_concentration,
+            )
+        )
+        stream_memory_geometry_safety = _clamp01(
+            0.22 * (1.0 - utility_drift_risk)
+            + 0.18 * pose_support
+            + 0.16 * match_support
+            + 0.16 * viewpoint_grid_coverage
+            + 0.12 * inlier_grid_entropy
+            + 0.10 * (1.0 - support_concentration)
+            + 0.06 * anchor_health_score
+            - 0.28 * stream_memory_new_view_risk
+        )
+        stream_memory_representation_need = _clamp01(
+            0.38 * utility_coverage_gain
+            + 0.22 * utility_recovery_gain
+            + 0.18 * new_view_event_score
+            + 0.12 * (1.0 - semantic_C)
+            + 0.10 * novelty_value
+        )
+        stream_memory_pose_need = _clamp01(
+            0.42 * utility_pose_reference
+            + 0.26 * stream_memory_geometry_safety
+            + 0.18 * pose_memory_geometry_context_score
+            + 0.08 * (1.0 - utility_drift_risk)
+            + 0.06 * anchor_health_score
+        )
+        stream_memory_candidate_score = _clamp01(
+            0.46 * stream_memory_representation_need
+            + 0.26 * (1.0 - stream_memory_geometry_safety)
+            + 0.18 * utility_drift_risk
+            + 0.10 * new_view_event_score
+        )
+        stream_memory_candidate_budget_available = bool(
+            self._budget.candidate_verify_used
+            < self.candidate_verification_budget_per_100
+        )
+        stream_memory_candidate_verification_required = bool(
+            stream_memory_controller_enabled
+            and stream_memory_candidate_budget_available
+            and stream_memory_representation_need >= 0.46
+            and stream_memory_geometry_safety < 0.60
+            and utility_gap_pressure < 1.0
+            and not starvation_risk
+            and not local_under_dense
+            and not gap_critical
+        )
+        stream_memory_pose_only_context = bool(
+            stream_memory_controller_enabled
+            and stream_memory_pose_need >= self.pose_reference_value_min
+            and stream_memory_representation_need < 0.42
+            and stream_memory_geometry_safety >= 0.60
+            and active_memory_stable_pose_reference
+            and active_memory_low_marginal_representation
+            and gap_safe
+            and not starvation_risk
+            and density_state != "below_lower"
+            and not anchor_changed
+        )
         pose_memory_geometry_tracking_context = bool(
             pose_memory_geometry_turn_context
             and pose_memory_reference_presence > 0.0
@@ -1276,6 +1395,7 @@ class DirectDensityController:
                 or self.is_pose_rep_active_memory_v30
                 or self.is_pose_rep_active_memory_v31
                 or self.is_pose_rep_active_memory_v33
+                or self.is_pose_rep_streaming_memory_v1
             )
             and int(frame_id) >= 300
             and density_before >= 55.0
@@ -1315,6 +1435,7 @@ class DirectDensityController:
                 or active_memory_low_turn_dense_context
                 or active_memory_late_long_turn_tracking_context
                 or pose_memory_geometry_tracking_context
+                or stream_memory_pose_only_context
             )
             and active_memory_stable_pose_reference
             and active_memory_low_marginal_representation
@@ -1332,6 +1453,17 @@ class DirectDensityController:
             if active_memory_context or utility_tracking_only_role
             else "representation"
         )
+        stream_memory_frame_identity = "render+pose"
+        stream_memory_memory_identity = "trajectory"
+        stream_memory_write_action = "render_pose_write"
+        if stream_memory_candidate_verification_required:
+            stream_memory_frame_identity = "defer"
+            stream_memory_memory_identity = "candidate"
+            stream_memory_write_action = "candidate_verify"
+        elif stream_memory_pose_only_context or active_memory_context or utility_tracking_only_role:
+            stream_memory_frame_identity = "pose-only"
+            stream_memory_memory_identity = "local"
+            stream_memory_write_action = "pose_only_write"
         representation_value_high = bool(
             representation_value >= self.representation_value_hold_max
             or utility_representation_role
@@ -1391,6 +1523,7 @@ class DirectDensityController:
             or self.is_pose_rep_active_memory_v30
             or self.is_pose_rep_active_memory_v31
             or self.is_pose_rep_active_memory_v33
+            or self.is_pose_rep_streaming_memory_v1
         ) and utility_hard_window_guard:
             block_reason = "utility_hard_window_representation_guard"
         elif pose_memory_geometry_guard:
@@ -1465,6 +1598,21 @@ class DirectDensityController:
             "active_memory_context_candidate": active_memory_context_candidate,
             "active_memory_low_turn_dense_context": active_memory_low_turn_dense_context,
             "active_memory_late_long_turn_tracking_context": active_memory_late_long_turn_tracking_context,
+            "stream_memory_controller_enabled": stream_memory_controller_enabled,
+            "stream_memory_new_view_risk": stream_memory_new_view_risk,
+            "stream_memory_geometry_safety": stream_memory_geometry_safety,
+            "stream_memory_representation_need": stream_memory_representation_need,
+            "stream_memory_pose_need": stream_memory_pose_need,
+            "stream_memory_candidate_score": stream_memory_candidate_score,
+            "stream_memory_candidate_budget_per_100": self.candidate_verification_budget_per_100,
+            "stream_memory_candidate_budget_used": self._budget.candidate_verify_used,
+            "stream_memory_candidate_budget_available": stream_memory_candidate_budget_available,
+            "stream_memory_candidate_verification_required": stream_memory_candidate_verification_required,
+            "stream_memory_pose_only_context": stream_memory_pose_only_context,
+            "stream_memory_sparse_write": stream_memory_sparse_write,
+            "stream_memory_frame_identity": stream_memory_frame_identity,
+            "stream_memory_memory_identity": stream_memory_memory_identity,
+            "stream_memory_write_action": stream_memory_write_action,
             "viewpoint_rotation_window_max": viewpoint_rotation_window_max,
             "viewpoint_grid_coverage": viewpoint_grid_coverage,
             "inlier_grid_entropy": inlier_grid_entropy,
@@ -1528,6 +1676,7 @@ class DirectDensityController:
             "high_novelty_score": novelty_value if representation_value_high else 0.0,
             "support_needed_score": min(1.0, num_matches / max(min_num_inliers, 1)) if support_triggered else 0.0,
             "novelty_value_score": novelty_value,
+            "hold_candidate_verification": False,
             "hold_low_representation_value": False,
             "hold_density_high": False,
             "hold_redundant": False,
@@ -1585,6 +1734,22 @@ class DirectDensityController:
         if starvation_risk or density_state == "below_lower":
             dbg["hold_redundant_blocked_by_lower_guard"] = True
             return _finalize("finalize_growth_rescue", "keyframe_density_debt_preempts_value_hold")
+        if stream_memory_candidate_verification_required:
+            self._budget.candidate_verify_used += 1
+            dbg["stream_memory_candidate_budget_used"] = self._budget.candidate_verify_used
+            dbg["stream_memory_candidate_budget_available"] = (
+                self._budget.candidate_verify_used
+                < self.candidate_verification_budget_per_100
+            )
+            dbg["hold_candidate_verification"] = True
+            dbg["direct_keyframe_finalized"] = False
+            dbg["keyframe_finalized"] = False
+            return DirectFinalizationDecision(
+                False,
+                "hold_candidate_verification",
+                "stream_memory_candidate_verification",
+                dbg,
+            )
         if pose_risk_high:
             return _finalize("finalize_pose_risk_reference", "pose_risk_high")
         if representation_value_high:
@@ -1596,6 +1761,7 @@ class DirectDensityController:
                     or self.is_pose_rep_active_memory_v30
                     or self.is_pose_rep_active_memory_v31
                     or self.is_pose_rep_active_memory_v33
+                    or self.is_pose_rep_streaming_memory_v1
                 )
                 and utility_hard_window_guard
                 else
@@ -1614,6 +1780,10 @@ class DirectDensityController:
             self._budget.value_hold_used += 1
             dbg["value_hold_budget_used"] = self._budget.value_hold_used
             dbg["hold_low_representation_value"] = True
+            if stream_memory_controller_enabled:
+                dbg["stream_memory_frame_identity"] = "pose-only"
+                dbg["stream_memory_memory_identity"] = "local"
+                dbg["stream_memory_write_action"] = "pose_only_write"
             dbg["direct_keyframe_finalized"] = False
             dbg["keyframe_finalized"] = False
             hold_reason = (

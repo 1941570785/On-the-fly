@@ -353,6 +353,26 @@ class CoupledInnovationModelTests(unittest.TestCase):
 
         self.assertEqual(args.paper_aligned_pose_memory_geometry_context, "v1")
 
+    def test_cli_accepts_streaming_memory_controller_mode(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_direct_density_control",
+                "pose_rep_streaming_memory_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_direct_density_control,
+            "pose_rep_streaming_memory_v1",
+        )
+
     def test_runtime_gate_applies_coupled_preset_to_args_before_subsystems_use_them(self):
         args = _args(paper_aligned_tau_R_low=0.31, paper_aligned_recovery_delay_frames=4)
 
@@ -2665,6 +2685,150 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertTrue(decision.debug["pose_memory_geometry_context_enabled"])
         self.assertFalse(decision.debug["pose_memory_geometry_tracking_context"])
         self.assertTrue(decision.debug["pose_memory_geometry_guard"])
+
+    def test_streaming_memory_defers_high_value_geometry_unsafe_frames(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_streaming_memory_v1")
+        )
+
+        decision = controller.decide(
+            frame_id=820,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=62.0,
+            local_density_before=58.0,
+            local_window_density=58.0,
+            local_window_keyframes=58,
+            local_window_gap_max=6.0,
+            local_window_gap_after_if_hold=4.0,
+            keyframe_growth_recent=36,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=2,
+            main_chain_gap_before=2.0,
+            main_chain_gap_after_if_hold=4.0,
+            anchor_changed=False,
+            support_triggered=True,
+            median_displacement=54.0,
+            displacement_threshold=30.0,
+            num_matches=720,
+            min_num_inliers=100,
+            pose_inliers=520,
+            novelty_proxy=0.82,
+            current_keyframe_count=508,
+            semantic_scores={
+                "R_t": 0.30,
+                "V_t": 0.86,
+                "Q_t": 0.64,
+                "C_t": 0.58,
+                "B_R_t": 0.55,
+                "recovery_pool_size": 5,
+            },
+            viewpoint_scores={
+                "viewpoint_rotation_deg_window_20": 26.0,
+                "viewpoint_rotation_deg_window_50": 38.0,
+                "viewpoint_rotation_deg_window_100": 44.0,
+                "viewpoint_rotation_deg_window_max": 48.0,
+                "viewpoint_rotation_window_max_size": 100,
+                "inlier_grid_coverage": 0.58,
+                "inlier_grid_entropy": 0.62,
+                "support_concentration": 0.34,
+                "anchor_health_score": 0.38,
+                "new_view_event_score": 0.72,
+                "pose_memory_reference_count": 0,
+                "pose_memory_pool_size": 1,
+                "pose_memory_candidate_pool_size": 0,
+            },
+        )
+
+        self.assertFalse(decision.finalize)
+        self.assertEqual(decision.decision, "hold_candidate_verification")
+        self.assertEqual(decision.debug["stream_memory_frame_identity"], "defer")
+        self.assertEqual(decision.debug["stream_memory_memory_identity"], "candidate")
+        self.assertEqual(decision.debug["stream_memory_write_action"], "candidate_verify")
+        self.assertTrue(decision.debug["stream_memory_candidate_verification_required"])
+        self.assertGreater(decision.debug["stream_memory_representation_need"], 0.45)
+        self.assertLess(decision.debug["stream_memory_geometry_safety"], 0.60)
+
+    def test_streaming_memory_holds_stable_low_representation_frames_as_pose_only(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_rep_streaming_memory_v1")
+        )
+
+        decision = controller.decide(
+            frame_id=620,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=68.0,
+            local_density_before=64.0,
+            local_window_density=64.0,
+            local_window_keyframes=64,
+            local_window_gap_max=5.0,
+            local_window_gap_after_if_hold=3.0,
+            keyframe_growth_recent=18,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=1,
+            main_chain_gap_before=2.0,
+            main_chain_gap_after_if_hold=3.0,
+            anchor_changed=False,
+            support_triggered=False,
+            median_displacement=16.0,
+            displacement_threshold=30.0,
+            num_matches=2600,
+            min_num_inliers=100,
+            pose_inliers=2100,
+            novelty_proxy=0.06,
+            current_keyframe_count=420,
+            semantic_scores={
+                "R_t": 0.03,
+                "V_t": 0.18,
+                "Q_t": 0.95,
+                "C_t": 0.94,
+                "B_R_t": 0.93,
+            },
+            viewpoint_scores={
+                "viewpoint_rotation_deg_window_20": 12.0,
+                "viewpoint_rotation_deg_window_50": 22.0,
+                "viewpoint_rotation_deg_window_100": 28.0,
+                "viewpoint_rotation_deg_window_max": 30.0,
+                "viewpoint_rotation_window_max_size": 100,
+                "inlier_grid_coverage": 0.97,
+                "inlier_grid_entropy": 0.96,
+                "support_concentration": 0.08,
+                "anchor_health_score": 0.68,
+                "new_view_event_score": 0.20,
+                "pose_memory_reference_count": 1,
+                "pose_memory_pool_size": 4,
+                "pose_memory_candidate_pool_size": 0,
+            },
+        )
+
+        self.assertFalse(decision.finalize)
+        self.assertEqual(decision.decision, "hold_low_representation_value")
+        self.assertEqual(decision.debug["stream_memory_frame_identity"], "pose-only")
+        self.assertEqual(decision.debug["stream_memory_memory_identity"], "local")
+        self.assertEqual(decision.debug["stream_memory_write_action"], "pose_only_write")
+        self.assertFalse(decision.debug["stream_memory_candidate_verification_required"])
+        self.assertTrue(decision.debug["stream_memory_sparse_write"])
+
+    def test_streaming_memory_only_enqueues_deferred_candidates_for_recovery(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_rep_streaming_memory_v1")
+        )
+
+        self.assertTrue(
+            gate.direct_density_controller.should_enqueue_hold_recovery(
+                "hold_candidate_verification"
+            )
+        )
+        self.assertFalse(
+            gate.direct_density_controller.should_enqueue_hold_recovery(
+                "hold_low_representation_value"
+            )
+        )
 
     def test_pose_memory_geometry_context_seeds_distributed_stable_pose_memory(self):
         gate = PaperAlignedRuntimeGate(
