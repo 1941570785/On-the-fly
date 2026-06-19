@@ -102,8 +102,9 @@ def summarize_dataset(item: dict[str, str | int], method_root: Path, out_dir: Pa
     baseline_rows = read_frame_metrics(baseline_dir)
     method_rows = read_frame_metrics(method_dir)
     aligned = align_metric_rows(eval_names, baseline_rows, method_rows)
-    baseline_series = series_for_names(eval_names, baseline_rows)
-    method_series = series_for_names([row["image_name"] for row in aligned], method_rows)
+    aligned_eval_names = [row["image_name"] for row in aligned]
+    baseline_series = series_for_names(aligned_eval_names, baseline_rows)
+    method_series = series_for_names(aligned_eval_names, method_rows)
     draw_quality_svg(
         baseline_series,
         out_dir / "plots" / f"{name}_baseline_quality.svg",
@@ -399,13 +400,11 @@ def _svg_panel(series, metric, color, x0, y0, w, h):
             continue
         x, y = sx(i), sy(value)
         out.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="2.8" fill="{color}"/>')
-    step = max(1, len(labels) // 36)
+    label_font_size = 6 if len(labels) > 72 else 7 if len(labels) > 48 else 8
     for i, label in enumerate(labels):
-        if i % step != 0 and i != len(labels) - 1:
-            continue
         x = sx(i)
         out.append(
-            f'<text x="{x:.2f}" y="{y0+h+14}" transform="rotate(60 {x:.2f} {y0+h+14})" font-family="Arial" font-size="8" text-anchor="start">{_esc(label)}</text>'
+            f'<text x="{x:.2f}" y="{y0+h+14}" transform="rotate(65 {x:.2f} {y0+h+14})" font-family="Arial" font-size="{label_font_size}" text-anchor="start">{_esc(label)}</text>'
         )
     return out
 
