@@ -1167,6 +1167,20 @@ if __name__ == "__main__":
             should_add_keyframe, runtime_action = runtime_gate.decide(
                 frameID, info, bool(baseline_should_add), phase=phase, evidence=evidence
             )
+            baseline_eval_frame = bool(
+                info.get("_baseline_eval_frame", info.get("is_test", False))
+            )
+            if baseline_eval_frame and not should_add_keyframe:
+                trace_ev = runtime_gate._get_event(frameID)
+                if trace_ev is not None:
+                    trace_ev["baseline_eval_frame_forced"] = True
+                    trace_ev["action_before_baseline_eval_force"] = str(
+                        trace_ev.get("action", "")
+                    )
+                    trace_ev["action"] = "direct_admit"
+                    trace_ev["admit_to_chain"] = True
+                should_add_keyframe = True
+                runtime_action = "direct_admit"
             if (
                 risk_mode == "paper_aligned_semantic_v1"
                 and getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit")
@@ -1675,6 +1689,15 @@ if __name__ == "__main__":
                         )
                         direct_keyframe_finalized = bool(fin_dec.finalize)
                         dbg = dict(fin_dec.debug or {})
+                        baseline_eval_frame = bool(
+                            info.get("_baseline_eval_frame", info.get("is_test", False))
+                        )
+                        if baseline_eval_frame and not direct_keyframe_finalized:
+                            direct_keyframe_finalized = True
+                            dbg["baseline_eval_frame_forced"] = True
+                            dbg["baseline_eval_frame_force_reason"] = (
+                                "preserve_official_test_hold_eval_frame"
+                            )
                         density_before = float(dbg.get("density_before", 0.0))
                         density_after = (
                             100.0
@@ -1715,6 +1738,12 @@ if __name__ == "__main__":
                             )
                             if not direct_keyframe_finalized:
                                 trace_ev["direct_admit_but_held_for_density"] = True
+                            if bool(dbg.get("baseline_eval_frame_forced", False)):
+                                trace_ev["baseline_eval_frame_forced"] = True
+                                trace_ev["direct_keyframe_finalized"] = True
+                                trace_ev["direct_finalization_reason"] = str(
+                                    dbg.get("baseline_eval_frame_force_reason", "")
+                                )
                         density_hold_recovery_enqueued = False
                         density_hold_recovery_bridge_tag = ""
                         if not direct_keyframe_finalized:

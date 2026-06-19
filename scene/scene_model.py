@@ -723,6 +723,21 @@ class SceneModel:
                     sequence_order=sequence_order,
                     stream_frame_idx=int(keyframe.info.get("_paper_aligned_source_frame_id", sequence_order)),
                     is_test_view=bool(keyframe.info.get("is_test", False)),
+                    baseline_eval={
+                        "frame": bool(
+                            keyframe.info.get(
+                                "_baseline_eval_frame",
+                                keyframe.info.get("is_test", False),
+                            )
+                        ),
+                        "hold": keyframe.info.get("_baseline_eval_hold", ""),
+                        "sequence_index": keyframe.info.get(
+                            "_baseline_eval_sequence_index", ""
+                        ),
+                        "original_index": keyframe.info.get(
+                            "_baseline_eval_original_index", ""
+                        ),
+                    },
                     is_keyframe=True,
                     is_registered=True,
                     est_rt=all_Rts[keyframe_index] if keyframe_index < len(all_Rts) else None,

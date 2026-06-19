@@ -17,6 +17,10 @@ FRAME_METRIC_FIELDS = [
     "render_image_name",
     "sequence_order",
     "is_test_view",
+    "baseline_eval_frame",
+    "baseline_eval_hold",
+    "baseline_eval_sequence_index",
+    "baseline_eval_original_index",
     "is_keyframe",
     "is_registered",
     "registration_status",
@@ -70,9 +74,11 @@ def build_frame_metric_row(
     pose_error: dict[str, Any] | None,
     output_dir: str | Path,
     stream_frame_idx: int | None = None,
+    baseline_eval: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     quality = quality or {}
     pose_error = pose_error or {}
+    baseline_eval = baseline_eval or {}
     row = {field: None for field in FRAME_METRIC_FIELDS}
     row.update(
         {
@@ -87,6 +93,16 @@ def build_frame_metric_row(
             "render_image_name": original_image_name if is_test_view else "",
             "sequence_order": int(sequence_order),
             "is_test_view": bool(is_test_view),
+            "baseline_eval_frame": bool(
+                baseline_eval.get("frame", baseline_eval.get("is_eval", is_test_view))
+            ),
+            "baseline_eval_hold": _optional_int(baseline_eval.get("hold")),
+            "baseline_eval_sequence_index": _optional_int(
+                baseline_eval.get("sequence_index")
+            ),
+            "baseline_eval_original_index": _optional_int(
+                baseline_eval.get("original_index")
+            ),
             "is_keyframe": bool(is_keyframe),
             "is_registered": bool(is_registered),
             "registration_status": "registered" if is_registered else "unregistered",
@@ -116,6 +132,15 @@ def build_frame_metric_row(
     )
     row.update(_flatten_estimated_pose(est_rt))
     return row
+
+
+def _optional_int(value: Any) -> int | str:
+    if value is None or value == "":
+        return ""
+    try:
+        return int(value)
+    except Exception:
+        return ""
 
 
 def frame_index_from_name(image_name: str) -> int:

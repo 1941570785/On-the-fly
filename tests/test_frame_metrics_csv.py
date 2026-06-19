@@ -34,6 +34,12 @@ class FrameMetricsCsvTests(unittest.TestCase):
             quality={"psnr": 20.5, "ssim": 0.61, "lpips": 0.32},
             pose_error={"abs_trans_error": 0.12, "abs_rot_error_deg": 1.7},
             output_dir="results/StaticHikes/forest1/run",
+            baseline_eval={
+                "frame": True,
+                "hold": 10,
+                "sequence_index": 20,
+                "original_index": 20,
+            },
         )
 
         self.assertEqual(row["dataset_name"], "StaticHikes")
@@ -42,6 +48,10 @@ class FrameMetricsCsvTests(unittest.TestCase):
         self.assertEqual(row["original_frame_idx"], 101)
         self.assertEqual(row["stream_frame_idx"], 250)
         self.assertEqual(row["render_image_name"], "101.jpg")
+        self.assertTrue(row["baseline_eval_frame"])
+        self.assertEqual(row["baseline_eval_hold"], 10)
+        self.assertEqual(row["baseline_eval_sequence_index"], 20)
+        self.assertEqual(row["baseline_eval_original_index"], 20)
         self.assertEqual(row["split"], "test")
         self.assertEqual(row["pose_format"], "w2c")
         self.assertEqual(row["est_tx"], 1.5)
