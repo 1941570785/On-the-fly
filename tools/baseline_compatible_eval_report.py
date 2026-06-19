@@ -115,6 +115,12 @@ def summarize_dataset(item: dict[str, str | int], method_root: Path, out_dir: Pa
         out_dir / "plots" / f"{name}_method_quality.svg",
         title=f"{name} method aligned to baseline test_hold={test_hold}",
     )
+    draw_combined_quality_svg(
+        baseline_series,
+        method_series,
+        out_dir / "plots" / f"{name}_combined_quality.svg",
+        title=f"{name} baseline vs method aligned test_hold={test_hold}",
+    )
     write_aligned_csv(out_dir / f"{name}_aligned_eval_frames.csv", aligned)
     base_meta = read_metadata(baseline_dir)
     method_meta = read_metadata(method_dir)
@@ -356,6 +362,47 @@ def draw_quality_svg(series: list[dict[str, Any]], path: Path, title: str) -> No
     path.write_text("\n".join(parts) + "\n", encoding="utf-8")
 
 
+def draw_combined_quality_svg(
+    baseline_series: list[dict[str, Any]],
+    method_series: list[dict[str, Any]],
+    path: Path,
+    title: str,
+) -> None:
+    width = 1200
+    panel_height = 240
+    top = 70
+    left = 70
+    right = 30
+    bottom = 55
+    height = top + 3 * panel_height + bottom
+    colors = {"baseline": "#1f77b4", "method": "#ff7f0e"}
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="white"/>',
+        f'<text x="{width/2:.1f}" y="28" text-anchor="middle" font-family="Arial" font-size="20" font-weight="700">{_esc(title)}</text>',
+        f'<line x1="{width/2-115:.1f}" y1="50" x2="{width/2-75:.1f}" y2="50" stroke="{colors["baseline"]}" stroke-width="3"/>',
+        f'<text x="{width/2-68:.1f}" y="54" font-family="Arial" font-size="13">Baseline</text>',
+        f'<line x1="{width/2+25:.1f}" y1="50" x2="{width/2+65:.1f}" y2="50" stroke="{colors["method"]}" stroke-width="3"/>',
+        f'<text x="{width/2+72:.1f}" y="54" font-family="Arial" font-size="13">Method</text>',
+    ]
+    for idx, metric in enumerate(["psnr", "ssim", "lpips"]):
+        y0 = top + idx * panel_height
+        parts.extend(
+            _svg_combined_panel(
+                baseline_series,
+                method_series,
+                metric,
+                colors,
+                left,
+                y0,
+                width - left - right,
+                panel_height - 35,
+            )
+        )
+    parts.append("</svg>")
+    path.write_text("\n".join(parts) + "\n", encoding="utf-8")
+
+
 def _svg_panel(series, metric, color, x0, y0, w, h):
     values = [row[metric] for row in series if row.get(metric) is not None]
     labels = [row["frame_label"] for row in series]
@@ -407,6 +454,85 @@ def _svg_panel(series, metric, color, x0, y0, w, h):
             f'<text x="{x:.2f}" y="{y0+h+14}" transform="rotate(65 {x:.2f} {y0+h+14})" font-family="Arial" font-size="{label_font_size}" text-anchor="start">{_esc(label)}</text>'
         )
     return out
+
+
+def _svg_combined_panel(baseline_series, method_series, metric, colors, x0, y0, w, h):
+    series_by_name = {"baseline": baseline_series, "method": method_series}
+    labels = _combined_frame_labels(baseline_series, method_series)
+    values = []
+    for series in series_by_name.values():
+        values.extend(row[metric] for row in series if row.get(metric) is not None)
+    if not values:
+        values = [0.0, 1.0]
+    vmin, vmax = min(values), max(values)
+    if math.isclose(vmin, vmax):
+        vmin -= 0.5
+        vmax += 0.5
+    pad = (vmax - vmin) * 0.08
+    vmin -= pad
+    vmax += pad
+    n = max(len(baseline_series), len(method_series), 1)
+
+    def sx(i):
+        if n <= 1:
+            return x0 + w / 2
+        return x0 + i * w / (n - 1)
+
+    def sy(v):
+        return y0 + h - (float(v) - vmin) * h / (vmax - vmin)
+
+    out = [
+        f'<text x="{x0}" y="{y0+14}" font-family="Arial" font-size="15" font-weight="700">{metric.upper()}</text>',
+        f'<line x1="{x0}" y1="{y0+h}" x2="{x0+w}" y2="{y0+h}" stroke="#333" stroke-width="1"/>',
+        f'<line x1="{x0}" y1="{y0}" x2="{x0}" y2="{y0+h}" stroke="#333" stroke-width="1"/>',
+        f'<text x="{x0-8}" y="{y0+5}" text-anchor="end" font-family="Arial" font-size="11">{vmax:.3g}</text>',
+        f'<text x="{x0-8}" y="{y0+h}" text-anchor="end" font-family="Arial" font-size="11">{vmin:.3g}</text>',
+    ]
+    for name, series in series_by_name.items():
+        pts = [
+            (sx(i), sy(row[metric]))
+            for i, row in enumerate(series)
+            if row.get(metric) is not None
+        ]
+        path_d = " ".join(
+            ("M" if i == 0 else "L") + f"{x:.2f},{y:.2f}"
+            for i, (x, y) in enumerate(pts)
+        )
+        if path_d:
+            out.append(
+                f'<path data-series="{name}-{metric}" d="{path_d}" fill="none" stroke="{colors[name]}" stroke-width="2.2"/>'
+            )
+        for i, row in enumerate(series):
+            value = row.get(metric)
+            if value is None:
+                continue
+            x, y = sx(i), sy(value)
+            out.append(
+                f'<circle data-series="{name}-{metric}" cx="{x:.2f}" cy="{y:.2f}" r="2.6" fill="{colors[name]}"/>'
+            )
+    label_font_size = 6 if len(labels) > 72 else 7 if len(labels) > 48 else 8
+    for i, label in enumerate(labels):
+        x = sx(i)
+        out.append(
+            f'<text x="{x:.2f}" y="{y0+h+14}" transform="rotate(65 {x:.2f} {y0+h+14})" font-family="Arial" font-size="{label_font_size}" text-anchor="start">{_esc(label)}</text>'
+        )
+    return out
+
+
+def _combined_frame_labels(
+    baseline_series: list[dict[str, Any]],
+    method_series: list[dict[str, Any]],
+) -> list[str]:
+    labels = []
+    n = max(len(baseline_series), len(method_series))
+    for i in range(n):
+        label = ""
+        if i < len(baseline_series):
+            label = str(baseline_series[i].get("frame_label", ""))
+        if not label and i < len(method_series):
+            label = str(method_series[i].get("frame_label", ""))
+        labels.append(label)
+    return labels
 
 
 def frame_label(image_name: str) -> str:
