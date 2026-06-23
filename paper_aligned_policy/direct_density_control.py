@@ -352,6 +352,23 @@ class DirectDensityController:
                 getattr(args, "paper_aligned_stream_memory_candidate_budget_per_100", 10)
                 or 10
             )
+        if self.mode == "pose_only_ssm_baseline_repr_v1":
+            self.density_lower = 0.0
+            self.density_target = 100.0
+            self.density_upper = 10_000.0
+            self.density_hard_upper = 10_000.0
+            self.gap_hard_limit = 10**9
+            self.redundant_source_gap = 10**9
+            self.min_growth_per_100 = 0.0
+            self.baseline_relative_lower_ratio = 0.0
+            self.value_hold_budget_per_100 = 0
+            self.representation_value_hold_max = 1.0
+            self.pose_reference_value_min = 0.0
+            self.utility_representation_min = 1.0
+            self.utility_pose_reference_min = 0.0
+            self.candidate_verification_budget_per_100 = 0
+            if self.prev_desc_update_on_hold == "off":
+                self.prev_desc_update_on_hold = "light"
         if self.mode in {"target_band_v2_2_1", "target_band_v2_2_2", "target_band_v2_2_2_1"}:
             self.gap_critical_limit = self.hard_gap_threshold
         self._budget = _BudgetWindow()
@@ -531,6 +548,10 @@ class DirectDensityController:
         return self.mode == "pose_rep_streaming_memory_v1"
 
     @property
+    def is_pose_only_ssm_baseline_repr_v1(self) -> bool:
+        return self.mode == "pose_only_ssm_baseline_repr_v1"
+
+    @property
     def is_streaming_memory_controller_v1(self) -> bool:
         return self.is_pose_rep_streaming_memory_v1
 
@@ -554,6 +575,7 @@ class DirectDensityController:
             "pose_rep_active_memory_v31",
             "pose_rep_active_memory_v33",
             "pose_rep_streaming_memory_v1",
+            "pose_only_ssm_baseline_repr_v1",
         }
 
     @property
@@ -588,11 +610,16 @@ class DirectDensityController:
                     "hold_density_high",
                     "hold_low_representation_value",
                     "hold_candidate_verification",
+                    "hold_pose_only_baseline_repr",
                 }
+            if self.is_pose_only_ssm_baseline_repr_v1:
+                return decision == "hold_pose_only_baseline_repr"
             return decision == "hold_redundant" and density_state == "in_band"
         return False
 
     def should_enqueue_hold_recovery(self, decision: str | None = None) -> bool:
+        if self.is_pose_only_ssm_baseline_repr_v1:
+            return False
         if self.is_pose_rep_streaming_memory_v1:
             return str(decision or "") == "hold_candidate_verification"
         return self.enabled and not self.is_pose_rep_decouple
@@ -663,6 +690,36 @@ class DirectDensityController:
         semantic_scores: dict[str, Any] | None = None,
         viewpoint_scores: dict[str, Any] | None = None,
     ) -> DirectFinalizationDecision:
+        if self.is_pose_only_ssm_baseline_repr_v1:
+            return self._decide_pose_only_baseline_repr_v1(
+                frame_id=frame_id,
+                runtime_action=runtime_action,
+                baseline_should_add=baseline_should_add,
+                is_test=is_test,
+                is_bootstrap_phase=is_bootstrap_phase,
+                density_before=density_before,
+                local_density_before=local_density_before,
+                local_window_density=local_window_density,
+                local_window_keyframes=local_window_keyframes,
+                local_window_gap_max=local_window_gap_max,
+                local_window_gap_after_if_hold=local_window_gap_after_if_hold,
+                keyframe_growth_recent=keyframe_growth_recent,
+                baseline_relative_density=baseline_relative_density,
+                source_gap_to_last_keyframe=source_gap_to_last_keyframe,
+                main_chain_gap_before=main_chain_gap_before,
+                main_chain_gap_after_if_hold=main_chain_gap_after_if_hold,
+                anchor_changed=anchor_changed,
+                support_triggered=support_triggered,
+                median_displacement=median_displacement,
+                displacement_threshold=displacement_threshold,
+                num_matches=num_matches,
+                min_num_inliers=min_num_inliers,
+                pose_inliers=pose_inliers,
+                novelty_proxy=novelty_proxy,
+                current_keyframe_count=current_keyframe_count,
+                semantic_scores=semantic_scores,
+                viewpoint_scores=viewpoint_scores,
+            )
         if self.is_pose_rep_value_decouple:
             return self._decide_pose_rep_value_v2(
                 frame_id=frame_id,
@@ -786,6 +843,160 @@ class DirectDensityController:
             min_num_inliers=min_num_inliers,
             pose_inliers=pose_inliers,
             novelty_proxy=novelty_proxy,
+        )
+
+    def _decide_pose_only_baseline_repr_v1(
+        self,
+        *,
+        frame_id: int,
+        runtime_action: str,
+        baseline_should_add: bool,
+        is_test: bool,
+        is_bootstrap_phase: bool,
+        density_before: float,
+        local_density_before: float,
+        local_window_density: float,
+        local_window_keyframes: int,
+        local_window_gap_max: float,
+        local_window_gap_after_if_hold: float,
+        keyframe_growth_recent: int,
+        baseline_relative_density: float,
+        source_gap_to_last_keyframe: int,
+        main_chain_gap_before: float,
+        main_chain_gap_after_if_hold: float,
+        anchor_changed: bool,
+        support_triggered: bool,
+        median_displacement: float,
+        displacement_threshold: float,
+        num_matches: int,
+        min_num_inliers: int,
+        pose_inliers: int,
+        novelty_proxy: float,
+        current_keyframe_count: int,
+        semantic_scores: dict[str, Any] | None,
+        viewpoint_scores: dict[str, Any] | None,
+    ) -> DirectFinalizationDecision:
+        scores = dict(semantic_scores or {})
+        viewpoint = dict(viewpoint_scores or {})
+        semantic_R = _clamp01(scores.get("R_t"), 0.5)
+        semantic_V = _clamp01(scores.get("V_t"), 0.0)
+        semantic_Q = _clamp01(scores.get("Q_t"), 0.5)
+        semantic_C = _clamp01(scores.get("C_t"), 0.0)
+        semantic_BR = _clamp01(scores.get("B_R_t"), 0.0)
+        disp_ratio = _f(median_displacement, 0.0) / max(_f(displacement_threshold, 0.0), 1e-6)
+        motion_value = max(0.0, min(1.0, disp_ratio / 2.0))
+        match_support = max(0.0, min(1.0, _f(num_matches, 0.0) / max(2.0 * max(min_num_inliers, 1), 1.0)))
+        pose_support = max(0.0, min(1.0, _f(pose_inliers, 0.0) / max(2.0 * max(min_num_inliers, 1), 1.0)))
+        density_state = self._density_state(float(density_before), starvation_risk=False)
+        direct_candidate = str(runtime_action) == "direct_admit"
+        materialize = bool(is_test or is_bootstrap_phase or (direct_candidate and baseline_should_add))
+        active_memory_context = bool(direct_candidate and not materialize)
+        active_memory_frame_role = "tracking_only" if active_memory_context else "representation"
+        stream_memory_frame_identity = "pose-only" if active_memory_context else "render+pose"
+        stream_memory_memory_identity = "local" if active_memory_context else "trajectory"
+        stream_memory_write_action = "pose_only_write" if active_memory_context else "render_pose_write"
+        representation_value = 1.0 if materialize else 0.0
+        pose_reference_value = _clamp01(
+            0.32 * (1.0 - semantic_R)
+            + 0.24 * semantic_Q
+            + 0.18 * semantic_BR
+            + 0.14 * pose_support
+            + 0.12 * match_support
+        )
+        dbg: dict[str, Any] = {
+            "mode": self.mode,
+            "frame_id": int(frame_id),
+            "runtime_action": str(runtime_action),
+            "baseline_should_add": bool(baseline_should_add),
+            "is_test": bool(is_test),
+            "is_bootstrap_phase": bool(is_bootstrap_phase),
+            "direct_candidate": bool(direct_candidate),
+            "density_state": density_state,
+            "density_before": float(density_before),
+            "density_after": float(density_before),
+            "local_density_before": float(local_density_before),
+            "local_window_density": float(local_window_density),
+            "local_window_keyframes": int(local_window_keyframes),
+            "local_window_gap_max": float(local_window_gap_max),
+            "local_window_gap_after_if_hold": float(local_window_gap_after_if_hold),
+            "keyframe_growth_recent": int(keyframe_growth_recent),
+            "recent_keyframe_growth": int(keyframe_growth_recent),
+            "baseline_relative_density": float(baseline_relative_density),
+            "source_gap_to_last_keyframe": int(source_gap_to_last_keyframe),
+            "main_chain_gap_before": float(main_chain_gap_before),
+            "main_chain_gap_after_if_hold": float(main_chain_gap_after_if_hold),
+            "anchor_changed": bool(anchor_changed),
+            "support_triggered": bool(support_triggered),
+            "median_displacement": float(median_displacement),
+            "displacement_threshold": float(displacement_threshold),
+            "num_matches": int(num_matches),
+            "min_num_inliers": int(min_num_inliers),
+            "pose_inliers": int(pose_inliers),
+            "current_keyframe_count": int(current_keyframe_count),
+            "novelty_value_score": float(_clamp01(novelty_proxy, 0.0)),
+            "representation_value_score": float(representation_value),
+            "pose_reference_value_score": float(pose_reference_value),
+            "pose_risk_score": float(semantic_R),
+            "motion_value_score": float(motion_value),
+            "match_support_score": float(match_support),
+            "pose_support_score": float(pose_support),
+            "semantic_R_t": float(semantic_R),
+            "semantic_V_t": float(semantic_V),
+            "semantic_Q_t": float(semantic_Q),
+            "semantic_C_t": float(semantic_C),
+            "semantic_B_R_t": float(semantic_BR),
+            "new_view_event_score": float(_clamp01(viewpoint.get("new_view_event_score"), 0.0)),
+            "support_concentration": float(_clamp01(viewpoint.get("support_concentration"), 0.0)),
+            "anchor_health_score": float(_clamp01(viewpoint.get("anchor_health_score"), 0.0)),
+            "inlier_grid_entropy": float(_clamp01(viewpoint.get("inlier_grid_entropy"), 0.0)),
+            "viewpoint_rotation_deg_window_max": float(
+                _f(viewpoint.get("viewpoint_rotation_deg_window_max"), 0.0)
+            ),
+            "active_memory_context": bool(active_memory_context),
+            "active_memory_context_candidate": bool(active_memory_context),
+            "active_memory_frame_role": active_memory_frame_role,
+            "active_memory_marginal_value": float(representation_value),
+            "active_memory_redundancy_pressure": 0.0,
+            "active_memory_redundancy_pressure_high": False,
+            "active_memory_low_parallax": False,
+            "active_memory_stable_pose_reference": bool(pose_support >= 0.75 and match_support >= 0.75),
+            "active_memory_low_representation_value": bool(active_memory_context),
+            "active_memory_low_marginal_representation": bool(active_memory_context),
+            "stream_memory_controller_enabled": True,
+            "stream_memory_frame_identity": stream_memory_frame_identity,
+            "stream_memory_memory_identity": stream_memory_memory_identity,
+            "stream_memory_write_action": stream_memory_write_action,
+            "stream_memory_candidate_verification_required": False,
+            "stream_memory_pose_only_context": bool(active_memory_context),
+            "utility_pose_reference": float(pose_reference_value),
+            "utility_representation": float(representation_value),
+            "utility_total": float(pose_reference_value if active_memory_context else representation_value),
+            "utility_frame_role": active_memory_frame_role,
+            "utility_tracking_only_role": bool(active_memory_context),
+            "utility_representation_role": bool(materialize),
+            "hold_pose_only_baseline_repr": bool(active_memory_context),
+            "hold_low_representation_value": False,
+            "hold_candidate_verification": False,
+            "hold_density_high": False,
+            "hold_redundant": False,
+            "direct_keyframe_finalized": bool(materialize),
+            "keyframe_finalized": bool(materialize),
+            "representation_updated": bool(materialize),
+        }
+        if not self.enabled or not direct_candidate:
+            dbg["direct_keyframe_finalized"] = True
+            dbg["keyframe_finalized"] = True
+            dbg["representation_updated"] = True
+            return DirectFinalizationDecision(True, "finalize", "control_off_or_not_direct", dbg)
+        if materialize:
+            decision = "finalize" if (is_test or is_bootstrap_phase) else "finalize_baseline_repr"
+            reason = "test_or_bootstrap_bypass" if (is_test or is_bootstrap_phase) else "baseline_representation_keyframe"
+            return DirectFinalizationDecision(True, decision, reason, dbg)
+        return DirectFinalizationDecision(
+            False,
+            "hold_pose_only_baseline_repr",
+            "non_baseline_pose_only_reference",
+            dbg,
         )
 
     def _decide_pose_rep_value_v2(

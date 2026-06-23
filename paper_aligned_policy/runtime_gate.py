@@ -226,6 +226,18 @@ class PaperAlignedRuntimeGate:
             self.pose_only_reference_register_min_interval_frames = 16
             self.pose_only_reference_selection_cooldown_frames = 6
             self.pose_only_reference_selection_strategy = "risk_aware"
+        if getattr(self.direct_density_controller, "is_pose_only_ssm_baseline_repr_v1", False):
+            self.pose_only_reference_pool_max_size = 32
+            self.pose_only_reference_ttl_frames = 180
+            self.pose_only_reference_min_age_frames = 4
+            self.pose_only_reference_min_3d_points = 300
+            self.pose_only_reference_max_per_query = 2
+            self.pose_only_reference_min_match_score = 200.0
+            self.pose_only_reference_register_min_interval_frames = 4
+            self.pose_only_reference_selection_cooldown_frames = 4
+            self.pose_only_reference_age_bonus = 16.0
+            self.pose_only_reference_selection_strategy = "risk_aware"
+            self.pose_only_reference_risk_gate_enabled = False
         self._anchor_count_at_last_direct_finalize = 1
         if self.mode == "paper_aligned_semantic_v1":
             cfg = self.coupled_config

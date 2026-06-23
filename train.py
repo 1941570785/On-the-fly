@@ -1653,8 +1653,11 @@ if __name__ == "__main__":
                     if (
                         runtime_gate is not None
                         and risk_mode == "paper_aligned_semantic_v1"
-                        and getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit")
-                        == "true_source_commit"
+                        and (
+                            getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit")
+                            == "true_source_commit"
+                            or runtime_gate.direct_density_controller.is_pose_only_ssm_baseline_repr_v1
+                        )
                         and str(getattr(args, "paper_aligned_direct_density_control", "off")) != "off"
                     ):
                         support_triggered = bool(
