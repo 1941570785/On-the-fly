@@ -3411,6 +3411,59 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertEqual(decision["reason"], "memory_quality_improved")
         self.assertGreater(decision["memory_score"], decision["baseline_score"])
 
+    def test_pose_safe_memory_pose_choice_accepts_late_mature_context(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+
+        early = gate.choose_pose_safe_memory_pose(
+            frame_id=260,
+            current_keyframe_count=72,
+            baseline_pose_success=True,
+            memory_pose_success=True,
+            baseline_debug={
+                "num_2d3d_correspondences": 9000,
+                "num_pnp_inliers": 640,
+                "num_miniba_inliers": 1280,
+                "pnp_ref_keyframe_ids": [1, 2, 3],
+                "miniba_ref_keyframe_ids": [1, 2, 3],
+            },
+            memory_debug={
+                "num_2d3d_correspondences": 9100,
+                "num_pnp_inliers": 620,
+                "num_miniba_inliers": 1240,
+                "pnp_ref_keyframe_ids": [1, 2, 3, 1001],
+                "miniba_ref_keyframe_ids": [1, 2, 3, 1001],
+            },
+            pose_only_reference_ids=[1001],
+        )
+        self.assertFalse(early["use_memory_pose"])
+
+        late = gate.choose_pose_safe_memory_pose(
+            frame_id=950,
+            current_keyframe_count=260,
+            baseline_pose_success=True,
+            memory_pose_success=True,
+            baseline_debug={
+                "num_2d3d_correspondences": 9000,
+                "num_pnp_inliers": 640,
+                "num_miniba_inliers": 1280,
+                "pnp_ref_keyframe_ids": [1, 2, 3],
+                "miniba_ref_keyframe_ids": [1, 2, 3],
+            },
+            memory_debug={
+                "num_2d3d_correspondences": 9100,
+                "num_pnp_inliers": 620,
+                "num_miniba_inliers": 1240,
+                "pnp_ref_keyframe_ids": [1, 2, 3, 1001],
+                "miniba_ref_keyframe_ids": [1, 2, 3, 1001],
+            },
+            pose_only_reference_ids=[1001],
+        )
+
+        self.assertTrue(late["use_memory_pose"])
+        self.assertEqual(late["reason"], "late_mature_memory_context")
+
     def test_training_loop_dual_checks_pose_safe_memory_candidates(self):
         train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(
             encoding="utf-8-sig"

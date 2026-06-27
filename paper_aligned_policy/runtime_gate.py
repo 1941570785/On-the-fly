@@ -858,6 +858,8 @@ class PaperAlignedRuntimeGate:
     def choose_pose_safe_memory_pose(
         self,
         *,
+        frame_id: int = -1,
+        current_keyframe_count: int = 0,
         baseline_pose_success: bool,
         memory_pose_success: bool,
         baseline_debug: dict[str, Any] | None = None,
@@ -892,6 +894,8 @@ class PaperAlignedRuntimeGate:
             "memory_pnp_inliers": int(memory_quality["pnp_inliers"]),
             "baseline_miniba_inliers": int(baseline_quality["miniba_inliers"]),
             "memory_miniba_inliers": int(memory_quality["miniba_inliers"]),
+            "frame_id": int(frame_id),
+            "current_keyframe_count": int(current_keyframe_count),
         }
         if not getattr(self.direct_density_controller, "is_pose_safe_streaming_memory_v1", False):
             decision["reason"] = "mode_not_pose_safe_streaming_memory"
@@ -927,6 +931,17 @@ class PaperAlignedRuntimeGate:
             float(memory_quality["pnp_ratio"]) < ratio_floor
             and int(memory_quality["pnp_inliers"]) < int(baseline_quality["pnp_inliers"]) * 1.15
         ):
+            mature_context = self._pose_safe_late_mature_memory_context(
+                frame_id=frame_id,
+                current_keyframe_count=current_keyframe_count,
+                baseline_quality=baseline_quality,
+                memory_quality=memory_quality,
+            )
+            if mature_context:
+                decision["decision"] = "memory_pose"
+                decision["reason"] = "late_mature_memory_context"
+                decision["use_memory_pose"] = True
+                return decision
             decision["reason"] = "memory_ratio_drop"
             return decision
 
@@ -939,6 +954,17 @@ class PaperAlignedRuntimeGate:
         if has_substantial_gain:
             decision["decision"] = "memory_pose"
             decision["reason"] = "memory_quality_improved"
+            decision["use_memory_pose"] = True
+            return decision
+
+        if self._pose_safe_late_mature_memory_context(
+            frame_id=frame_id,
+            current_keyframe_count=current_keyframe_count,
+            baseline_quality=baseline_quality,
+            memory_quality=memory_quality,
+        ):
+            decision["decision"] = "memory_pose"
+            decision["reason"] = "late_mature_memory_context"
             decision["use_memory_pose"] = True
             return decision
 
@@ -960,6 +986,26 @@ class PaperAlignedRuntimeGate:
             "pnp_ratio": pnp_ratio,
             "score": score,
         }
+
+    @staticmethod
+    def _pose_safe_late_mature_memory_context(
+        *,
+        frame_id: int,
+        current_keyframe_count: int,
+        baseline_quality: dict[str, float | int],
+        memory_quality: dict[str, float | int],
+    ) -> bool:
+        mature_stream = int(current_keyframe_count) >= 240 or int(frame_id) >= 900
+        if not mature_stream:
+            return False
+        if int(memory_quality["pnp_inliers"]) < 128 or int(memory_quality["miniba_inliers"]) < 256:
+            return False
+        baseline_score = max(float(baseline_quality["score"]), 1.0)
+        baseline_ratio = max(float(baseline_quality["pnp_ratio"]), 1e-6)
+        return bool(
+            float(memory_quality["score"]) >= 0.70 * baseline_score
+            and float(memory_quality["pnp_ratio"]) >= 0.65 * baseline_ratio
+        )
 
     def enqueue_density_hold_recovery_candidate(
         self,

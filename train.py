@@ -1709,6 +1709,8 @@ if __name__ == "__main__":
                     memory_rng_after = _snapshot_torch_rng_state()
 
                     pose_safe_memory_choice = runtime_gate.choose_pose_safe_memory_pose(
+                        frame_id=int(frameID),
+                        current_keyframe_count=int(n_keyframes),
                         baseline_pose_success=Rt_baseline is not None,
                         memory_pose_success=Rt_memory is not None,
                         baseline_debug=baseline_debug,
