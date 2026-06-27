@@ -3387,6 +3387,8 @@ class CoupledInnovationModelTests(unittest.TestCase):
         )
 
         decision = gate.choose_pose_safe_memory_pose(
+            frame_id=950,
+            current_keyframe_count=270,
             baseline_pose_success=True,
             memory_pose_success=True,
             baseline_debug={
@@ -3410,6 +3412,43 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertEqual(decision["decision"], "memory_pose")
         self.assertEqual(decision["reason"], "memory_quality_improved")
         self.assertGreater(decision["memory_score"], decision["baseline_score"])
+
+    def test_pose_safe_memory_pose_choice_rejects_early_memory_when_baseline_succeeds(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+
+        decision = gate.choose_pose_safe_memory_pose(
+            frame_id=270,
+            current_keyframe_count=114,
+            baseline_pose_success=True,
+            memory_pose_success=True,
+            baseline_debug={
+                "num_2d3d_correspondences": 9000,
+                "num_pnp_inliers": 560,
+                "num_miniba_inliers": 1120,
+                "pnp_ref_keyframe_ids": [1, 2, 3],
+                "miniba_ref_keyframe_ids": [1, 2, 3],
+            },
+            memory_debug={
+                "num_2d3d_correspondences": 9000,
+                "num_pnp_inliers": 620,
+                "num_miniba_inliers": 1240,
+                "pnp_ref_keyframe_ids": [1, 2, 3, 1001],
+                "miniba_ref_keyframe_ids": [1, 2, 3, 1001],
+            },
+            pose_only_reference_ids=[1001],
+            candidate_pose_delta={
+                "available": True,
+                "rotation_delta_deg": 0.4,
+                "center_delta_over_baseline_step": 0.05,
+                "baseline_motion_error": 0.08,
+                "memory_motion_error": 0.08,
+            },
+        )
+
+        self.assertFalse(decision["use_memory_pose"])
+        self.assertEqual(decision["reason"], "memory_pose_early_stream_guard")
 
     def test_pose_safe_memory_pose_choice_rejects_geometry_inconsistent_memory(self):
         gate = PaperAlignedRuntimeGate(

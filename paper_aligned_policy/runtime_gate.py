@@ -966,6 +966,13 @@ class PaperAlignedRuntimeGate:
             or int(memory_quality["pnp_inliers"]) >= int(baseline_quality["pnp_inliers"]) * 1.20
         )
         if has_substantial_gain:
+            if not self._pose_safe_memory_override_allowed(
+                frame_id=frame_id,
+                current_keyframe_count=current_keyframe_count,
+                candidate_pose_delta=candidate_pose_delta,
+            ):
+                decision["reason"] = "memory_pose_early_stream_guard"
+                return decision
             decision["decision"] = "memory_pose"
             decision["reason"] = "memory_quality_improved"
             decision["use_memory_pose"] = True
@@ -1003,6 +1010,23 @@ class PaperAlignedRuntimeGate:
             rotation_delta > 12.0
             or center_over_step > 3.0
             or memory_step_over_step > 4.0
+        )
+
+    @staticmethod
+    def _pose_safe_memory_override_allowed(
+        *,
+        frame_id: int,
+        current_keyframe_count: int,
+        candidate_pose_delta: dict[str, Any],
+    ) -> bool:
+        if int(current_keyframe_count) >= 240 or int(frame_id) >= 900:
+            return True
+        baseline_motion_error = float(candidate_pose_delta.get("baseline_motion_error", 0.0) or 0.0)
+        memory_motion_error = float(candidate_pose_delta.get("memory_motion_error", 0.0) or 0.0)
+        return bool(
+            baseline_motion_error >= 0.08
+            and memory_motion_error > 0.0
+            and memory_motion_error <= 0.45 * baseline_motion_error
         )
 
     @staticmethod
