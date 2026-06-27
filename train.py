@@ -430,6 +430,94 @@ if __name__ == "__main__":
         if "numpy" in state:
             np.random.set_state(state["numpy"])
 
+    def _pose_safe_rt_cpu(Rt: Any) -> torch.Tensor | None:
+        if Rt is None:
+            return None
+        try:
+            if torch.is_tensor(Rt):
+                rt = Rt.detach().float().cpu()
+            else:
+                rt = torch.tensor(Rt, dtype=torch.float32)
+        except Exception:
+            return None
+        if rt.ndim != 2 or rt.shape[0] < 3 or rt.shape[1] < 4:
+            return None
+        return rt
+
+    def _pose_safe_camera_center(Rt: torch.Tensor) -> torch.Tensor:
+        return -Rt[:3, :3].transpose(0, 1) @ Rt[:3, 3]
+
+    def _pose_safe_rotation_delta_deg(Rt_a: torch.Tensor, Rt_b: torch.Tensor) -> float:
+        rel = Rt_a[:3, :3] @ Rt_b[:3, :3].transpose(0, 1)
+        cos_angle = ((torch.trace(rel) - 1.0) * 0.5).clamp(-1.0, 1.0)
+        return float(torch.rad2deg(torch.acos(cos_angle)).item())
+
+    def _pose_safe_pose_geometry_delta(
+        Rt_baseline: Any,
+        Rt_memory: Any,
+        last_keyframe_Rt: Any,
+        pose_history: list[tuple[int, Any]],
+        frame_id: int,
+    ) -> dict[str, Any]:
+        baseline_rt = _pose_safe_rt_cpu(Rt_baseline)
+        memory_rt = _pose_safe_rt_cpu(Rt_memory)
+        if baseline_rt is None or memory_rt is None:
+            return {"available": False}
+
+        baseline_center = _pose_safe_camera_center(baseline_rt)
+        memory_center = _pose_safe_camera_center(memory_rt)
+        center_delta = float(torch.linalg.norm(memory_center - baseline_center).item())
+        rotation_delta = _pose_safe_rotation_delta_deg(memory_rt, baseline_rt)
+        out: dict[str, Any] = {
+            "available": True,
+            "rotation_delta_deg": rotation_delta,
+            "center_delta": center_delta,
+            "baseline_step": 0.0,
+            "memory_step": 0.0,
+            "center_delta_over_baseline_step": 0.0,
+            "memory_step_over_baseline_step": 0.0,
+            "baseline_motion_error": 0.0,
+            "memory_motion_error": 0.0,
+        }
+
+        last_rt = _pose_safe_rt_cpu(last_keyframe_Rt)
+        if last_rt is not None:
+            last_center = _pose_safe_camera_center(last_rt)
+            baseline_step = float(torch.linalg.norm(baseline_center - last_center).item())
+            memory_step = float(torch.linalg.norm(memory_center - last_center).item())
+            step_denom = max(baseline_step, 1e-4)
+            out.update(
+                {
+                    "baseline_step": baseline_step,
+                    "memory_step": memory_step,
+                    "center_delta_over_baseline_step": center_delta / step_denom,
+                    "memory_step_over_baseline_step": memory_step / step_denom,
+                }
+            )
+
+        history: list[tuple[int, torch.Tensor]] = []
+        for hist_frame_id, hist_rt_raw in list(pose_history):
+            hist_rt = _pose_safe_rt_cpu(hist_rt_raw)
+            if hist_rt is not None:
+                history.append((int(hist_frame_id), hist_rt))
+        if len(history) >= 2:
+            prev_frame_id, prev_rt = history[-2]
+            last_frame_id, hist_last_rt = history[-1]
+            prev_center = _pose_safe_camera_center(prev_rt)
+            hist_last_center = _pose_safe_camera_center(hist_last_rt)
+            frame_gap = max(int(last_frame_id) - int(prev_frame_id), 1)
+            current_gap = max(int(frame_id) - int(last_frame_id), 1)
+            expected_center = hist_last_center + (hist_last_center - prev_center) * (
+                float(current_gap) / float(frame_gap)
+            )
+            out["baseline_motion_error"] = float(
+                torch.linalg.norm(baseline_center - expected_center).item()
+            )
+            out["memory_motion_error"] = float(
+                torch.linalg.norm(memory_center - expected_center).item()
+            )
+        return out
+
     def _attempt_recovery_pose_path(
         recovered: dict[str, Any],
         current_frame_id: int,
@@ -1708,6 +1796,13 @@ if __name__ == "__main__":
                     )
                     memory_rng_after = _snapshot_torch_rng_state()
 
+                    pose_safe_candidate_delta = _pose_safe_pose_geometry_delta(
+                        Rt_baseline,
+                        Rt_memory,
+                        prev_keyframe.get_Rt() if "prev_keyframe" in locals() else None,
+                        list(viewpoint_pose_history),
+                        int(frameID),
+                    )
                     pose_safe_memory_choice = runtime_gate.choose_pose_safe_memory_pose(
                         frame_id=int(frameID),
                         current_keyframe_count=int(n_keyframes),
@@ -1716,6 +1811,7 @@ if __name__ == "__main__":
                         baseline_debug=baseline_debug,
                         memory_debug=memory_debug,
                         pose_only_reference_ids=[int(ref.index) for ref in pose_only_refs],
+                        candidate_pose_delta=pose_safe_candidate_delta,
                     )
                     if bool(pose_safe_memory_choice.get("use_memory_pose", False)):
                         Rt = Rt_memory

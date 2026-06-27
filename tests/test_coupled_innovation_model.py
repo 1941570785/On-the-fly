@@ -3411,6 +3411,80 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertEqual(decision["reason"], "memory_quality_improved")
         self.assertGreater(decision["memory_score"], decision["baseline_score"])
 
+    def test_pose_safe_memory_pose_choice_rejects_geometry_inconsistent_memory(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+
+        decision = gate.choose_pose_safe_memory_pose(
+            frame_id=950,
+            current_keyframe_count=270,
+            baseline_pose_success=True,
+            memory_pose_success=True,
+            baseline_debug={
+                "num_2d3d_correspondences": 9000,
+                "num_pnp_inliers": 420,
+                "num_miniba_inliers": 840,
+                "pnp_ref_keyframe_ids": [1, 2, 3],
+                "miniba_ref_keyframe_ids": [1, 2, 3],
+            },
+            memory_debug={
+                "num_2d3d_correspondences": 9200,
+                "num_pnp_inliers": 620,
+                "num_miniba_inliers": 1240,
+                "pnp_ref_keyframe_ids": [1, 2, 3, 1001],
+                "miniba_ref_keyframe_ids": [1, 2, 3, 1001],
+            },
+            pose_only_reference_ids=[1001],
+            candidate_pose_delta={
+                "available": True,
+                "rotation_delta_deg": 18.0,
+                "center_delta_over_baseline_step": 3.2,
+                "baseline_motion_error": 0.35,
+                "memory_motion_error": 1.10,
+            },
+        )
+
+        self.assertFalse(decision["use_memory_pose"])
+        self.assertEqual(decision["reason"], "memory_pose_geometry_inconsistent")
+
+    def test_pose_safe_memory_pose_choice_allows_motion_consistent_memory(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+
+        decision = gate.choose_pose_safe_memory_pose(
+            frame_id=950,
+            current_keyframe_count=270,
+            baseline_pose_success=True,
+            memory_pose_success=True,
+            baseline_debug={
+                "num_2d3d_correspondences": 9000,
+                "num_pnp_inliers": 420,
+                "num_miniba_inliers": 840,
+                "pnp_ref_keyframe_ids": [1, 2, 3],
+                "miniba_ref_keyframe_ids": [1, 2, 3],
+            },
+            memory_debug={
+                "num_2d3d_correspondences": 9200,
+                "num_pnp_inliers": 620,
+                "num_miniba_inliers": 1240,
+                "pnp_ref_keyframe_ids": [1, 2, 3, 1001],
+                "miniba_ref_keyframe_ids": [1, 2, 3, 1001],
+            },
+            pose_only_reference_ids=[1001],
+            candidate_pose_delta={
+                "available": True,
+                "rotation_delta_deg": 18.0,
+                "center_delta_over_baseline_step": 3.2,
+                "baseline_motion_error": 1.10,
+                "memory_motion_error": 0.35,
+            },
+        )
+
+        self.assertTrue(decision["use_memory_pose"])
+        self.assertEqual(decision["reason"], "memory_quality_improved")
+
     def test_pose_safe_memory_pose_choice_accepts_late_mature_context(self):
         gate = PaperAlignedRuntimeGate(
             _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
@@ -3481,6 +3555,8 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertIn("baseline_rng_after", train_source)
         self.assertIn("memory_rng_after", train_source)
         self.assertIn("pose_safe_match_restored_on_hold", train_source)
+        self.assertIn("_pose_safe_pose_geometry_delta", train_source)
+        self.assertIn("candidate_pose_delta", train_source)
 
     def test_training_loop_exports_pose_memory_geometry_context_to_viewpoint_scores(self):
         train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(

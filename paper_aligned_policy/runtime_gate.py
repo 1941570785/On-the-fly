@@ -865,9 +865,11 @@ class PaperAlignedRuntimeGate:
         baseline_debug: dict[str, Any] | None = None,
         memory_debug: dict[str, Any] | None = None,
         pose_only_reference_ids: list[int] | None = None,
+        candidate_pose_delta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         baseline_quality = self._pose_safe_debug_quality(baseline_debug)
         memory_quality = self._pose_safe_debug_quality(memory_debug)
+        candidate_pose_delta = dict(candidate_pose_delta or {})
         pose_only_ids = {int(x) for x in (pose_only_reference_ids or [])}
         memory_used = bool(
             pose_only_ids
@@ -896,6 +898,14 @@ class PaperAlignedRuntimeGate:
             "memory_miniba_inliers": int(memory_quality["miniba_inliers"]),
             "frame_id": int(frame_id),
             "current_keyframe_count": int(current_keyframe_count),
+            "pose_delta_available": bool(candidate_pose_delta.get("available", False)),
+            "pose_delta_rotation_deg": float(candidate_pose_delta.get("rotation_delta_deg", 0.0) or 0.0),
+            "pose_delta_center": float(candidate_pose_delta.get("center_delta", 0.0) or 0.0),
+            "pose_delta_center_over_step": float(
+                candidate_pose_delta.get("center_delta_over_baseline_step", 0.0) or 0.0
+            ),
+            "baseline_motion_error": float(candidate_pose_delta.get("baseline_motion_error", 0.0) or 0.0),
+            "memory_motion_error": float(candidate_pose_delta.get("memory_motion_error", 0.0) or 0.0),
         }
         if not getattr(self.direct_density_controller, "is_pose_safe_streaming_memory_v1", False):
             decision["reason"] = "mode_not_pose_safe_streaming_memory"
@@ -921,6 +931,10 @@ class PaperAlignedRuntimeGate:
                 decision["use_memory_pose"] = True
             else:
                 decision["reason"] = "baseline_failed_memory_quality_weak"
+            return decision
+
+        if self._pose_safe_memory_geometry_inconsistent(candidate_pose_delta):
+            decision["reason"] = "memory_pose_geometry_inconsistent"
             return decision
 
         ratio_floor = max(
@@ -970,6 +984,26 @@ class PaperAlignedRuntimeGate:
 
         decision["reason"] = "memory_quality_not_better"
         return decision
+
+    @staticmethod
+    def _pose_safe_memory_geometry_inconsistent(candidate_pose_delta: dict[str, Any]) -> bool:
+        if not bool(candidate_pose_delta.get("available", False)):
+            return False
+        rotation_delta = float(candidate_pose_delta.get("rotation_delta_deg", 0.0) or 0.0)
+        center_over_step = float(candidate_pose_delta.get("center_delta_over_baseline_step", 0.0) or 0.0)
+        memory_step_over_step = float(candidate_pose_delta.get("memory_step_over_baseline_step", 0.0) or 0.0)
+        baseline_motion_error = float(candidate_pose_delta.get("baseline_motion_error", 0.0) or 0.0)
+        memory_motion_error = float(candidate_pose_delta.get("memory_motion_error", 0.0) or 0.0)
+
+        motion_prior_available = baseline_motion_error > 0.0 and memory_motion_error > 0.0
+        if motion_prior_available and memory_motion_error <= 0.75 * baseline_motion_error:
+            return False
+
+        return bool(
+            rotation_delta > 12.0
+            or center_over_step > 3.0
+            or memory_step_over_step > 4.0
+        )
 
     @staticmethod
     def _pose_safe_debug_quality(debug: dict[str, Any] | None) -> dict[str, float | int]:
