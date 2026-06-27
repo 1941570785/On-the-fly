@@ -101,6 +101,9 @@ class PaperAlignedRuntimeGate:
         self._last_pose_only_reference_register_frame = -1
         self.pose_only_reference_registered_count = 0
         self.pose_only_reference_selected_count = 0
+        self.pose_safe_tracking_budget_per_100 = 0
+        self._pose_safe_tracking_budget_window = -1
+        self._pose_safe_tracking_budget_used = 0
         self.trace_unavailable_reasons: dict[str, str] = {
             "match_graph_neighbor_ids": "No persistent match graph object is exposed; pairwise matches live on DescribedKeypoints.matches.",
             "match_graph_id": "No stable match graph id exists for keyframes in the current runtime.",
@@ -263,6 +266,7 @@ class PaperAlignedRuntimeGate:
             self.pose_only_reference_allow_high_new_view_rescue = True
             self.pose_only_reference_repetitive_entropy_min = 0.94
             self.pose_only_reference_repetitive_entropy_support_max = 0.09
+            self.pose_safe_tracking_budget_per_100 = 14
         self._anchor_count_at_last_direct_finalize = 1
         if self.mode == "paper_aligned_semantic_v1":
             cfg = self.coupled_config
@@ -780,6 +784,61 @@ class PaperAlignedRuntimeGate:
         self._event_index[int(frame_id)] = len(self.trace_events)
         self.trace_events.append(event)
         return admit, action
+
+    def _sync_pose_safe_tracking_budget(self, frame_id: int) -> None:
+        window_id = int(frame_id) // 100
+        if window_id != int(self._pose_safe_tracking_budget_window):
+            self._pose_safe_tracking_budget_window = window_id
+            self._pose_safe_tracking_budget_used = 0
+
+    def should_pose_safe_track_deferred(
+        self,
+        *,
+        frame_id: int,
+        action: str,
+        phase: str,
+        evidence: dict[str, Any] | None = None,
+    ) -> bool:
+        if not getattr(self.direct_density_controller, "is_pose_safe_streaming_memory_v1", False):
+            return False
+        if str(action) != "defer_recoverable":
+            return False
+        if str(phase) != "incremental":
+            return False
+        budget = int(self.pose_safe_tracking_budget_per_100)
+        if budget <= 0:
+            return False
+        ev = dict(evidence or {})
+        if _to_bool(ev.get("is_test", False)):
+            return False
+        min_inliers = max(1, int(ev.get("min_num_inliers_threshold", 100) or 100))
+        num_matches = int(ev.get("num_matches", 0) or 0)
+        median_disp = float(ev.get("median_displacement", 0.0) or 0.0)
+        disp_threshold = max(float(ev.get("displacement_threshold", 1.0) or 1.0), 1e-6)
+        pose_fail_rate = float(ev.get("recent_pose_fail_rate", 0.0) or 0.0)
+        motion_ratio = median_disp / disp_threshold
+        strong_match_support = num_matches >= max(240, int(2.4 * min_inliers))
+        useful_motion = motion_ratio >= 0.35
+        stable_recent_pose = pose_fail_rate <= 0.35
+        if not (strong_match_support and useful_motion and stable_recent_pose):
+            return False
+        self._sync_pose_safe_tracking_budget(int(frame_id))
+        if int(self._pose_safe_tracking_budget_used) >= budget:
+            return False
+        self._pose_safe_tracking_budget_used += 1
+        event = self._get_event(int(frame_id))
+        if event is not None:
+            event["pose_safe_tracking_only"] = True
+            event["pose_safe_tracking_budget_window"] = int(
+                self._pose_safe_tracking_budget_window
+            )
+            event["pose_safe_tracking_budget_used"] = int(
+                self._pose_safe_tracking_budget_used
+            )
+            event["pose_safe_tracking_budget_per_100"] = int(budget)
+            event["pose_safe_tracking_num_matches"] = int(num_matches)
+            event["pose_safe_tracking_motion_ratio"] = float(motion_ratio)
+        return True
 
     def enqueue_density_hold_recovery_candidate(
         self,

@@ -624,13 +624,13 @@ class DirectDensityController:
                     "hold_candidate_verification",
                     "hold_pose_only_baseline_repr",
                 }
-            if self.is_pose_only_ssm_baseline_repr_v1:
+            if self.is_pose_only_baseline_repr_family:
                 return decision == "hold_pose_only_baseline_repr"
             return decision == "hold_redundant" and density_state == "in_band"
         return False
 
     def should_enqueue_hold_recovery(self, decision: str | None = None) -> bool:
-        if self.is_pose_only_ssm_baseline_repr_v1:
+        if self.is_pose_only_baseline_repr_family:
             return False
         if self.is_pose_rep_streaming_memory_v1:
             return str(decision or "") == "hold_candidate_verification"

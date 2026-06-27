@@ -1000,6 +1000,7 @@ if __name__ == "__main__":
         start_time = time.time()
         runtime_action = ""
         baseline_should_add_frame = False
+        pose_safe_tracking_only = False
 
         # ========== 网页端交互控制 ==========
         if args.viewer_mode == "web":
@@ -1167,6 +1168,22 @@ if __name__ == "__main__":
             should_add_keyframe, runtime_action = runtime_gate.decide(
                 frameID, info, bool(baseline_should_add), phase=phase, evidence=evidence
             )
+            pose_safe_tracking_only = bool(
+                runtime_gate.should_pose_safe_track_deferred(
+                    frame_id=int(frameID),
+                    action=str(runtime_action),
+                    phase=phase,
+                    evidence=evidence,
+                )
+            )
+            if pose_safe_tracking_only:
+                should_add_keyframe = True
+                runtime_action = "direct_admit"
+                baseline_should_add_frame = False
+                trace_ev = runtime_gate._get_event(frameID)
+                if trace_ev is not None:
+                    trace_ev["pose_safe_tracking_only"] = True
+                    trace_ev["pose_safe_tracking_admitted_to_pose_path"] = True
             baseline_eval_frame = bool(
                 info.get("_baseline_eval_frame", info.get("is_test", False))
             )
@@ -1492,6 +1509,7 @@ if __name__ == "__main__":
             # 当相机运动模式发生突变时（如从平移变为旋转），需要重启重建
             if (
                 args.enable_reboot
+                and not bool(pose_safe_tracking_only)
                 and scene_model.approx_cam_centres is not None
                 and len(scene_model.anchors)
             ):
@@ -1656,7 +1674,7 @@ if __name__ == "__main__":
                         and (
                             getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit")
                             == "true_source_commit"
-                            or runtime_gate.direct_density_controller.is_pose_only_ssm_baseline_repr_v1
+                            or runtime_gate.direct_density_controller.is_pose_only_baseline_repr_family
                         )
                         and str(getattr(args, "paper_aligned_direct_density_control", "off")) != "off"
                     ):
@@ -1803,6 +1821,7 @@ if __name__ == "__main__":
                             "frame_id": int(frameID),
                             "source_frame_id": int(frameID),
                             "direct_admit_candidate": True,
+                            "pose_safe_tracking_only": bool(pose_safe_tracking_only),
                             "direct_keyframe_finalized": bool(direct_keyframe_finalized),
                             "direct_finalization_decision": str(fin_dec.decision),
                             "direct_finalization_reason": str(fin_dec.reason),

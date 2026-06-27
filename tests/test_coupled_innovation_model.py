@@ -2923,6 +2923,86 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertFalse(pose_only_frame.finalize)
         self.assertEqual(pose_only_frame.decision, "hold_pose_only_baseline_repr")
         self.assertEqual(pose_only_frame.debug["active_memory_frame_role"], "tracking_only")
+        self.assertTrue(
+            controller.should_update_prev_desc_on_hold(
+                pose_only_frame.decision,
+                pose_only_frame.debug["density_state"],
+            )
+        )
+        self.assertFalse(controller.should_enqueue_hold_recovery(pose_only_frame.decision))
+
+    def test_pose_safe_streaming_memory_tracks_only_strong_deferred_frames(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+
+        allowed = gate.should_pose_safe_track_deferred(
+            frame_id=128,
+            action="defer_recoverable",
+            phase="incremental",
+            evidence={
+                "num_matches": 360,
+                "min_num_inliers_threshold": 100,
+                "median_displacement": 0.020,
+                "displacement_threshold": 0.030,
+                "recent_pose_fail_rate": 0.0,
+            },
+        )
+        weak = gate.should_pose_safe_track_deferred(
+            frame_id=129,
+            action="defer_recoverable",
+            phase="incremental",
+            evidence={
+                "num_matches": 120,
+                "min_num_inliers_threshold": 100,
+                "median_displacement": 0.020,
+                "displacement_threshold": 0.030,
+                "recent_pose_fail_rate": 0.0,
+            },
+        )
+        discard = gate.should_pose_safe_track_deferred(
+            frame_id=130,
+            action="discard",
+            phase="incremental",
+            evidence={
+                "num_matches": 500,
+                "min_num_inliers_threshold": 100,
+                "median_displacement": 0.020,
+                "displacement_threshold": 0.030,
+                "recent_pose_fail_rate": 0.0,
+            },
+        )
+
+        self.assertTrue(allowed)
+        self.assertFalse(weak)
+        self.assertFalse(discard)
+
+    def test_pose_safe_streaming_memory_budgets_deferred_tracking_per_window(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+        evidence = {
+            "num_matches": 500,
+            "min_num_inliers_threshold": 100,
+            "median_displacement": 0.025,
+            "displacement_threshold": 0.030,
+            "recent_pose_fail_rate": 0.0,
+        }
+        decisions = [
+            gate.should_pose_safe_track_deferred(
+                frame_id=200 + i,
+                action="defer_recoverable",
+                phase="incremental",
+                evidence=evidence,
+            )
+            for i in range(gate.pose_safe_tracking_budget_per_100 + 2)
+        ]
+
+        self.assertEqual(
+            sum(1 for ok in decisions if ok),
+            gate.pose_safe_tracking_budget_per_100,
+        )
+        self.assertFalse(decisions[-1])
 
     def test_pose_safe_streaming_memory_uses_strict_reference_pool_defaults(self):
         gate = PaperAlignedRuntimeGate(
@@ -3209,6 +3289,15 @@ class CoupledInnovationModelTests(unittest.TestCase):
             "runtime_gate.direct_density_controller.is_pose_rep_active_memory_v1",
             guard_window,
         )
+
+    def test_training_loop_routes_pose_safe_deferred_frames_to_tracking_only_path(self):
+        train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(
+            encoding="utf-8-sig"
+        )
+
+        self.assertIn("should_pose_safe_track_deferred", train_source)
+        self.assertIn("pose_safe_tracking_only", train_source)
+        self.assertIn("is_pose_only_baseline_repr_family", train_source)
 
     def test_training_loop_exports_pose_memory_geometry_context_to_viewpoint_scores(self):
         train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(
