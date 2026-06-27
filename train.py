@@ -414,6 +414,22 @@ if __name__ == "__main__":
                 cloned[key] = copy.deepcopy(value)
         return cloned
 
+    def _snapshot_torch_rng_state() -> dict[str, Any]:
+        return {
+            "torch": torch.random.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+            "numpy": np.random.get_state(),
+        }
+
+    def _restore_torch_rng_state(state: dict[str, Any] | None) -> None:
+        if not state:
+            return
+        torch.random.set_rng_state(state["torch"])
+        if torch.cuda.is_available() and state.get("cuda"):
+            torch.cuda.set_rng_state_all(state["cuda"])
+        if "numpy" in state:
+            np.random.set_state(state["numpy"])
+
     def _attempt_recovery_pose_path(
         recovered: dict[str, Any],
         current_frame_id: int,
@@ -1639,6 +1655,13 @@ if __name__ == "__main__":
                     and runtime_gate.direct_density_controller.is_pose_safe_streaming_memory_v1
                 )
                 pose_safe_memory_choice: dict[str, Any] = {}
+                pose_safe_pose_rng_before = (
+                    _snapshot_torch_rng_state()
+                    if runtime_gate is not None
+                    and runtime_gate.direct_density_controller.is_pose_safe_streaming_memory_v1
+                    and (pose_safe_dual_candidate or pose_safe_tracking_only)
+                    else None
+                )
                 if pose_safe_dual_candidate:
                     all_trial_refs_by_id: dict[int, Keyframe] = {}
                     for ref in list(prev_keyframes) + list(pose_only_refs):
@@ -1660,10 +1683,12 @@ if __name__ == "__main__":
                     baseline_match_state = _snapshot_pose_match_state(
                         desc_kpts, all_trial_refs, n_keyframes
                     )
+                    baseline_rng_after = _snapshot_torch_rng_state()
 
                     _restore_pose_match_state(
                         desc_kpts, all_trial_refs, n_keyframes, initial_match_state
                     )
+                    _restore_torch_rng_state(pose_safe_pose_rng_before)
                     Rt_memory = pose_initializer.initialize_incremental(
                         prev_keyframes_for_pose, desc_kpts, n_keyframes, info["is_test"], image
                     )
@@ -1676,6 +1701,7 @@ if __name__ == "__main__":
                     memory_match_state = _snapshot_pose_match_state(
                         desc_kpts, all_trial_refs, n_keyframes
                     )
+                    memory_rng_after = _snapshot_torch_rng_state()
 
                     pose_safe_memory_choice = runtime_gate.choose_pose_safe_memory_pose(
                         baseline_pose_success=Rt_baseline is not None,
@@ -1691,6 +1717,7 @@ if __name__ == "__main__":
                         _restore_pose_match_state(
                             desc_kpts, all_trial_refs, n_keyframes, memory_match_state
                         )
+                        _restore_torch_rng_state(memory_rng_after)
                     else:
                         Rt = Rt_baseline
                         prev_keyframes_for_pose = list(prev_keyframes)
@@ -1699,6 +1726,7 @@ if __name__ == "__main__":
                         _restore_pose_match_state(
                             desc_kpts, all_trial_refs, n_keyframes, baseline_match_state
                         )
+                        _restore_torch_rng_state(baseline_rng_after)
                     trace_ev = runtime_gate._get_event(frameID)
                     if trace_ev is not None:
                         trace_ev["pose_safe_dual_candidate"] = True
@@ -2621,6 +2649,11 @@ if __name__ == "__main__":
                                 }
                             )
                         if not direct_keyframe_finalized:
+                            if pose_safe_tracking_only and pose_safe_pose_rng_before is not None:
+                                _restore_torch_rng_state(pose_safe_pose_rng_before)
+                                v2_payload["pose_safe_rng_restored_on_hold"] = True
+                                if trace_ev is not None:
+                                    trace_ev["pose_safe_rng_restored_on_hold"] = True
                             should_add_keyframe = False
                             if (
                                 not info["is_test"]
@@ -2699,6 +2732,11 @@ if __name__ == "__main__":
                     # 姿态估计失败，跳过该帧
                     should_add_keyframe = False
                     if runtime_gate is not None:
+                        if pose_safe_tracking_only and pose_safe_pose_rng_before is not None:
+                            _restore_torch_rng_state(pose_safe_pose_rng_before)
+                            trace_ev = runtime_gate._get_event(frameID)
+                            if trace_ev is not None:
+                                trace_ev["pose_safe_rng_restored_on_pose_fail"] = True
                         pose_debug = getattr(pose_initializer, "last_incremental_debug", {})
                         fail_reason = str(pose_debug.get("failure_reason", "") or "pose_init_failed")
                         runtime_gate.mark_drop_reason(frameID, fail_reason)
