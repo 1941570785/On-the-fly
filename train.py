@@ -1662,14 +1662,19 @@ if __name__ == "__main__":
                     and (pose_safe_dual_candidate or pose_safe_tracking_only)
                     else None
                 )
-                if pose_safe_dual_candidate:
-                    all_trial_refs_by_id: dict[int, Keyframe] = {}
-                    for ref in list(prev_keyframes) + list(pose_only_refs):
-                        all_trial_refs_by_id[int(ref.index)] = ref
-                    all_trial_refs = list(all_trial_refs_by_id.values())
-                    initial_match_state = _snapshot_pose_match_state(
-                        desc_kpts, all_trial_refs, n_keyframes
+                pose_safe_probe_refs: list[Keyframe] = []
+                pose_safe_pose_match_before = None
+                if pose_safe_pose_rng_before is not None:
+                    pose_safe_probe_refs_by_id: dict[int, Keyframe] = {}
+                    for ref in prev_keyframes_for_pose:
+                        pose_safe_probe_refs_by_id[int(ref.index)] = ref
+                    pose_safe_probe_refs = list(pose_safe_probe_refs_by_id.values())
+                    pose_safe_pose_match_before = _snapshot_pose_match_state(
+                        desc_kpts, pose_safe_probe_refs, n_keyframes
                     )
+                if pose_safe_dual_candidate:
+                    all_trial_refs = pose_safe_probe_refs
+                    initial_match_state = pose_safe_pose_match_before
 
                     Rt_baseline = pose_initializer.initialize_incremental(
                         list(prev_keyframes), desc_kpts, n_keyframes, info["is_test"], image
@@ -1686,7 +1691,7 @@ if __name__ == "__main__":
                     baseline_rng_after = _snapshot_torch_rng_state()
 
                     _restore_pose_match_state(
-                        desc_kpts, all_trial_refs, n_keyframes, initial_match_state
+                        desc_kpts, all_trial_refs, n_keyframes, initial_match_state or {}
                     )
                     _restore_torch_rng_state(pose_safe_pose_rng_before)
                     Rt_memory = pose_initializer.initialize_incremental(
@@ -2649,6 +2654,16 @@ if __name__ == "__main__":
                                 }
                             )
                         if not direct_keyframe_finalized:
+                            if pose_safe_pose_match_before is not None:
+                                _restore_pose_match_state(
+                                    desc_kpts,
+                                    pose_safe_probe_refs,
+                                    n_keyframes,
+                                    pose_safe_pose_match_before,
+                                )
+                                v2_payload["pose_safe_match_restored_on_hold"] = True
+                                if trace_ev is not None:
+                                    trace_ev["pose_safe_match_restored_on_hold"] = True
                             if pose_safe_tracking_only and pose_safe_pose_rng_before is not None:
                                 _restore_torch_rng_state(pose_safe_pose_rng_before)
                                 v2_payload["pose_safe_rng_restored_on_hold"] = True
@@ -2732,6 +2747,16 @@ if __name__ == "__main__":
                     # 姿态估计失败，跳过该帧
                     should_add_keyframe = False
                     if runtime_gate is not None:
+                        if pose_safe_pose_match_before is not None:
+                            _restore_pose_match_state(
+                                desc_kpts,
+                                pose_safe_probe_refs,
+                                n_keyframes,
+                                pose_safe_pose_match_before,
+                            )
+                            trace_ev = runtime_gate._get_event(frameID)
+                            if trace_ev is not None:
+                                trace_ev["pose_safe_match_restored_on_pose_fail"] = True
                         if pose_safe_tracking_only and pose_safe_pose_rng_before is not None:
                             _restore_torch_rng_state(pose_safe_pose_rng_before)
                             trace_ev = runtime_gate._get_event(frameID)

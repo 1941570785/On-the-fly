@@ -3424,8 +3424,10 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertIn("choose_pose_safe_memory_pose", train_source)
         self.assertIn("pose_safe_dual_candidate", train_source)
         self.assertIn("pose_safe_pose_rng_before", train_source)
+        self.assertIn("pose_safe_pose_match_before", train_source)
         self.assertIn("baseline_rng_after", train_source)
         self.assertIn("memory_rng_after", train_source)
+        self.assertIn("pose_safe_match_restored_on_hold", train_source)
 
     def test_training_loop_exports_pose_memory_geometry_context_to_viewpoint_scores(self):
         train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(
