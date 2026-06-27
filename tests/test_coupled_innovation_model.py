@@ -3039,10 +3039,10 @@ class CoupledInnovationModelTests(unittest.TestCase):
 
         self.assertEqual(summary["selection_strategy"], "pose_safe")
         self.assertTrue(summary["risk_gate_enabled"])
-        self.assertEqual(summary["max_per_query"], 1)
-        self.assertLessEqual(summary["ttl_frames"], 120)
-        self.assertGreaterEqual(summary["min_3d_points"], 500)
-        self.assertGreaterEqual(summary["min_match_score"], 240.0)
+        self.assertEqual(summary["max_per_query"], 2)
+        self.assertLessEqual(summary["ttl_frames"], 160)
+        self.assertGreaterEqual(summary["min_3d_points"], 450)
+        self.assertGreaterEqual(summary["min_match_score"], 210.0)
         self.assertGreater(summary["min_geometry_score"], 0.0)
 
     def test_pose_safe_streaming_memory_blocks_forest_like_repetitive_refs(self):
@@ -3572,10 +3572,54 @@ class CoupledInnovationModelTests(unittest.TestCase):
                 "miniba_ref_keyframe_ids": [1, 2, 3, 1001],
             },
             pose_only_reference_ids=[1001],
+            candidate_pose_delta={
+                "available": True,
+                "rotation_delta_deg": 0.3,
+                "center_delta_over_baseline_step": 0.04,
+                "baseline_motion_error": 0.10,
+                "memory_motion_error": 0.095,
+            },
         )
 
         self.assertTrue(late["use_memory_pose"])
         self.assertEqual(late["reason"], "late_mature_memory_context")
+
+    def test_pose_safe_memory_pose_choice_rejects_late_mature_context_when_motion_worse(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+
+        decision = gate.choose_pose_safe_memory_pose(
+            frame_id=1040,
+            current_keyframe_count=280,
+            baseline_pose_success=True,
+            memory_pose_success=True,
+            baseline_debug={
+                "num_2d3d_correspondences": 9000,
+                "num_pnp_inliers": 1550,
+                "num_miniba_inliers": 3100,
+                "pnp_ref_keyframe_ids": [1, 2, 3],
+                "miniba_ref_keyframe_ids": [1, 2, 3],
+            },
+            memory_debug={
+                "num_2d3d_correspondences": 9100,
+                "num_pnp_inliers": 1540,
+                "num_miniba_inliers": 3080,
+                "pnp_ref_keyframe_ids": [1, 2, 3, 1001],
+                "miniba_ref_keyframe_ids": [1, 2, 3, 1001],
+            },
+            pose_only_reference_ids=[1001],
+            candidate_pose_delta={
+                "available": True,
+                "rotation_delta_deg": 0.2,
+                "center_delta_over_baseline_step": 0.08,
+                "baseline_motion_error": 0.08,
+                "memory_motion_error": 0.10,
+            },
+        )
+
+        self.assertFalse(decision["use_memory_pose"])
+        self.assertEqual(decision["reason"], "memory_quality_not_better")
 
     def test_training_loop_dual_checks_pose_safe_memory_candidates(self):
         train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(

@@ -243,14 +243,14 @@ class PaperAlignedRuntimeGate:
             self.pose_only_reference_selection_strategy = "risk_aware"
             self.pose_only_reference_risk_gate_enabled = False
         if getattr(self.direct_density_controller, "is_pose_safe_streaming_memory_v1", False):
-            self.pose_only_reference_pool_max_size = 20
-            self.pose_only_reference_ttl_frames = 120
-            self.pose_only_reference_min_age_frames = 8
-            self.pose_only_reference_min_3d_points = 500
-            self.pose_only_reference_max_per_query = 1
-            self.pose_only_reference_min_match_score = 240.0
-            self.pose_only_reference_register_min_interval_frames = 8
-            self.pose_only_reference_selection_cooldown_frames = 8
+            self.pose_only_reference_pool_max_size = 32
+            self.pose_only_reference_ttl_frames = 160
+            self.pose_only_reference_min_age_frames = 4
+            self.pose_only_reference_min_3d_points = 450
+            self.pose_only_reference_max_per_query = 2
+            self.pose_only_reference_min_match_score = 210.0
+            self.pose_only_reference_register_min_interval_frames = 4
+            self.pose_only_reference_selection_cooldown_frames = 4
             self.pose_only_reference_age_bonus = 4.0
             self.pose_only_reference_selection_strategy = "pose_safe"
             self.pose_only_reference_min_geometry_score = 92.0
@@ -266,7 +266,7 @@ class PaperAlignedRuntimeGate:
             self.pose_only_reference_allow_high_new_view_rescue = True
             self.pose_only_reference_repetitive_entropy_min = 0.94
             self.pose_only_reference_repetitive_entropy_support_max = 0.09
-            self.pose_safe_tracking_budget_per_100 = 14
+            self.pose_safe_tracking_budget_per_100 = 18
         self._anchor_count_at_last_direct_finalize = 1
         if self.mode == "paper_aligned_semantic_v1":
             cfg = self.coupled_config
@@ -950,6 +950,7 @@ class PaperAlignedRuntimeGate:
                 current_keyframe_count=current_keyframe_count,
                 baseline_quality=baseline_quality,
                 memory_quality=memory_quality,
+                candidate_pose_delta=candidate_pose_delta,
             )
             if mature_context:
                 decision["decision"] = "memory_pose"
@@ -983,6 +984,7 @@ class PaperAlignedRuntimeGate:
             current_keyframe_count=current_keyframe_count,
             baseline_quality=baseline_quality,
             memory_quality=memory_quality,
+            candidate_pose_delta=candidate_pose_delta,
         ):
             decision["decision"] = "memory_pose"
             decision["reason"] = "late_mature_memory_context"
@@ -1030,6 +1032,16 @@ class PaperAlignedRuntimeGate:
         )
 
     @staticmethod
+    def _pose_safe_motion_not_worse(candidate_pose_delta: dict[str, Any], tolerance: float = 1.05) -> bool:
+        if not bool(candidate_pose_delta.get("available", False)):
+            return True
+        baseline_motion_error = float(candidate_pose_delta.get("baseline_motion_error", 0.0) or 0.0)
+        memory_motion_error = float(candidate_pose_delta.get("memory_motion_error", 0.0) or 0.0)
+        if baseline_motion_error <= 0.0 or memory_motion_error <= 0.0:
+            return True
+        return bool(memory_motion_error <= float(tolerance) * baseline_motion_error)
+
+    @staticmethod
     def _pose_safe_debug_quality(debug: dict[str, Any] | None) -> dict[str, float | int]:
         debug = dict(debug or {})
         correspondences = max(int(debug.get("num_2d3d_correspondences", 0) or 0), 1)
@@ -1052,11 +1064,14 @@ class PaperAlignedRuntimeGate:
         current_keyframe_count: int,
         baseline_quality: dict[str, float | int],
         memory_quality: dict[str, float | int],
+        candidate_pose_delta: dict[str, Any] | None = None,
     ) -> bool:
         mature_stream = int(current_keyframe_count) >= 240 or int(frame_id) >= 900
         if not mature_stream:
             return False
         if int(memory_quality["pnp_inliers"]) < 128 or int(memory_quality["miniba_inliers"]) < 256:
+            return False
+        if not PaperAlignedRuntimeGate._pose_safe_motion_not_worse(dict(candidate_pose_delta or {})):
             return False
         baseline_score = max(float(baseline_quality["score"]), 1.0)
         baseline_ratio = max(float(baseline_quality["pnp_ratio"]), 1e-6)
