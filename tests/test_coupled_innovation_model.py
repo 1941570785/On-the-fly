@@ -373,6 +373,29 @@ class CoupledInnovationModelTests(unittest.TestCase):
             "pose_rep_streaming_memory_v1",
         )
 
+    def test_cli_accepts_pose_safe_streaming_memory_mode(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_direct_density_control",
+                "pose_safe_streaming_memory_v1",
+                "--paper_aligned_pose_memory_geometry_context",
+                "v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_direct_density_control,
+            "pose_safe_streaming_memory_v1",
+        )
+        self.assertEqual(args.paper_aligned_pose_memory_geometry_context, "v1")
+
     def test_runtime_gate_applies_coupled_preset_to_args_before_subsystems_use_them(self):
         args = _args(paper_aligned_tau_R_low=0.31, paper_aligned_recovery_delay_frames=4)
 
@@ -2829,6 +2852,171 @@ class CoupledInnovationModelTests(unittest.TestCase):
                 "hold_low_representation_value"
             )
         )
+
+    def test_pose_safe_streaming_memory_keeps_baseline_representation_contract(self):
+        controller = DirectDensityController(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+
+        baseline_keyframe = controller.decide(
+            frame_id=420,
+            runtime_action="direct_admit",
+            baseline_should_add=True,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=96.0,
+            local_density_before=96.0,
+            local_window_density=96.0,
+            local_window_keyframes=96,
+            local_window_gap_max=2.0,
+            local_window_gap_after_if_hold=2.0,
+            keyframe_growth_recent=30,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=1,
+            main_chain_gap_before=1.0,
+            main_chain_gap_after_if_hold=2.0,
+            anchor_changed=True,
+            support_triggered=False,
+            median_displacement=60.0,
+            displacement_threshold=30.0,
+            num_matches=2400,
+            min_num_inliers=100,
+            pose_inliers=1600,
+            novelty_proxy=0.95,
+            current_keyframe_count=390,
+            semantic_scores={"R_t": 0.0, "V_t": 0.99, "Q_t": 0.997, "C_t": 1.0, "B_R_t": 1.0},
+        )
+        pose_only_frame = controller.decide(
+            frame_id=421,
+            runtime_action="direct_admit",
+            baseline_should_add=False,
+            is_test=False,
+            is_bootstrap_phase=False,
+            density_before=96.0,
+            local_density_before=96.0,
+            local_window_density=96.0,
+            local_window_keyframes=96,
+            local_window_gap_max=2.0,
+            local_window_gap_after_if_hold=2.0,
+            keyframe_growth_recent=30,
+            baseline_relative_density=1.0,
+            source_gap_to_last_keyframe=1,
+            main_chain_gap_before=1.0,
+            main_chain_gap_after_if_hold=2.0,
+            anchor_changed=True,
+            support_triggered=False,
+            median_displacement=60.0,
+            displacement_threshold=30.0,
+            num_matches=2400,
+            min_num_inliers=100,
+            pose_inliers=1600,
+            novelty_proxy=0.95,
+            current_keyframe_count=390,
+            semantic_scores={"R_t": 0.0, "V_t": 0.99, "Q_t": 0.997, "C_t": 1.0, "B_R_t": 1.0},
+        )
+
+        self.assertTrue(controller.is_pose_safe_streaming_memory_v1)
+        self.assertTrue(controller.is_pose_rep_active_memory)
+        self.assertTrue(baseline_keyframe.finalize)
+        self.assertTrue(baseline_keyframe.debug["representation_updated"])
+        self.assertEqual(baseline_keyframe.decision, "finalize_baseline_repr")
+        self.assertFalse(pose_only_frame.finalize)
+        self.assertEqual(pose_only_frame.decision, "hold_pose_only_baseline_repr")
+        self.assertEqual(pose_only_frame.debug["active_memory_frame_role"], "tracking_only")
+
+    def test_pose_safe_streaming_memory_uses_strict_reference_pool_defaults(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+        summary = gate.pose_only_reference_pool_summary()
+
+        self.assertEqual(summary["selection_strategy"], "pose_safe")
+        self.assertTrue(summary["risk_gate_enabled"])
+        self.assertEqual(summary["max_per_query"], 1)
+        self.assertLessEqual(summary["ttl_frames"], 120)
+        self.assertGreaterEqual(summary["min_3d_points"], 500)
+        self.assertGreaterEqual(summary["min_match_score"], 240.0)
+        self.assertGreater(summary["min_geometry_score"], 0.0)
+
+    def test_pose_safe_streaming_memory_blocks_forest_like_repetitive_refs(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+        accepted = gate.register_pose_only_reference(
+            frame_id=640,
+            info={"is_test": False, "image_name": "forest_like"},
+            desc_kpts=_pose_pool_desc(support_count=850, match_score=520),
+            Rt=torch.eye(4),
+            density_debug={
+                "active_memory_context": True,
+                "active_memory_frame_role": "tracking_only",
+                "support_concentration": 0.07,
+                "new_view_event_score": 0.28,
+                "anchor_health_score": 0.74,
+                "keyframe_growth_recent": 8,
+                "inlier_grid_entropy": 0.97,
+                "pose_support_score": 0.90,
+                "match_support_score": 0.92,
+            },
+            pose_debug={"num_pnp_inliers": 420, "num_miniba_inliers": 360},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(
+            gate.pose_reference_pool_events[-1]["block_reason"],
+            "pose_only_repetitive_entropy_low_support",
+        )
+
+    def test_pose_safe_streaming_memory_selects_geometry_safe_ref_over_raw_match(self):
+        import torch
+
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+        rt = torch.eye(4)
+        for frame_id, name, match_score, support, new_view, anchor, entropy, pnp, miniba in [
+            (420, "raw_match_unsafe", 650, 0.091, 0.18, 0.68, 0.91, 260, 240),
+            (448, "geometry_safe_turn", 520, 0.180, 0.24, 0.58, 0.84, 450, 420),
+        ]:
+            self.assertTrue(
+                gate.register_pose_only_reference(
+                    frame_id=frame_id,
+                    info={"is_test": False, "image_name": name},
+                    desc_kpts=_pose_pool_desc(support_count=850, match_score=match_score),
+                    Rt=rt,
+                    density_debug={
+                        "active_memory_context": True,
+                        "active_memory_frame_role": "tracking_only",
+                        "support_concentration": support,
+                        "new_view_event_score": new_view,
+                        "anchor_health_score": anchor,
+                        "keyframe_growth_recent": 4,
+                        "inlier_grid_entropy": entropy,
+                        "pose_support_score": 0.90,
+                        "match_support_score": 0.92,
+                    },
+                    pose_debug={"num_pnp_inliers": pnp, "num_miniba_inliers": miniba},
+                )
+            )
+
+        selected = gate.select_pose_only_references(
+            frame_id=540,
+            curr_desc_kpts=_pose_pool_desc(match_score=0),
+            matcher=_PosePoolMatcher(),
+        )
+
+        self.assertEqual(
+            [ref.info["_paper_aligned_source_frame_id"] for ref in selected],
+            [448],
+        )
+        select_events = [
+            event for event in gate.pose_reference_pool_events
+            if event.get("event_type") == "pose_only_select_reference"
+        ]
+        self.assertEqual(select_events[0]["pose_only_selection_strategy"], "pose_safe")
+        self.assertGreater(select_events[0]["pose_only_geometry_score"], 100.0)
 
     def test_pose_memory_geometry_context_seeds_distributed_stable_pose_memory(self):
         gate = PaperAlignedRuntimeGate(

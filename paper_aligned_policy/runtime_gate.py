@@ -81,6 +81,7 @@ class PaperAlignedRuntimeGate:
         self.pose_only_reference_selection_cooldown_frames = 0
         self.pose_only_reference_age_bonus = 0.0
         self.pose_only_reference_selection_strategy = "match_age"
+        self.pose_only_reference_min_geometry_score = 0.0
         self.pose_only_reference_risk_gate_enabled = False
         self.pose_only_reference_min_support_concentration = 0.065
         self.pose_only_reference_low_new_view_max = 0.18
@@ -238,6 +239,30 @@ class PaperAlignedRuntimeGate:
             self.pose_only_reference_age_bonus = 16.0
             self.pose_only_reference_selection_strategy = "risk_aware"
             self.pose_only_reference_risk_gate_enabled = False
+        if getattr(self.direct_density_controller, "is_pose_safe_streaming_memory_v1", False):
+            self.pose_only_reference_pool_max_size = 20
+            self.pose_only_reference_ttl_frames = 120
+            self.pose_only_reference_min_age_frames = 8
+            self.pose_only_reference_min_3d_points = 500
+            self.pose_only_reference_max_per_query = 1
+            self.pose_only_reference_min_match_score = 240.0
+            self.pose_only_reference_register_min_interval_frames = 8
+            self.pose_only_reference_selection_cooldown_frames = 8
+            self.pose_only_reference_age_bonus = 4.0
+            self.pose_only_reference_selection_strategy = "pose_safe"
+            self.pose_only_reference_min_geometry_score = 92.0
+            self.pose_only_reference_risk_gate_enabled = True
+            self.pose_only_reference_min_support_concentration = 0.09
+            self.pose_only_reference_low_new_view_max = 0.20
+            self.pose_only_reference_high_new_view_min = 0.22
+            self.pose_only_reference_high_new_view_support_min = 0.15
+            self.pose_only_reference_high_new_view_anchor_health_max = 0.64
+            self.pose_only_reference_high_new_view_entropy_max = 0.90
+            self.pose_only_reference_growth_stall_max = 24
+            self.pose_only_reference_require_negative_growth = False
+            self.pose_only_reference_allow_high_new_view_rescue = True
+            self.pose_only_reference_repetitive_entropy_min = 0.94
+            self.pose_only_reference_repetitive_entropy_support_max = 0.09
         self._anchor_count_at_last_direct_finalize = 1
         if self.mode == "paper_aligned_semantic_v1":
             cfg = self.coupled_config
@@ -1492,12 +1517,17 @@ class PaperAlignedRuntimeGate:
                     float(self.pose_only_reference_ttl_frames), 1.0
                 )
                 geometry_score = 0.0
-                if selection_strategy == "risk_aware":
+                if selection_strategy in {"risk_aware", "pose_safe"}:
                     geometry_score = self._pose_only_reference_geometry_score(ref, support_count, age)
+                    if selection_strategy == "pose_safe" and geometry_score < float(
+                        self.pose_only_reference_min_geometry_score
+                    ):
+                        selected = False
                     diversity_score = score + geometry_score
                 else:
                     diversity_score = score + float(self.pose_only_reference_age_bonus) * age_bonus
-                scored.append((diversity_score, score, geometry_score, age, source_frame_id, ref))
+                if selected:
+                    scored.append((diversity_score, score, geometry_score, age, source_frame_id, ref))
         scored.sort(key=lambda item: (-item[0], -item[2], -item[3]))
         selected_refs = [item[5] for item in scored[:limit]]
         for ref in selected_refs:
@@ -1563,6 +1593,7 @@ class PaperAlignedRuntimeGate:
             ),
             "age_bonus": float(self.pose_only_reference_age_bonus),
             "selection_strategy": str(self.pose_only_reference_selection_strategy),
+            "min_geometry_score": float(self.pose_only_reference_min_geometry_score),
             "risk_gate_enabled": bool(self.pose_only_reference_risk_gate_enabled),
             "min_support_concentration": float(self.pose_only_reference_min_support_concentration),
             "low_new_view_max": float(self.pose_only_reference_low_new_view_max),

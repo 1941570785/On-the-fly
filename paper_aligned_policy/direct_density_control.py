@@ -352,7 +352,10 @@ class DirectDensityController:
                 getattr(args, "paper_aligned_stream_memory_candidate_budget_per_100", 10)
                 or 10
             )
-        if self.mode == "pose_only_ssm_baseline_repr_v1":
+        if self.mode in {
+            "pose_only_ssm_baseline_repr_v1",
+            "pose_safe_streaming_memory_v1",
+        }:
             self.density_lower = 0.0
             self.density_target = 100.0
             self.density_upper = 10_000.0
@@ -552,8 +555,16 @@ class DirectDensityController:
         return self.mode == "pose_only_ssm_baseline_repr_v1"
 
     @property
+    def is_pose_safe_streaming_memory_v1(self) -> bool:
+        return self.mode == "pose_safe_streaming_memory_v1"
+
+    @property
+    def is_pose_only_baseline_repr_family(self) -> bool:
+        return self.is_pose_only_ssm_baseline_repr_v1 or self.is_pose_safe_streaming_memory_v1
+
+    @property
     def is_streaming_memory_controller_v1(self) -> bool:
-        return self.is_pose_rep_streaming_memory_v1
+        return self.is_pose_rep_streaming_memory_v1 or self.is_pose_safe_streaming_memory_v1
 
     @property
     def is_pose_rep_active_memory(self) -> bool:
@@ -576,11 +587,12 @@ class DirectDensityController:
             "pose_rep_active_memory_v33",
             "pose_rep_streaming_memory_v1",
             "pose_only_ssm_baseline_repr_v1",
+            "pose_safe_streaming_memory_v1",
         }
 
     @property
     def is_pose_memory_geometry_context_v1(self) -> bool:
-        return self.is_pose_rep_streaming_memory_v1 or (
+        return self.is_pose_rep_streaming_memory_v1 or self.is_pose_safe_streaming_memory_v1 or (
             self.pose_memory_geometry_context == "v1"
             and self.is_pose_rep_active_memory_v33
         )
@@ -690,7 +702,7 @@ class DirectDensityController:
         semantic_scores: dict[str, Any] | None = None,
         viewpoint_scores: dict[str, Any] | None = None,
     ) -> DirectFinalizationDecision:
-        if self.is_pose_only_ssm_baseline_repr_v1:
+        if self.is_pose_only_baseline_repr_family:
             return self._decide_pose_only_baseline_repr_v1(
                 frame_id=frame_id,
                 runtime_action=runtime_action,

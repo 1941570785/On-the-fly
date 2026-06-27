@@ -282,6 +282,7 @@ def get_args():
             'pose_rep_active_memory_v33',
             'pose_rep_streaming_memory_v1',
             'pose_only_ssm_baseline_repr_v1',
+            'pose_safe_streaming_memory_v1',
         ],
         help='Direct keyframe finalization density guard (not R/V/Q admission).',
     )
