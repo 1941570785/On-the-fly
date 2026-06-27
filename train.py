@@ -14,6 +14,7 @@
 import os
 import time
 import atexit
+import copy
 import json
 from collections import deque
 from pathlib import Path
@@ -370,6 +371,48 @@ if __name__ == "__main__":
                 "blocking_reason": str(reason or ""),
             }
         )
+
+    def _snapshot_pose_match_state(
+        curr_desc_kpts: Any,
+        ref_keyframes: list[Keyframe],
+        current_pose_index: int,
+    ) -> dict[str, dict[int, Any]]:
+        state = {"curr": {}, "refs": {}}
+        for keyframe in ref_keyframes:
+            ref_id = int(keyframe.index)
+            state["curr"][ref_id] = curr_desc_kpts.matches.get(ref_id, None)
+            state["refs"][ref_id] = keyframe.desc_kpts.matches.get(
+                int(current_pose_index), None
+            )
+        return state
+
+    def _restore_pose_match_state(
+        curr_desc_kpts: Any,
+        ref_keyframes: list[Keyframe],
+        current_pose_index: int,
+        state: dict[str, dict[int, Any]],
+    ) -> None:
+        for keyframe in ref_keyframes:
+            ref_id = int(keyframe.index)
+            curr_match = state.get("curr", {}).get(ref_id, None)
+            ref_match = state.get("refs", {}).get(ref_id, None)
+            if curr_match is None:
+                curr_desc_kpts.matches.pop(ref_id, None)
+            else:
+                curr_desc_kpts.matches[ref_id] = curr_match
+            if ref_match is None:
+                keyframe.desc_kpts.matches.pop(int(current_pose_index), None)
+            else:
+                keyframe.desc_kpts.matches[int(current_pose_index)] = ref_match
+
+    def _clone_pose_support(support: dict[str, Any]) -> dict[str, Any]:
+        cloned: dict[str, Any] = {}
+        for key, value in dict(support or {}).items():
+            if hasattr(value, "detach") and hasattr(value, "clone"):
+                cloned[key] = value.detach().clone()
+            else:
+                cloned[key] = copy.deepcopy(value)
+        return cloned
 
     def _attempt_recovery_pose_path(
         recovered: dict[str, Any],
@@ -1584,16 +1627,90 @@ if __name__ == "__main__":
                 prev_keyframes_for_pose = list(prev_keyframes) + list(pose_only_refs)
                 if runtime_gate is not None:
                     _append_candidate_trace(frameID)
-                    _append_chosen_reference_trace(frameID, frameID, prev_keyframes_for_pose)
                 increment_runtime(runtimes["tri"], start_time)
                 
                 start_time = time.time()
                 # 【姿态估计模块】增量姿态初始化：使用PnP-RANSAC和Mini-BA估计新帧位姿
                 if runtime_gate is not None:
                     runtime_gate.mark_pose_attempt(frameID)
-                Rt = pose_initializer.initialize_incremental(
-                    prev_keyframes_for_pose, desc_kpts, n_keyframes, info["is_test"], image
+                pose_safe_dual_candidate = bool(
+                    runtime_gate is not None
+                    and pose_only_refs
+                    and runtime_gate.direct_density_controller.is_pose_safe_streaming_memory_v1
                 )
+                pose_safe_memory_choice: dict[str, Any] = {}
+                if pose_safe_dual_candidate:
+                    all_trial_refs_by_id: dict[int, Keyframe] = {}
+                    for ref in list(prev_keyframes) + list(pose_only_refs):
+                        all_trial_refs_by_id[int(ref.index)] = ref
+                    all_trial_refs = list(all_trial_refs_by_id.values())
+                    initial_match_state = _snapshot_pose_match_state(
+                        desc_kpts, all_trial_refs, n_keyframes
+                    )
+
+                    Rt_baseline = pose_initializer.initialize_incremental(
+                        list(prev_keyframes), desc_kpts, n_keyframes, info["is_test"], image
+                    )
+                    baseline_debug = copy.deepcopy(
+                        getattr(pose_initializer, "last_incremental_debug", {}) or {}
+                    )
+                    baseline_support = _clone_pose_support(
+                        getattr(pose_initializer, "last_incremental_pose_support", {}) or {}
+                    )
+                    baseline_match_state = _snapshot_pose_match_state(
+                        desc_kpts, all_trial_refs, n_keyframes
+                    )
+
+                    _restore_pose_match_state(
+                        desc_kpts, all_trial_refs, n_keyframes, initial_match_state
+                    )
+                    Rt_memory = pose_initializer.initialize_incremental(
+                        prev_keyframes_for_pose, desc_kpts, n_keyframes, info["is_test"], image
+                    )
+                    memory_debug = copy.deepcopy(
+                        getattr(pose_initializer, "last_incremental_debug", {}) or {}
+                    )
+                    memory_support = _clone_pose_support(
+                        getattr(pose_initializer, "last_incremental_pose_support", {}) or {}
+                    )
+                    memory_match_state = _snapshot_pose_match_state(
+                        desc_kpts, all_trial_refs, n_keyframes
+                    )
+
+                    pose_safe_memory_choice = runtime_gate.choose_pose_safe_memory_pose(
+                        baseline_pose_success=Rt_baseline is not None,
+                        memory_pose_success=Rt_memory is not None,
+                        baseline_debug=baseline_debug,
+                        memory_debug=memory_debug,
+                        pose_only_reference_ids=[int(ref.index) for ref in pose_only_refs],
+                    )
+                    if bool(pose_safe_memory_choice.get("use_memory_pose", False)):
+                        Rt = Rt_memory
+                        pose_initializer.last_incremental_debug = memory_debug
+                        pose_initializer.last_incremental_pose_support = memory_support
+                        _restore_pose_match_state(
+                            desc_kpts, all_trial_refs, n_keyframes, memory_match_state
+                        )
+                    else:
+                        Rt = Rt_baseline
+                        prev_keyframes_for_pose = list(prev_keyframes)
+                        pose_initializer.last_incremental_debug = baseline_debug
+                        pose_initializer.last_incremental_pose_support = baseline_support
+                        _restore_pose_match_state(
+                            desc_kpts, all_trial_refs, n_keyframes, baseline_match_state
+                        )
+                    trace_ev = runtime_gate._get_event(frameID)
+                    if trace_ev is not None:
+                        trace_ev["pose_safe_dual_candidate"] = True
+                        trace_ev["pose_safe_memory_pose_decision"] = dict(
+                            pose_safe_memory_choice
+                        )
+                else:
+                    Rt = pose_initializer.initialize_incremental(
+                        prev_keyframes_for_pose, desc_kpts, n_keyframes, info["is_test"], image
+                    )
+                if runtime_gate is not None:
+                    _append_chosen_reference_trace(frameID, frameID, prev_keyframes_for_pose)
                 if runtime_gate is not None:
                     runtime_gate.annotate_pose_debug(
                         frameID, getattr(pose_initializer, "last_incremental_debug", {})

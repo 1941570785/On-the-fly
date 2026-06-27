@@ -3329,6 +3329,99 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertIn("and not pose_safe_tracking_only", train_source)
         self.assertIn("is_pose_only_baseline_repr_family", train_source)
 
+    def test_pose_safe_memory_pose_choice_rejects_weaker_or_unused_memory(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+
+        weaker = gate.choose_pose_safe_memory_pose(
+            baseline_pose_success=True,
+            memory_pose_success=True,
+            baseline_debug={
+                "num_2d3d_correspondences": 1000,
+                "num_pnp_inliers": 120,
+                "num_miniba_inliers": 96,
+                "pnp_ref_keyframe_ids": [1, 2, 3],
+                "miniba_ref_keyframe_ids": [1, 2, 3],
+            },
+            memory_debug={
+                "num_2d3d_correspondences": 980,
+                "num_pnp_inliers": 110,
+                "num_miniba_inliers": 92,
+                "pnp_ref_keyframe_ids": [1, 2, 3, 1001],
+                "miniba_ref_keyframe_ids": [1, 2, 3, 1001],
+            },
+            pose_only_reference_ids=[1001],
+        )
+
+        self.assertFalse(weaker["use_memory_pose"])
+        self.assertEqual(weaker["decision"], "baseline_pose")
+        self.assertEqual(weaker["reason"], "memory_quality_not_better")
+
+        unused = gate.choose_pose_safe_memory_pose(
+            baseline_pose_success=True,
+            memory_pose_success=True,
+            baseline_debug={
+                "num_2d3d_correspondences": 1000,
+                "num_pnp_inliers": 120,
+                "num_miniba_inliers": 96,
+                "pnp_ref_keyframe_ids": [1, 2, 3],
+                "miniba_ref_keyframe_ids": [1, 2, 3],
+            },
+            memory_debug={
+                "num_2d3d_correspondences": 1000,
+                "num_pnp_inliers": 150,
+                "num_miniba_inliers": 120,
+                "pnp_ref_keyframe_ids": [1, 2, 3],
+                "miniba_ref_keyframe_ids": [1, 2, 3],
+            },
+            pose_only_reference_ids=[1001],
+        )
+
+        self.assertFalse(unused["use_memory_pose"])
+        self.assertEqual(unused["reason"], "memory_reference_not_used")
+
+    def test_pose_safe_memory_pose_choice_accepts_stronger_memory(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+
+        decision = gate.choose_pose_safe_memory_pose(
+            baseline_pose_success=True,
+            memory_pose_success=True,
+            baseline_debug={
+                "num_2d3d_correspondences": 900,
+                "num_pnp_inliers": 90,
+                "num_miniba_inliers": 70,
+                "pnp_ref_keyframe_ids": [1, 2, 3],
+                "miniba_ref_keyframe_ids": [1, 2, 3],
+            },
+            memory_debug={
+                "num_2d3d_correspondences": 980,
+                "num_pnp_inliers": 126,
+                "num_miniba_inliers": 92,
+                "pnp_ref_keyframe_ids": [1, 2, 3, 1001],
+                "miniba_ref_keyframe_ids": [1, 2, 3, 1001],
+            },
+            pose_only_reference_ids=[1001],
+        )
+
+        self.assertTrue(decision["use_memory_pose"])
+        self.assertEqual(decision["decision"], "memory_pose")
+        self.assertEqual(decision["reason"], "memory_quality_improved")
+        self.assertGreater(decision["memory_score"], decision["baseline_score"])
+
+    def test_training_loop_dual_checks_pose_safe_memory_candidates(self):
+        train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(
+            encoding="utf-8-sig"
+        )
+
+        self.assertIn("_snapshot_pose_match_state", train_source)
+        self.assertIn("_restore_pose_match_state", train_source)
+        self.assertIn("_clone_pose_support", train_source)
+        self.assertIn("choose_pose_safe_memory_pose", train_source)
+        self.assertIn("pose_safe_dual_candidate", train_source)
+
     def test_training_loop_exports_pose_memory_geometry_context_to_viewpoint_scores(self):
         train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(
             encoding="utf-8-sig"

@@ -855,6 +855,112 @@ class PaperAlignedRuntimeGate:
             return False
         return str(phase) in {"bootstrap", "incremental"}
 
+    def choose_pose_safe_memory_pose(
+        self,
+        *,
+        baseline_pose_success: bool,
+        memory_pose_success: bool,
+        baseline_debug: dict[str, Any] | None = None,
+        memory_debug: dict[str, Any] | None = None,
+        pose_only_reference_ids: list[int] | None = None,
+    ) -> dict[str, Any]:
+        baseline_quality = self._pose_safe_debug_quality(baseline_debug)
+        memory_quality = self._pose_safe_debug_quality(memory_debug)
+        pose_only_ids = {int(x) for x in (pose_only_reference_ids or [])}
+        memory_used = bool(
+            pose_only_ids
+            & {
+                int(x)
+                for x in (
+                    list((memory_debug or {}).get("pnp_ref_keyframe_ids", []) or [])
+                    + list((memory_debug or {}).get("miniba_ref_keyframe_ids", []) or [])
+                )
+            }
+        )
+        decision = {
+            "decision": "baseline_pose",
+            "reason": "",
+            "use_memory_pose": False,
+            "baseline_success": bool(baseline_pose_success),
+            "memory_success": bool(memory_pose_success),
+            "memory_reference_used": bool(memory_used),
+            "baseline_score": float(baseline_quality["score"]),
+            "memory_score": float(memory_quality["score"]),
+            "baseline_pnp_ratio": float(baseline_quality["pnp_ratio"]),
+            "memory_pnp_ratio": float(memory_quality["pnp_ratio"]),
+            "baseline_pnp_inliers": int(baseline_quality["pnp_inliers"]),
+            "memory_pnp_inliers": int(memory_quality["pnp_inliers"]),
+            "baseline_miniba_inliers": int(baseline_quality["miniba_inliers"]),
+            "memory_miniba_inliers": int(memory_quality["miniba_inliers"]),
+        }
+        if not getattr(self.direct_density_controller, "is_pose_safe_streaming_memory_v1", False):
+            decision["reason"] = "mode_not_pose_safe_streaming_memory"
+            return decision
+        if not pose_only_ids:
+            decision["reason"] = "no_pose_only_reference"
+            return decision
+        if not bool(memory_pose_success):
+            decision["reason"] = "memory_pose_failed"
+            return decision
+        if not memory_used:
+            decision["reason"] = "memory_reference_not_used"
+            return decision
+        if not bool(baseline_pose_success):
+            strong_memory = (
+                int(memory_quality["pnp_inliers"]) >= 16
+                and int(memory_quality["miniba_inliers"]) >= 32
+                and float(memory_quality["pnp_ratio"]) >= 0.01
+            )
+            if strong_memory:
+                decision["decision"] = "memory_pose"
+                decision["reason"] = "baseline_failed_memory_pose_strong"
+                decision["use_memory_pose"] = True
+            else:
+                decision["reason"] = "baseline_failed_memory_quality_weak"
+            return decision
+
+        ratio_floor = max(
+            float(baseline_quality["pnp_ratio"]) * 0.80,
+            float(baseline_quality["pnp_ratio"]) - 0.02,
+        )
+        if (
+            float(memory_quality["pnp_ratio"]) < ratio_floor
+            and int(memory_quality["pnp_inliers"]) < int(baseline_quality["pnp_inliers"]) * 1.15
+        ):
+            decision["reason"] = "memory_ratio_drop"
+            return decision
+
+        required_gain = max(6.0, float(baseline_quality["score"]) * 0.03)
+        has_substantial_gain = (
+            float(memory_quality["score"]) >= float(baseline_quality["score"]) + required_gain
+            or int(memory_quality["miniba_inliers"]) >= int(baseline_quality["miniba_inliers"]) + 8
+            or int(memory_quality["pnp_inliers"]) >= int(baseline_quality["pnp_inliers"]) * 1.20
+        )
+        if has_substantial_gain:
+            decision["decision"] = "memory_pose"
+            decision["reason"] = "memory_quality_improved"
+            decision["use_memory_pose"] = True
+            return decision
+
+        decision["reason"] = "memory_quality_not_better"
+        return decision
+
+    @staticmethod
+    def _pose_safe_debug_quality(debug: dict[str, Any] | None) -> dict[str, float | int]:
+        debug = dict(debug or {})
+        correspondences = max(int(debug.get("num_2d3d_correspondences", 0) or 0), 1)
+        pnp_inliers = max(int(debug.get("num_pnp_inliers", 0) or 0), 0)
+        miniba_inliers = max(int(debug.get("num_miniba_inliers", 0) or 0), 0)
+        pnp_ratio = float(pnp_inliers) / float(correspondences)
+        score = float(miniba_inliers) + 0.25 * float(pnp_inliers) + 80.0 * pnp_ratio
+        return {
+            "correspondences": correspondences,
+            "pnp_inliers": pnp_inliers,
+            "miniba_inliers": miniba_inliers,
+            "pnp_ratio": pnp_ratio,
+            "score": score,
+        }
+
     def enqueue_density_hold_recovery_candidate(
         self,
         *,
