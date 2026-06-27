@@ -2977,6 +2977,33 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertFalse(weak)
         self.assertFalse(discard)
 
+    def test_pose_safe_streaming_memory_preserves_baseline_keyframe_skeleton(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+
+        self.assertTrue(
+            gate.should_pose_safe_preserve_baseline_keyframe(
+                action="defer_recoverable",
+                baseline_should_add=True,
+                phase="incremental",
+            )
+        )
+        self.assertFalse(
+            gate.should_pose_safe_preserve_baseline_keyframe(
+                action="defer_recoverable",
+                baseline_should_add=False,
+                phase="incremental",
+            )
+        )
+        self.assertFalse(
+            gate.should_pose_safe_preserve_baseline_keyframe(
+                action="direct_admit",
+                baseline_should_add=True,
+                phase="incremental",
+            )
+        )
+
     def test_pose_safe_streaming_memory_budgets_deferred_tracking_per_window(self):
         gate = PaperAlignedRuntimeGate(
             _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
@@ -3296,7 +3323,9 @@ class CoupledInnovationModelTests(unittest.TestCase):
         )
 
         self.assertIn("should_pose_safe_track_deferred", train_source)
+        self.assertIn("should_pose_safe_preserve_baseline_keyframe", train_source)
         self.assertIn("pose_safe_tracking_only", train_source)
+        self.assertIn("pose_safe_baseline_skeleton_forced", train_source)
         self.assertIn("is_pose_only_baseline_repr_family", train_source)
 
     def test_training_loop_exports_pose_memory_geometry_context_to_viewpoint_scores(self):

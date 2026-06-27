@@ -840,6 +840,21 @@ class PaperAlignedRuntimeGate:
             event["pose_safe_tracking_motion_ratio"] = float(motion_ratio)
         return True
 
+    def should_pose_safe_preserve_baseline_keyframe(
+        self,
+        *,
+        action: str,
+        baseline_should_add: bool,
+        phase: str,
+    ) -> bool:
+        if not getattr(self.direct_density_controller, "is_pose_safe_streaming_memory_v1", False):
+            return False
+        if not bool(baseline_should_add):
+            return False
+        if str(action) == "direct_admit":
+            return False
+        return str(phase) in {"bootstrap", "incremental"}
+
     def enqueue_density_hold_recovery_candidate(
         self,
         *,

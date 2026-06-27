@@ -1168,22 +1168,41 @@ if __name__ == "__main__":
             should_add_keyframe, runtime_action = runtime_gate.decide(
                 frameID, info, bool(baseline_should_add), phase=phase, evidence=evidence
             )
-            pose_safe_tracking_only = bool(
-                runtime_gate.should_pose_safe_track_deferred(
-                    frame_id=int(frameID),
+            pose_safe_baseline_skeleton_forced = bool(
+                runtime_gate.should_pose_safe_preserve_baseline_keyframe(
                     action=str(runtime_action),
+                    baseline_should_add=bool(baseline_should_add_frame),
                     phase=phase,
-                    evidence=evidence,
                 )
             )
-            if pose_safe_tracking_only:
+            if pose_safe_baseline_skeleton_forced:
                 should_add_keyframe = True
                 runtime_action = "direct_admit"
-                baseline_should_add_frame = False
                 trace_ev = runtime_gate._get_event(frameID)
                 if trace_ev is not None:
-                    trace_ev["pose_safe_tracking_only"] = True
-                    trace_ev["pose_safe_tracking_admitted_to_pose_path"] = True
+                    trace_ev["pose_safe_baseline_skeleton_forced"] = True
+                    trace_ev["admit_to_chain"] = True
+                    trace_ev["action_before_pose_safe_baseline_force"] = str(
+                        trace_ev.get("action", "")
+                    )
+                    trace_ev["action"] = "direct_admit"
+            else:
+                pose_safe_tracking_only = bool(
+                    runtime_gate.should_pose_safe_track_deferred(
+                        frame_id=int(frameID),
+                        action=str(runtime_action),
+                        phase=phase,
+                        evidence=evidence,
+                    )
+                )
+                if pose_safe_tracking_only:
+                    should_add_keyframe = True
+                    runtime_action = "direct_admit"
+                    baseline_should_add_frame = False
+                    trace_ev = runtime_gate._get_event(frameID)
+                    if trace_ev is not None:
+                        trace_ev["pose_safe_tracking_only"] = True
+                        trace_ev["pose_safe_tracking_admitted_to_pose_path"] = True
             baseline_eval_frame = bool(
                 info.get("_baseline_eval_frame", info.get("is_test", False))
             )
