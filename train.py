@@ -2505,7 +2505,11 @@ if __name__ == "__main__":
                             )
                         if not direct_keyframe_finalized:
                             should_add_keyframe = False
-                            if not info["is_test"] and update_prev_on_hold:
+                            if (
+                                not info["is_test"]
+                                and update_prev_on_hold
+                                and not pose_safe_tracking_only
+                            ):
                                 prev_desc_kpts = desc_kpts
                                 v2_payload["prev_desc_updated_on_hold"] = True
                                 if runtime_gate.direct_density_controller.is_v2221:

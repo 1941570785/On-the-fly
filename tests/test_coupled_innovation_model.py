@@ -3326,6 +3326,7 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertIn("should_pose_safe_preserve_baseline_keyframe", train_source)
         self.assertIn("pose_safe_tracking_only", train_source)
         self.assertIn("pose_safe_baseline_skeleton_forced", train_source)
+        self.assertIn("and not pose_safe_tracking_only", train_source)
         self.assertIn("is_pose_only_baseline_repr_family", train_source)
 
     def test_training_loop_exports_pose_memory_geometry_context_to_viewpoint_scores(self):
