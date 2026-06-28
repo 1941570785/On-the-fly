@@ -855,6 +855,57 @@ class PaperAlignedRuntimeGate:
             return False
         return str(phase) in {"bootstrap", "incremental"}
 
+    def should_probe_pose_safe_memory_pose(
+        self,
+        *,
+        frame_id: int,
+        current_keyframe_count: int,
+        baseline_pose_success: bool,
+        baseline_debug: dict[str, Any] | None = None,
+        pose_only_references: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        refs = list(pose_only_references or [])
+        baseline_quality = self._pose_safe_debug_quality(baseline_debug)
+        decision = {
+            "probe_memory_pose": False,
+            "reason": "",
+            "frame_id": int(frame_id),
+            "current_keyframe_count": int(current_keyframe_count),
+            "pose_only_reference_count": len(refs),
+            "baseline_success": bool(baseline_pose_success),
+            "baseline_pnp_ratio": float(baseline_quality["pnp_ratio"]),
+            "baseline_pnp_inliers": int(baseline_quality["pnp_inliers"]),
+            "baseline_miniba_inliers": int(baseline_quality["miniba_inliers"]),
+        }
+        if not getattr(self.direct_density_controller, "is_pose_safe_streaming_memory_v1", False):
+            decision["reason"] = "mode_not_pose_safe_streaming_memory"
+            return decision
+        if not refs:
+            decision["reason"] = "no_pose_only_reference"
+            return decision
+        if not bool(baseline_pose_success):
+            decision["probe_memory_pose"] = True
+            decision["reason"] = "baseline_pose_failed"
+            return decision
+
+        baseline_stable = bool(
+            int(baseline_quality["pnp_inliers"]) >= 512
+            and int(baseline_quality["miniba_inliers"]) >= 1024
+            and float(baseline_quality["pnp_ratio"]) >= 0.08
+        )
+        mature_stream = int(current_keyframe_count) >= 240 or int(frame_id) >= 900
+        if baseline_stable and not mature_stream:
+            decision["reason"] = "stable_baseline_pose_before_mature_stream"
+            return decision
+
+        decision["probe_memory_pose"] = True
+        decision["reason"] = (
+            "mature_stream_memory_probe"
+            if mature_stream and baseline_stable
+            else "baseline_pose_not_stable"
+        )
+        return decision
+
     def choose_pose_safe_memory_pose(
         self,
         *,
@@ -1021,10 +1072,12 @@ class PaperAlignedRuntimeGate:
         current_keyframe_count: int,
         candidate_pose_delta: dict[str, Any],
     ) -> bool:
-        if int(current_keyframe_count) >= 240 or int(frame_id) >= 900:
-            return True
         baseline_motion_error = float(candidate_pose_delta.get("baseline_motion_error", 0.0) or 0.0)
         memory_motion_error = float(candidate_pose_delta.get("memory_motion_error", 0.0) or 0.0)
+        if int(current_keyframe_count) >= 240 or int(frame_id) >= 900:
+            if baseline_motion_error <= 0.0 or memory_motion_error <= 0.0:
+                return True
+            return bool(memory_motion_error <= baseline_motion_error)
         return bool(
             baseline_motion_error >= 0.08
             and memory_motion_error > 0.0
@@ -1073,11 +1126,16 @@ class PaperAlignedRuntimeGate:
             return False
         if not PaperAlignedRuntimeGate._pose_safe_motion_not_worse(dict(candidate_pose_delta or {})):
             return False
+        baseline_motion_error = float((candidate_pose_delta or {}).get("baseline_motion_error", 0.0) or 0.0)
+        memory_motion_error = float((candidate_pose_delta or {}).get("memory_motion_error", 0.0) or 0.0)
+        if baseline_motion_error > 0.0 and memory_motion_error > 0.0:
+            if memory_motion_error > 0.80 * baseline_motion_error:
+                return False
         baseline_score = max(float(baseline_quality["score"]), 1.0)
         baseline_ratio = max(float(baseline_quality["pnp_ratio"]), 1e-6)
         return bool(
-            float(memory_quality["score"]) >= 0.70 * baseline_score
-            and float(memory_quality["pnp_ratio"]) >= 0.65 * baseline_ratio
+            float(memory_quality["score"]) >= 0.95 * baseline_score
+            and float(memory_quality["pnp_ratio"]) >= 0.90 * baseline_ratio
         )
 
     def enqueue_density_hold_recovery_candidate(

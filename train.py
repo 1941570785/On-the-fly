@@ -1777,50 +1777,70 @@ if __name__ == "__main__":
                         desc_kpts, all_trial_refs, n_keyframes
                     )
                     baseline_rng_after = _snapshot_torch_rng_state()
-
-                    _restore_pose_match_state(
-                        desc_kpts, all_trial_refs, n_keyframes, initial_match_state or {}
-                    )
-                    _restore_torch_rng_state(pose_safe_pose_rng_before)
-                    Rt_memory = pose_initializer.initialize_incremental(
-                        prev_keyframes_for_pose, desc_kpts, n_keyframes, info["is_test"], image
-                    )
-                    memory_debug = copy.deepcopy(
-                        getattr(pose_initializer, "last_incremental_debug", {}) or {}
-                    )
-                    memory_support = _clone_pose_support(
-                        getattr(pose_initializer, "last_incremental_pose_support", {}) or {}
-                    )
-                    memory_match_state = _snapshot_pose_match_state(
-                        desc_kpts, all_trial_refs, n_keyframes
-                    )
-                    memory_rng_after = _snapshot_torch_rng_state()
-
-                    pose_safe_candidate_delta = _pose_safe_pose_geometry_delta(
-                        Rt_baseline,
-                        Rt_memory,
-                        prev_keyframe.get_Rt() if "prev_keyframe" in locals() else None,
-                        list(viewpoint_pose_history),
-                        int(frameID),
-                    )
-                    pose_safe_memory_choice = runtime_gate.choose_pose_safe_memory_pose(
+                    pose_safe_memory_probe = runtime_gate.should_probe_pose_safe_memory_pose(
                         frame_id=int(frameID),
                         current_keyframe_count=int(n_keyframes),
                         baseline_pose_success=Rt_baseline is not None,
-                        memory_pose_success=Rt_memory is not None,
                         baseline_debug=baseline_debug,
-                        memory_debug=memory_debug,
-                        pose_only_reference_ids=[int(ref.index) for ref in pose_only_refs],
-                        candidate_pose_delta=pose_safe_candidate_delta,
+                        pose_only_references=pose_only_refs,
                     )
-                    if bool(pose_safe_memory_choice.get("use_memory_pose", False)):
-                        Rt = Rt_memory
-                        pose_initializer.last_incremental_debug = memory_debug
-                        pose_initializer.last_incremental_pose_support = memory_support
+                    if bool(pose_safe_memory_probe.get("probe_memory_pose", False)):
                         _restore_pose_match_state(
-                            desc_kpts, all_trial_refs, n_keyframes, memory_match_state
+                            desc_kpts, all_trial_refs, n_keyframes, initial_match_state or {}
                         )
-                        _restore_torch_rng_state(memory_rng_after)
+                        _restore_torch_rng_state(pose_safe_pose_rng_before)
+                        Rt_memory = pose_initializer.initialize_incremental(
+                            prev_keyframes_for_pose, desc_kpts, n_keyframes, info["is_test"], image
+                        )
+                        memory_debug = copy.deepcopy(
+                            getattr(pose_initializer, "last_incremental_debug", {}) or {}
+                        )
+                        memory_support = _clone_pose_support(
+                            getattr(pose_initializer, "last_incremental_pose_support", {}) or {}
+                        )
+                        memory_match_state = _snapshot_pose_match_state(
+                            desc_kpts, all_trial_refs, n_keyframes
+                        )
+                        memory_rng_after = _snapshot_torch_rng_state()
+
+                        pose_safe_candidate_delta = _pose_safe_pose_geometry_delta(
+                            Rt_baseline,
+                            Rt_memory,
+                            prev_keyframe.get_Rt() if "prev_keyframe" in locals() else None,
+                            list(viewpoint_pose_history),
+                            int(frameID),
+                        )
+                        pose_safe_memory_choice = runtime_gate.choose_pose_safe_memory_pose(
+                            frame_id=int(frameID),
+                            current_keyframe_count=int(n_keyframes),
+                            baseline_pose_success=Rt_baseline is not None,
+                            memory_pose_success=Rt_memory is not None,
+                            baseline_debug=baseline_debug,
+                            memory_debug=memory_debug,
+                            pose_only_reference_ids=[int(ref.index) for ref in pose_only_refs],
+                            candidate_pose_delta=pose_safe_candidate_delta,
+                        )
+                        pose_safe_memory_choice["memory_probe"] = True
+                        pose_safe_memory_choice["memory_probe_reason"] = str(
+                            pose_safe_memory_probe.get("reason", "")
+                        )
+                        if bool(pose_safe_memory_choice.get("use_memory_pose", False)):
+                            Rt = Rt_memory
+                            pose_initializer.last_incremental_debug = memory_debug
+                            pose_initializer.last_incremental_pose_support = memory_support
+                            _restore_pose_match_state(
+                                desc_kpts, all_trial_refs, n_keyframes, memory_match_state
+                            )
+                            _restore_torch_rng_state(memory_rng_after)
+                        else:
+                            Rt = Rt_baseline
+                            prev_keyframes_for_pose = list(prev_keyframes)
+                            pose_initializer.last_incremental_debug = baseline_debug
+                            pose_initializer.last_incremental_pose_support = baseline_support
+                            _restore_pose_match_state(
+                                desc_kpts, all_trial_refs, n_keyframes, baseline_match_state
+                            )
+                            _restore_torch_rng_state(baseline_rng_after)
                     else:
                         Rt = Rt_baseline
                         prev_keyframes_for_pose = list(prev_keyframes)
@@ -1830,6 +1850,18 @@ if __name__ == "__main__":
                             desc_kpts, all_trial_refs, n_keyframes, baseline_match_state
                         )
                         _restore_torch_rng_state(baseline_rng_after)
+                        pose_safe_memory_choice = {
+                            "decision": "baseline_pose",
+                            "reason": str(pose_safe_memory_probe.get("reason", "")),
+                            "use_memory_pose": False,
+                            "memory_probe": False,
+                            "memory_probe_decision": dict(pose_safe_memory_probe),
+                            "baseline_success": Rt_baseline is not None,
+                            "memory_success": False,
+                            "memory_reference_used": False,
+                            "frame_id": int(frameID),
+                            "current_keyframe_count": int(n_keyframes),
+                        }
                     trace_ev = runtime_gate._get_event(frameID)
                     if trace_ev is not None:
                         trace_ev["pose_safe_dual_candidate"] = True

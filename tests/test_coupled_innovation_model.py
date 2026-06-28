@@ -3524,7 +3524,55 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertTrue(decision["use_memory_pose"])
         self.assertEqual(decision["reason"], "memory_quality_improved")
 
-    def test_pose_safe_memory_pose_choice_accepts_late_mature_context(self):
+    def test_pose_safe_memory_probe_skips_when_baseline_pose_is_stable(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+
+        probe = gate.should_probe_pose_safe_memory_pose(
+            frame_id=240,
+            current_keyframe_count=104,
+            baseline_pose_success=True,
+            baseline_debug={
+                "num_2d3d_correspondences": 15000,
+                "num_pnp_inliers": 1600,
+                "num_miniba_inliers": 3200,
+            },
+            pose_only_references=[
+                SimpleNamespace(
+                    info={
+                        "_paper_aligned_source_frame_id": 220,
+                        "_paper_aligned_pose_only_pnp_inliers": 1600,
+                        "_paper_aligned_pose_only_miniba_inliers": 3200,
+                    }
+                )
+            ],
+        )
+
+        self.assertFalse(probe["probe_memory_pose"])
+        self.assertEqual(probe["reason"], "stable_baseline_pose_before_mature_stream")
+
+    def test_pose_safe_memory_probe_runs_when_baseline_pose_is_weak(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+
+        probe = gate.should_probe_pose_safe_memory_pose(
+            frame_id=240,
+            current_keyframe_count=104,
+            baseline_pose_success=True,
+            baseline_debug={
+                "num_2d3d_correspondences": 15000,
+                "num_pnp_inliers": 180,
+                "num_miniba_inliers": 360,
+            },
+            pose_only_references=[SimpleNamespace(info={"_paper_aligned_source_frame_id": 220})],
+        )
+
+        self.assertTrue(probe["probe_memory_pose"])
+        self.assertEqual(probe["reason"], "baseline_pose_not_stable")
+
+    def test_pose_safe_memory_pose_choice_accepts_late_mature_context_only_when_motion_improves(self):
         gate = PaperAlignedRuntimeGate(
             _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
         )
@@ -3552,7 +3600,7 @@ class CoupledInnovationModelTests(unittest.TestCase):
         )
         self.assertFalse(early["use_memory_pose"])
 
-        late = gate.choose_pose_safe_memory_pose(
+        weak_late = gate.choose_pose_safe_memory_pose(
             frame_id=950,
             current_keyframe_count=260,
             baseline_pose_success=True,
@@ -3581,8 +3629,39 @@ class CoupledInnovationModelTests(unittest.TestCase):
             },
         )
 
-        self.assertTrue(late["use_memory_pose"])
-        self.assertEqual(late["reason"], "late_mature_memory_context")
+        strong_late = gate.choose_pose_safe_memory_pose(
+            frame_id=950,
+            current_keyframe_count=260,
+            baseline_pose_success=True,
+            memory_pose_success=True,
+            baseline_debug={
+                "num_2d3d_correspondences": 9000,
+                "num_pnp_inliers": 640,
+                "num_miniba_inliers": 1280,
+                "pnp_ref_keyframe_ids": [1, 2, 3],
+                "miniba_ref_keyframe_ids": [1, 2, 3],
+            },
+            memory_debug={
+                "num_2d3d_correspondences": 9100,
+                "num_pnp_inliers": 620,
+                "num_miniba_inliers": 1240,
+                "pnp_ref_keyframe_ids": [1, 2, 3, 1001],
+                "miniba_ref_keyframe_ids": [1, 2, 3, 1001],
+            },
+            pose_only_reference_ids=[1001],
+            candidate_pose_delta={
+                "available": True,
+                "rotation_delta_deg": 0.3,
+                "center_delta_over_baseline_step": 0.04,
+                "baseline_motion_error": 0.10,
+                "memory_motion_error": 0.075,
+            },
+        )
+
+        self.assertFalse(weak_late["use_memory_pose"])
+        self.assertEqual(weak_late["reason"], "memory_quality_not_better")
+        self.assertTrue(strong_late["use_memory_pose"])
+        self.assertEqual(strong_late["reason"], "late_mature_memory_context")
 
     def test_pose_safe_memory_pose_choice_rejects_late_mature_context_when_motion_worse(self):
         gate = PaperAlignedRuntimeGate(
