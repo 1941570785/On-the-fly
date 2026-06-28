@@ -3031,6 +3031,13 @@ class CoupledInnovationModelTests(unittest.TestCase):
         )
         self.assertFalse(decisions[-1])
 
+    def test_pose_safe_streaming_memory_uses_tight_online_tracking_budget(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+
+        self.assertEqual(gate.pose_safe_tracking_budget_per_100, 10)
+
     def test_pose_safe_streaming_memory_uses_strict_reference_pool_defaults(self):
         gate = PaperAlignedRuntimeGate(
             _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")

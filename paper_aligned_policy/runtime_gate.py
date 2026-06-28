@@ -266,7 +266,7 @@ class PaperAlignedRuntimeGate:
             self.pose_only_reference_allow_high_new_view_rescue = True
             self.pose_only_reference_repetitive_entropy_min = 0.94
             self.pose_only_reference_repetitive_entropy_support_max = 0.09
-            self.pose_safe_tracking_budget_per_100 = 18
+            self.pose_safe_tracking_budget_per_100 = 10
         self._anchor_count_at_last_direct_finalize = 1
         if self.mode == "paper_aligned_semantic_v1":
             cfg = self.coupled_config
