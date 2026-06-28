@@ -2056,17 +2056,28 @@ if __name__ == "__main__":
                                 density_hold_recovery_bridge_tag = "pose_only_tracking_hold"
                         pose_only_reference_registered = False
                         pose_only_reference_pool_size = 0
-                        if (
+                        pose_only_registration_debug = dict(dbg)
+                        pose_only_registration_reason = ""
+                        if pose_safe_tracking_only:
+                            pose_only_registration_debug["active_memory_context"] = True
+                            pose_only_registration_debug["active_memory_frame_role"] = "tracking_only"
+                            pose_only_registration_debug["stream_memory_frame_identity"] = "pose-only"
+                            pose_only_registration_debug["stream_memory_write_action"] = "pose_safe_tracking_only_write"
+                            pose_only_registration_reason = "pose_safe_tracking_only"
+                        elif held_bridge:
+                            pose_only_registration_reason = "held_bridge"
+                        should_register_pose_only_reference = bool(
                             not direct_keyframe_finalized
-                            and held_bridge
+                            and (held_bridge or pose_safe_tracking_only)
                             and runtime_gate.direct_density_controller.is_pose_rep_active_memory
-                        ):
+                        )
+                        if should_register_pose_only_reference:
                             pose_only_reference_registered = runtime_gate.register_pose_only_reference(
                                 frame_id=int(frameID),
                                 info=info,
                                 desc_kpts=desc_kpts,
                                 Rt=Rt,
-                                density_debug=dbg,
+                                density_debug=pose_only_registration_debug,
                                 pose_debug=pose_debug_incr,
                                 pose_support=getattr(
                                     pose_initializer,
@@ -2083,6 +2094,9 @@ if __name__ == "__main__":
                                 )
                                 trace_ev["pose_only_reference_pool_size"] = int(
                                     pose_only_reference_pool_size
+                                )
+                                trace_ev["pose_only_registration_reason"] = str(
+                                    pose_only_registration_reason
                                 )
                         v2_payload = {
                             "frame_id": int(frameID),
@@ -2362,6 +2376,9 @@ if __name__ == "__main__":
                                 density_hold_recovery_enqueued
                             ),
                             "density_hold_recovery_bridge_tag": density_hold_recovery_bridge_tag,
+                            "pose_only_registration_reason": str(
+                                pose_only_registration_reason
+                            ),
                             "pose_only_reference_registered": bool(
                                 pose_only_reference_registered
                             ),

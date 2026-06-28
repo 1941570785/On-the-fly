@@ -3641,6 +3641,17 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertIn("_pose_safe_pose_geometry_delta", train_source)
         self.assertIn("candidate_pose_delta", train_source)
 
+    def test_training_loop_registers_pose_safe_tracking_only_frames_as_pose_memory(self):
+        train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(
+            encoding="utf-8-sig"
+        )
+
+        self.assertIn("pose_only_registration_debug", train_source)
+        self.assertIn("pose_safe_tracking_only", train_source)
+        self.assertIn('active_memory_frame_role"] = "tracking_only"', train_source)
+        self.assertIn("held_bridge or pose_safe_tracking_only", train_source)
+        self.assertIn("pose_only_registration_reason", train_source)
+
     def test_training_loop_exports_pose_memory_geometry_context_to_viewpoint_scores(self):
         train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(
             encoding="utf-8-sig"
