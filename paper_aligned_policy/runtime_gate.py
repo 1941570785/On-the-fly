@@ -805,10 +805,19 @@ class PaperAlignedRuntimeGate:
             return False
         if str(phase) != "incremental":
             return False
+        ev = dict(evidence or {})
         budget = int(self.pose_safe_tracking_budget_per_100)
+        scene_anchor_count = int(ev.get("scene_anchor_count", 0) or 0)
+        active_anchor_keyframe_count = int(ev.get("active_anchor_keyframe_count", 0) or 0)
+        anchor_stall_budget_boost = bool(
+            int(frame_id) >= 900
+            and scene_anchor_count <= 1
+            and active_anchor_keyframe_count >= 180
+        )
+        if anchor_stall_budget_boost:
+            budget = max(budget, 18)
         if budget <= 0:
             return False
-        ev = dict(evidence or {})
         if _to_bool(ev.get("is_test", False)):
             return False
         min_inliers = max(1, int(ev.get("min_num_inliers_threshold", 100) or 100))
@@ -836,6 +845,13 @@ class PaperAlignedRuntimeGate:
                 self._pose_safe_tracking_budget_used
             )
             event["pose_safe_tracking_budget_per_100"] = int(budget)
+            event["pose_safe_tracking_anchor_stall_budget_boost"] = bool(
+                anchor_stall_budget_boost
+            )
+            event["pose_safe_tracking_scene_anchor_count"] = int(scene_anchor_count)
+            event["pose_safe_tracking_active_anchor_keyframe_count"] = int(
+                active_anchor_keyframe_count
+            )
             event["pose_safe_tracking_num_matches"] = int(num_matches)
             event["pose_safe_tracking_motion_ratio"] = float(motion_ratio)
         return True

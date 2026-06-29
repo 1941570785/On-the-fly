@@ -1285,12 +1285,15 @@ if __name__ == "__main__":
             info["_desc_kpts"] = desc_kpts
             info["_inlier_evidence"] = {"num_matches": int(len(curr_prev_matches.kpts))}
             info["_local_context"] = {"phase": phase}
+            active_anchor_ids_for_gate = _active_anchor_keyframe_ids()
             evidence = {
                 "median_displacement": float(dist.median().item()) if len(dist) > 0 else 0.0,
                 "displacement_threshold": float(min_displacement),
                 "num_matches": int(len(curr_prev_matches.kpts)),
                 "min_num_inliers_threshold": int(args.min_num_inliers),
                 "is_test": bool(info.get("is_test", False)),
+                "scene_anchor_count": int(len(getattr(scene_model, "anchors", []) or [])),
+                "active_anchor_keyframe_count": int(len(active_anchor_ids_for_gate)),
                 "recent_pose_fail_rate": (
                     1.0 - (sum(recent_pose_success) / max(len(recent_pose_success), 1))
                     if len(recent_pose_success) > 0
