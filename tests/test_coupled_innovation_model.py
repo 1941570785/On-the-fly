@@ -3090,6 +3090,62 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertEqual(sum(1 for ok in decisions if ok), 10)
         self.assertFalse(decisions[-1])
 
+    def test_pose_safe_streaming_memory_boosts_budget_for_saturated_single_anchor_context(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+        evidence = {
+            "num_matches": 500,
+            "min_num_inliers_threshold": 100,
+            "median_displacement": 0.025,
+            "displacement_threshold": 0.030,
+            "recent_pose_fail_rate": 0.0,
+            "scene_anchor_count": 1,
+            "active_anchor_keyframe_count": 155,
+            "recent_viewpoint_new_view_event_score": 0.24,
+            "recent_viewpoint_anchor_health_score": 0.80,
+        }
+        decisions = [
+            gate.should_pose_safe_track_deferred(
+                frame_id=1300 + i,
+                action="defer_recoverable",
+                phase="incremental",
+                evidence=evidence,
+            )
+            for i in range(20)
+        ]
+
+        self.assertEqual(sum(1 for ok in decisions if ok), 18)
+        self.assertFalse(decisions[-1])
+
+    def test_pose_safe_streaming_memory_keeps_tight_budget_for_low_novelty_single_anchor_context(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+        evidence = {
+            "num_matches": 500,
+            "min_num_inliers_threshold": 100,
+            "median_displacement": 0.025,
+            "displacement_threshold": 0.030,
+            "recent_pose_fail_rate": 0.0,
+            "scene_anchor_count": 1,
+            "active_anchor_keyframe_count": 155,
+            "recent_viewpoint_new_view_event_score": 0.10,
+            "recent_viewpoint_anchor_health_score": 0.60,
+        }
+        decisions = [
+            gate.should_pose_safe_track_deferred(
+                frame_id=1300 + i,
+                action="defer_recoverable",
+                phase="incremental",
+                evidence=evidence,
+            )
+            for i in range(12)
+        ]
+
+        self.assertEqual(sum(1 for ok in decisions if ok), 10)
+        self.assertFalse(decisions[-1])
+
     def test_pose_safe_streaming_memory_uses_strict_reference_pool_defaults(self):
         gate = PaperAlignedRuntimeGate(
             _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")

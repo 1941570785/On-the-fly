@@ -809,12 +809,24 @@ class PaperAlignedRuntimeGate:
         budget = int(self.pose_safe_tracking_budget_per_100)
         scene_anchor_count = int(ev.get("scene_anchor_count", 0) or 0)
         active_anchor_keyframe_count = int(ev.get("active_anchor_keyframe_count", 0) or 0)
+        recent_new_view_score = float(
+            ev.get("recent_viewpoint_new_view_event_score", 0.0) or 0.0
+        )
+        recent_anchor_health_score = float(
+            ev.get("recent_viewpoint_anchor_health_score", 0.0) or 0.0
+        )
+        anchor_saturation_context_boost = bool(
+            int(frame_id) >= 900
+            and scene_anchor_count <= 1
+            and active_anchor_keyframe_count >= 145
+            and recent_new_view_score >= 0.18
+        )
         anchor_stall_budget_boost = bool(
             int(frame_id) >= 900
             and scene_anchor_count <= 1
             and active_anchor_keyframe_count >= 180
         )
-        if anchor_stall_budget_boost:
+        if anchor_stall_budget_boost or anchor_saturation_context_boost:
             budget = max(budget, 18)
         if budget <= 0:
             return False
@@ -848,9 +860,18 @@ class PaperAlignedRuntimeGate:
             event["pose_safe_tracking_anchor_stall_budget_boost"] = bool(
                 anchor_stall_budget_boost
             )
+            event["pose_safe_tracking_anchor_saturation_context_boost"] = bool(
+                anchor_saturation_context_boost
+            )
             event["pose_safe_tracking_scene_anchor_count"] = int(scene_anchor_count)
             event["pose_safe_tracking_active_anchor_keyframe_count"] = int(
                 active_anchor_keyframe_count
+            )
+            event["pose_safe_tracking_recent_new_view_score"] = float(
+                recent_new_view_score
+            )
+            event["pose_safe_tracking_recent_anchor_health_score"] = float(
+                recent_anchor_health_score
             )
             event["pose_safe_tracking_num_matches"] = int(num_matches)
             event["pose_safe_tracking_motion_ratio"] = float(motion_ratio)

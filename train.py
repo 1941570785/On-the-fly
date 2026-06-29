@@ -161,6 +161,7 @@ if __name__ == "__main__":
     bootstrap_desc_kpts = []
     recent_pose_success = deque(maxlen=50)
     viewpoint_pose_history = deque(maxlen=160)
+    last_viewpoint_coverage_event: dict[str, Any] = {}
 
     # Dict of runtimes for each step
     runtimes = ["Load", "BAB", "tri", "BAI", "Add", "Init", "Opt", "anc"]
@@ -1314,6 +1315,15 @@ if __name__ == "__main__":
                 "best_support_median_displacement": float(
                     (support_bridge_trace or {}).get("best_support_median_displacement", 0.0) or 0.0
                 ),
+                "recent_viewpoint_new_view_event_score": float(
+                    last_viewpoint_coverage_event.get("new_view_event_score", 0.0) or 0.0
+                ),
+                "recent_viewpoint_anchor_health_score": float(
+                    last_viewpoint_coverage_event.get("anchor_health_score", 0.0) or 0.0
+                ),
+                "recent_viewpoint_active_anchor_keyframe_count": int(
+                    last_viewpoint_coverage_event.get("active_anchor_keyframe_count", 0) or 0
+                ),
             }
             should_add_keyframe, runtime_action = runtime_gate.decide(
                 frameID, info, bool(baseline_should_add), phase=phase, evidence=evidence
@@ -1965,6 +1975,7 @@ if __name__ == "__main__":
                         except Exception:
                             history_Rt = Rt
                         viewpoint_pose_history.append((int(frameID), history_Rt))
+                        last_viewpoint_coverage_event = dict(viewpoint_coverage_event)
                     pose_debug_incr = getattr(
                         pose_initializer, "last_incremental_debug", {}
                     ) or {}
