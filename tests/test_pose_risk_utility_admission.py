@@ -93,6 +93,61 @@ class PoseRiskUtilityAdmissionTests(unittest.TestCase):
         self.assertTrue(decision["isolated"])
         self.assertFalse(decision["review"])
 
+    def test_moderate_risk_low_utility_frame_keeps_baseline_admission(self):
+        gate = PoseRiskUtilityAdmissionGate(
+            mode="active_v1",
+            utility_threshold=0.24,
+            isolation_risk_margin=0.04,
+        )
+        decision = gate.evaluate(
+            frame_id=31,
+            risk_event=risk_event(risk_score=0.12, risk_threshold=0.10),
+            render_probe={
+                "coverage_deficit": 0.0,
+                "residual_selectivity": 0.10,
+                "new_view_event_score": 0.05,
+            },
+            baseline_selected=True,
+            is_test=False,
+            is_bootstrap=False,
+        )
+
+        self.assertEqual(decision["decision"], "admit_conservative")
+        self.assertFalse(decision["isolated"])
+
+    def test_isolation_cooldown_prevents_burst_frame_removal(self):
+        gate = PoseRiskUtilityAdmissionGate(
+            mode="active_v1",
+            utility_threshold=0.24,
+            isolation_risk_margin=0.04,
+            isolation_cooldown_frames=24,
+        )
+        probe = {
+            "coverage_deficit": 0.0,
+            "residual_selectivity": 0.10,
+            "new_view_event_score": 0.05,
+        }
+        first = gate.evaluate(
+            frame_id=100,
+            risk_event=risk_event(risk_score=0.16, risk_threshold=0.10),
+            render_probe=probe,
+            baseline_selected=True,
+            is_test=False,
+            is_bootstrap=False,
+        )
+        second = gate.evaluate(
+            frame_id=110,
+            risk_event=risk_event(risk_score=0.17, risk_threshold=0.10),
+            render_probe=probe,
+            baseline_selected=True,
+            is_test=False,
+            is_bootstrap=False,
+        )
+
+        self.assertEqual(first["decision"], "isolate_low_utility")
+        self.assertEqual(second["decision"], "cooldown_admit")
+        self.assertFalse(second["isolated"])
+
     def test_observe_mode_records_suggestion_without_changing_admission(self):
         gate = PoseRiskUtilityAdmissionGate(
             mode="observe_v1", utility_threshold=0.25

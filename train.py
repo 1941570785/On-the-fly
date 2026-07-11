@@ -202,10 +202,20 @@ if __name__ == "__main__":
         pose_risk_utility_gate = PoseRiskUtilityAdmissionGate(
             mode=pose_risk_utility_admission_mode,
             utility_threshold=float(
-                getattr(args, "pose_risk_utility_threshold", 0.25)
+                getattr(args, "pose_risk_utility_threshold", 0.24)
             ),
             selectivity_reference=float(
                 getattr(args, "pose_risk_utility_selectivity_reference", 1.8)
+            ),
+            isolation_risk_margin=float(
+                getattr(args, "pose_risk_utility_isolation_risk_margin", 0.04)
+            ),
+            isolation_cooldown_frames=int(
+                getattr(
+                    args,
+                    "pose_risk_utility_isolation_cooldown_frames",
+                    24,
+                )
             ),
         )
         pose_risk_utility_trace_path = (

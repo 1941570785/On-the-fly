@@ -89,17 +89,26 @@ class PoseRiskUtilityAdmissionGate:
         self,
         *,
         mode: str = "off",
-        utility_threshold: float = 0.25,
+        utility_threshold: float = 0.24,
         selectivity_reference: float = 1.8,
+        isolation_risk_margin: float = 0.04,
+        isolation_cooldown_frames: int = 24,
     ) -> None:
         normalized_mode = str(mode or "off").strip().lower()
         if normalized_mode not in POSE_RISK_UTILITY_MODES:
             raise ValueError(f"Unsupported pose risk utility mode: {mode}")
         self.mode = normalized_mode
-        self.utility_threshold = _clamp01(utility_threshold, 0.25)
+        self.utility_threshold = _clamp01(utility_threshold, 0.24)
         self.selectivity_reference = max(
             1e-6, _as_float(selectivity_reference, 1.8)
         )
+        self.isolation_risk_margin = max(
+            0.0, _as_float(isolation_risk_margin, 0.04)
+        )
+        self.isolation_cooldown_frames = max(
+            0, int(isolation_cooldown_frames)
+        )
+        self.last_isolated_frame_id = -1
         self.events: list[dict[str, Any]] = []
 
     def evaluate(
@@ -131,13 +140,28 @@ class PoseRiskUtilityAdmissionGate:
             new_view_event_score=new_view_event_score,
             selectivity_reference=self.selectivity_reference,
         )
-        suggested_decision = (
-            "review_admit"
-            if candidate and utility_score >= self.utility_threshold
-            else "isolate_low_utility"
-            if candidate
-            else "admit"
+        risk_score = _as_float(risk_event.get("risk_score"))
+        risk_threshold = _as_float(risk_event.get("risk_threshold"))
+        risk_margin = risk_score - risk_threshold
+        strong_isolation_risk = bool(
+            risk_event.get("severe_pose_risk", False)
+            or risk_margin >= self.isolation_risk_margin
         )
+        cooldown_active = bool(
+            self.last_isolated_frame_id >= 0
+            and int(frame_id) - self.last_isolated_frame_id
+            < self.isolation_cooldown_frames
+        )
+        if not candidate:
+            suggested_decision = "admit"
+        elif utility_score >= self.utility_threshold:
+            suggested_decision = "review_admit"
+        elif not strong_isolation_risk:
+            suggested_decision = "admit_conservative"
+        elif cooldown_active:
+            suggested_decision = "cooldown_admit"
+        else:
+            suggested_decision = "isolate_low_utility"
 
         if not baseline_selected:
             decision = "bypass_not_selected"
@@ -151,6 +175,8 @@ class PoseRiskUtilityAdmissionGate:
             decision = "observe"
         else:
             decision = suggested_decision
+        if decision == "isolate_low_utility":
+            self.last_isolated_frame_id = int(frame_id)
 
         event = {
             "frame_id": int(frame_id),
@@ -168,8 +194,11 @@ class PoseRiskUtilityAdmissionGate:
             "probe_required": bool(candidate and not render_probe),
             "review": bool(decision == "review_admit"),
             "isolated": bool(decision == "isolate_low_utility"),
-            "risk_score": _as_float(risk_event.get("risk_score")),
-            "risk_threshold": _as_float(risk_event.get("risk_threshold")),
+            "risk_score": risk_score,
+            "risk_threshold": risk_threshold,
+            "risk_margin": float(risk_margin),
+            "strong_isolation_risk": strong_isolation_risk,
+            "cooldown_active": cooldown_active,
             "pose_uncertainty": _as_float(risk_event.get("pose_uncertainty")),
             "utility_score": float(utility_score),
             "utility_threshold": float(self.utility_threshold),
@@ -198,6 +227,8 @@ class PoseRiskUtilityAdmissionGate:
             "review_admit": int(decisions.count("review_admit")),
             "isolate_low_utility": int(decisions.count("isolate_low_utility")),
             "observe": int(decisions.count("observe")),
+            "admit_conservative": int(decisions.count("admit_conservative")),
+            "cooldown_admit": int(decisions.count("cooldown_admit")),
             "utility_score_mean": mean("utility_score"),
             "coverage_deficit_mean": mean("coverage_deficit"),
             "residual_selectivity_mean": mean("residual_selectivity"),
@@ -211,6 +242,8 @@ class PoseRiskUtilityAdmissionGate:
                 "mode": self.mode,
                 "utility_threshold": self.utility_threshold,
                 "selectivity_reference": self.selectivity_reference,
+                "isolation_risk_margin": self.isolation_risk_margin,
+                "isolation_cooldown_frames": self.isolation_cooldown_frames,
             },
             "summary": self.summary(),
             "events": self.events,

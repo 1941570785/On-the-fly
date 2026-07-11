@@ -196,7 +196,7 @@ def get_args():
     parser.add_argument(
         '--pose_risk_utility_threshold',
         type=float,
-        default=0.25,
+        default=0.24,
         help='Minimum representation utility for retaining a pose-risk candidate with pose-only review.',
     )
     parser.add_argument(
@@ -210,6 +210,18 @@ def get_args():
         type=int,
         default=4,
         help='Spatial downsampling factor for the risk-candidate rendering probe.',
+    )
+    parser.add_argument(
+        '--pose_risk_utility_isolation_risk_margin',
+        type=float,
+        default=0.04,
+        help='Minimum risk excess above the adaptive threshold before low-utility isolation is allowed.',
+    )
+    parser.add_argument(
+        '--pose_risk_utility_isolation_cooldown_frames',
+        type=int,
+        default=24,
+        help='Minimum source-frame interval between low-utility isolation decisions.',
     )
     parser.add_argument(
         '--pose_risk_utility_review_iterations',

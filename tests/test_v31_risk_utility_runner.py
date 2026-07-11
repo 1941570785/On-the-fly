@@ -44,7 +44,11 @@ class V31RiskUtilityRunnerTests(unittest.TestCase):
             joined = " ".join(command)
             self.assertIn("baseline_render_lock_intra_frame_v31", joined)
             self.assertIn("--pose_initialization_risk_mode observe_v1", joined)
-            self.assertIn("--pose_risk_utility_threshold 0.25", joined)
+            self.assertIn("--pose_risk_utility_threshold 0.24", joined)
+            self.assertIn("--pose_risk_utility_isolation_risk_margin 0.04", joined)
+            self.assertIn(
+                "--pose_risk_utility_isolation_cooldown_frames 24", joined
+            )
         self.assertIn("observe_v1", " ".join(commands["V31_RU_observe"]))
         self.assertIn("active_v1", " ".join(commands["V31_RU_active"]))
 
