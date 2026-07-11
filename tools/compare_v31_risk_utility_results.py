@@ -11,11 +11,18 @@ from typing import Any
 
 import numpy as np
 
-from tools.standard_pose_eval_report import (
-    fit_similarity_w2c,
-    pose_errors,
-    relative_pose_errors,
-)
+try:
+    from tools.standard_pose_eval_report import (
+        fit_similarity_w2c,
+        pose_errors,
+        relative_pose_errors,
+    )
+except ModuleNotFoundError:
+    from standard_pose_eval_report import (
+        fit_similarity_w2c,
+        pose_errors,
+        relative_pose_errors,
+    )
 
 
 REFERENCE_DIRS = {
@@ -222,7 +229,7 @@ def compare_scene(scene: str, new_model_dir: Path, *, rpe_delta: int = 1) -> lis
     trajectories = {
         "baseline": metadata_trajectory(method_dirs["baseline"]),
         "v31": metadata_trajectory(method_dirs["v31"]),
-        "new": risk_trace_trajectory(method_dirs["new"]),
+        "new": metadata_trajectory(method_dirs["new"]),
     }
     pose = evaluate_three_way_pose(trajectories, rpe_delta=rpe_delta)
     quality = aligned_quality_means(
@@ -259,6 +266,16 @@ def compare_scene(scene: str, new_model_dir: Path, *, rpe_delta: int = 1) -> lis
             if method == "new"
             else 0,
             "isolate_low_utility": utility_summary.get("isolate_low_utility", 0)
+            if method == "new"
+            else 0,
+            "pose_reference_quarantined": utility_summary.get(
+                "pose_reference_quarantined", 0
+            )
+            if method == "new"
+            else 0,
+            "quarantine_cooldown_admit": utility_summary.get(
+                "quarantine_cooldown_admit", 0
+            )
             if method == "new"
             else 0,
             "model_dir": str(method_dirs[method]),
@@ -302,7 +319,7 @@ def write_report(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         "",
         "All quality and pose values use one common frame set per scene. APE/RPE translation units follow each dataset coordinate scale.",
         "",
-        "| Scene | Method | Quality/Pose Frames | PSNR | SSIM | LPIPS | APE-t | APE-R (deg) | RPE-t | RPE-R (deg) | Time (s) | Review/Isolate |",
+        "| Scene | Method | Quality/Pose Frames | PSNR | SSIM | LPIPS | APE-t | APE-R (deg) | RPE-t | RPE-R (deg) | Time (s) | Review/Drop/Pose-Q |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
@@ -310,8 +327,41 @@ def write_report(output_dir: Path, rows: list[dict[str, Any]]) -> None:
             "| {scene} | {method} | {quality_common_frames}/{pose_common_frames} | "
             "{PSNR:.4f} | {SSIM:.4f} | {LPIPS:.4f} | {APE_t:.5f} | "
             "{APE_R_deg:.4f} | {RPE_t:.5f} | {RPE_R_deg:.4f} | {time} | "
-            "{review_admit}/{isolate_low_utility} |".format(**row)
+            "{review_admit}/{isolate_low_utility}/{pose_reference_quarantined} |".format(
+                **row
+            )
         )
+    lines.extend(
+        [
+            "",
+            "## New Model Deltas",
+            "",
+            "Negative LPIPS, APE, RPE, and time deltas indicate improvement.",
+            "",
+            "| Scene | Reference | dPSNR | dSSIM | dLPIPS | dAPE-t | dAPE-R | dRPE-t | dRPE-R | dTime (s) |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in rows:
+        if row["method"] != "new":
+            continue
+        for reference in ("baseline", "v31"):
+            lines.append(
+                "| {scene} | {reference} | {d_psnr:+.4f} | {d_ssim:+.4f} | "
+                "{d_lpips:+.4f} | {d_ape_t:+.5f} | {d_ape_r:+.4f} | "
+                "{d_rpe_t:+.5f} | {d_rpe_r:+.4f} | {d_time:+.3f} |".format(
+                    scene=row["scene"],
+                    reference=reference,
+                    d_psnr=row[f"delta_PSNR_to_{reference}"],
+                    d_ssim=row[f"delta_SSIM_to_{reference}"],
+                    d_lpips=row[f"delta_LPIPS_to_{reference}"],
+                    d_ape_t=row[f"delta_APE_t_to_{reference}"],
+                    d_ape_r=row[f"delta_APE_R_deg_to_{reference}"],
+                    d_rpe_t=row[f"delta_RPE_t_to_{reference}"],
+                    d_rpe_r=row[f"delta_RPE_R_deg_to_{reference}"],
+                    d_time=row[f"delta_time_to_{reference}"],
+                )
+            )
     (output_dir / "three_way_comparison.md").write_text(
         "\n".join(lines) + "\n", encoding="utf-8"
     )

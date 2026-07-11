@@ -20,6 +20,11 @@ SCENE_SOURCES = {
     "forest1": "/data2/zxd/3D_Reconstruction/On_the_fly_padded_datasets/StaticHikes/forest1",
 }
 
+SCENE_TEST_HOLD = {
+    "bonsai": 8,
+    "forest1": 10,
+}
+
 V31_ARGS = (
     "--risk_admission_mode",
     "on_the_fly_innovation_v1",
@@ -137,6 +142,7 @@ class ExperimentSpec:
     scene: str
     variant: str
     source: str
+    test_hold: int
     model_dir: Path
     extra_args: tuple[str, ...]
 
@@ -147,6 +153,7 @@ def build_specs(output_root: Path, scenes: list[str]) -> list[ExperimentSpec]:
             scene=scene,
             variant=variant,
             source=SCENE_SOURCES[scene],
+            test_hold=SCENE_TEST_HOLD[scene],
             model_dir=output_root / scene / variant / "model",
             extra_args=extra_args,
         )
@@ -164,7 +171,7 @@ def build_command(spec: ExperimentSpec, args: argparse.Namespace) -> list[str]:
         "-m",
         str(spec.model_dir),
         "--test_hold",
-        str(args.test_hold),
+        str(int(args.test_hold) if int(args.test_hold) > 0 else spec.test_hold),
         "--test_frequency",
         str(args.test_frequency),
         *spec.extra_args,
@@ -207,6 +214,9 @@ def summarize_run(spec: ExperimentSpec, returncode: int) -> dict[str, Any]:
         "isolate_low_utility": summary.get("isolate_low_utility", 0),
         "admit_conservative": summary.get("admit_conservative", 0),
         "cooldown_admit": summary.get("cooldown_admit", 0),
+        "quarantine_cooldown_admit": summary.get(
+            "quarantine_cooldown_admit", 0
+        ),
         "pose_reference_quarantined": summary.get(
             "pose_reference_quarantined", 0
         ),
@@ -265,7 +275,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--only_scene", nargs="*", choices=sorted(SCENE_SOURCES), default=[]
     )
     parser.add_argument("--only_variant", nargs="*", default=[])
-    parser.add_argument("--test_hold", type=int, default=8)
+    parser.add_argument(
+        "--test_hold",
+        type=int,
+        default=0,
+        help="Override the scene protocol; 0 uses bonsai=8 and forest1=10.",
+    )
     parser.add_argument("--test_frequency", type=int, default=-1)
     parser.add_argument("--max_frames", type=int, default=0)
     parser.add_argument("--skip_existing", action="store_true")
