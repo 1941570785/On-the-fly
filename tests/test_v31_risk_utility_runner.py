@@ -54,6 +54,10 @@ class V31RiskUtilityRunnerTests(unittest.TestCase):
             self.assertIn(
                 "--pose_risk_utility_isolation_cooldown_frames 24", joined
             )
+            self.assertIn("--pose_risk_utility_quarantine_risk_margin 0.08", joined)
+            self.assertIn(
+                "--pose_risk_utility_quarantine_cooldown_frames 64", joined
+            )
         self.assertIn("observe_v1", " ".join(commands["V31_RU_observe"]))
         self.assertIn("active_v1", " ".join(commands["V31_RU_active"]))
         self.assertEqual(

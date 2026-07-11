@@ -217,6 +217,16 @@ if __name__ == "__main__":
                     24,
                 )
             ),
+            quarantine_risk_margin=float(
+                getattr(args, "pose_risk_utility_quarantine_risk_margin", 0.08)
+            ),
+            quarantine_cooldown_frames=int(
+                getattr(
+                    args,
+                    "pose_risk_utility_quarantine_cooldown_frames",
+                    64,
+                )
+            ),
         )
         pose_risk_utility_trace_path = (
             Path(args.model_path) / "pose_risk_utility_trace.json"

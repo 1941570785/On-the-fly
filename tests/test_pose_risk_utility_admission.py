@@ -245,7 +245,10 @@ class PoseRiskUtilityAdmissionTests(unittest.TestCase):
 
     def test_pose_quarantine_retains_render_frame_without_future_pose_use(self):
         gate = PoseRiskUtilityAdmissionGate(
-            mode="pose_quarantine_v1", utility_threshold=0.24
+            mode="pose_quarantine_v1",
+            utility_threshold=0.24,
+            quarantine_risk_margin=0.08,
+            quarantine_cooldown_frames=64,
         )
         decision = gate.evaluate(
             frame_id=70,
@@ -264,6 +267,47 @@ class PoseRiskUtilityAdmissionTests(unittest.TestCase):
         self.assertTrue(decision["pose_reference_quarantined"])
         self.assertFalse(decision["isolated"])
         self.assertFalse(decision["review"])
+
+    def test_pose_quarantine_requires_extreme_risk_and_has_cooldown(self):
+        gate = PoseRiskUtilityAdmissionGate(
+            mode="pose_quarantine_v1",
+            utility_threshold=0.24,
+            quarantine_risk_margin=0.08,
+            quarantine_cooldown_frames=64,
+        )
+        probe = {
+            "coverage_deficit": 0.0,
+            "residual_selectivity": 1.8,
+            "new_view_event_score": 0.50,
+        }
+        moderate = gate.evaluate(
+            frame_id=80,
+            risk_event=risk_event(risk_score=0.15, risk_threshold=0.10),
+            render_probe=probe,
+            baseline_selected=True,
+            is_test=False,
+            is_bootstrap=False,
+        )
+        extreme = gate.evaluate(
+            frame_id=100,
+            risk_event=risk_event(risk_score=0.20, risk_threshold=0.10),
+            render_probe=probe,
+            baseline_selected=True,
+            is_test=False,
+            is_bootstrap=False,
+        )
+        cooldown = gate.evaluate(
+            frame_id=120,
+            risk_event=risk_event(risk_score=0.21, risk_threshold=0.10),
+            render_probe=probe,
+            baseline_selected=True,
+            is_test=False,
+            is_bootstrap=False,
+        )
+
+        self.assertEqual(moderate["decision"], "admit_conservative")
+        self.assertEqual(extreme["decision"], "render_admit_pose_quarantine")
+        self.assertEqual(cooldown["decision"], "quarantine_cooldown_admit")
 
     def test_pose_reference_filter_keeps_render_keyframes_but_excludes_quarantine(self):
         class Frame:

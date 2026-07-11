@@ -117,6 +117,8 @@ class PoseRiskUtilityAdmissionGate:
         selectivity_reference: float = 1.8,
         isolation_risk_margin: float = 0.04,
         isolation_cooldown_frames: int = 24,
+        quarantine_risk_margin: float = 0.08,
+        quarantine_cooldown_frames: int = 64,
     ) -> None:
         normalized_mode = str(mode or "off").strip().lower()
         if normalized_mode not in POSE_RISK_UTILITY_MODES:
@@ -132,7 +134,14 @@ class PoseRiskUtilityAdmissionGate:
         self.isolation_cooldown_frames = max(
             0, int(isolation_cooldown_frames)
         )
+        self.quarantine_risk_margin = max(
+            0.0, _as_float(quarantine_risk_margin, 0.08)
+        )
+        self.quarantine_cooldown_frames = max(
+            0, int(quarantine_cooldown_frames)
+        )
         self.last_isolated_frame_id = -1
+        self.last_quarantined_frame_id = -1
         self.events: list[dict[str, Any]] = []
 
     def evaluate(
@@ -176,15 +185,26 @@ class PoseRiskUtilityAdmissionGate:
             and int(frame_id) - self.last_isolated_frame_id
             < self.isolation_cooldown_frames
         )
+        quarantine_risk = bool(
+            risk_event.get("severe_pose_risk", False)
+            or risk_margin >= self.quarantine_risk_margin
+        )
+        quarantine_cooldown_active = bool(
+            self.last_quarantined_frame_id >= 0
+            and int(frame_id) - self.last_quarantined_frame_id
+            < self.quarantine_cooldown_frames
+        )
         if self.mode == "pose_quarantine_v1":
             if not candidate:
                 suggested_decision = "admit"
+            elif not quarantine_risk:
+                suggested_decision = "admit_conservative"
+            elif quarantine_cooldown_active:
+                suggested_decision = "quarantine_cooldown_admit"
             elif utility_score >= self.utility_threshold:
                 suggested_decision = "render_admit_pose_quarantine"
-            elif strong_isolation_risk:
-                suggested_decision = "conservative_render_pose_quarantine"
             else:
-                suggested_decision = "admit_conservative"
+                suggested_decision = "conservative_render_pose_quarantine"
         else:
             if not candidate:
                 suggested_decision = "admit"
@@ -211,6 +231,11 @@ class PoseRiskUtilityAdmissionGate:
             decision = suggested_decision
         if decision == "isolate_low_utility":
             self.last_isolated_frame_id = int(frame_id)
+        if decision in {
+            "render_admit_pose_quarantine",
+            "conservative_render_pose_quarantine",
+        }:
+            self.last_quarantined_frame_id = int(frame_id)
 
         event = {
             "frame_id": int(frame_id),
@@ -240,6 +265,8 @@ class PoseRiskUtilityAdmissionGate:
             "risk_margin": float(risk_margin),
             "strong_isolation_risk": strong_isolation_risk,
             "cooldown_active": cooldown_active,
+            "quarantine_risk": quarantine_risk,
+            "quarantine_cooldown_active": quarantine_cooldown_active,
             "pose_uncertainty": _as_float(risk_event.get("pose_uncertainty")),
             "utility_score": float(utility_score),
             "utility_threshold": float(self.utility_threshold),
@@ -270,6 +297,9 @@ class PoseRiskUtilityAdmissionGate:
             "observe": int(decisions.count("observe")),
             "admit_conservative": int(decisions.count("admit_conservative")),
             "cooldown_admit": int(decisions.count("cooldown_admit")),
+            "quarantine_cooldown_admit": int(
+                decisions.count("quarantine_cooldown_admit")
+            ),
             "pose_reference_quarantined": int(
                 sum(bool(event["pose_reference_quarantined"]) for event in self.events)
             ),
@@ -288,6 +318,8 @@ class PoseRiskUtilityAdmissionGate:
                 "selectivity_reference": self.selectivity_reference,
                 "isolation_risk_margin": self.isolation_risk_margin,
                 "isolation_cooldown_frames": self.isolation_cooldown_frames,
+                "quarantine_risk_margin": self.quarantine_risk_margin,
+                "quarantine_cooldown_frames": self.quarantine_cooldown_frames,
             },
             "summary": self.summary(),
             "events": self.events,

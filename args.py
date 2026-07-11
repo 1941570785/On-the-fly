@@ -224,6 +224,18 @@ def get_args():
         help='Minimum source-frame interval between low-utility isolation decisions.',
     )
     parser.add_argument(
+        '--pose_risk_utility_quarantine_risk_margin',
+        type=float,
+        default=0.08,
+        help='Minimum risk excess for excluding a frame only from future pose references.',
+    )
+    parser.add_argument(
+        '--pose_risk_utility_quarantine_cooldown_frames',
+        type=int,
+        default=64,
+        help='Minimum source-frame interval between pose-reference quarantine decisions.',
+    )
+    parser.add_argument(
         '--pose_risk_utility_review_iterations',
         type=int,
         default=2,

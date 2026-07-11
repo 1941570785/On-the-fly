@@ -28,6 +28,10 @@ class V31RiskUtilityIntegrationTests(unittest.TestCase):
                 "0.05",
                 "--pose_risk_utility_isolation_cooldown_frames",
                 "20",
+                "--pose_risk_utility_quarantine_risk_margin",
+                "0.09",
+                "--pose_risk_utility_quarantine_cooldown_frames",
+                "48",
                 "--pose_risk_utility_review_iterations",
                 "2",
                 "--pose_risk_utility_review_min_coverage",
@@ -46,6 +50,8 @@ class V31RiskUtilityIntegrationTests(unittest.TestCase):
         self.assertEqual(args.pose_risk_utility_probe_downsample, 3)
         self.assertAlmostEqual(args.pose_risk_utility_isolation_risk_margin, 0.05)
         self.assertEqual(args.pose_risk_utility_isolation_cooldown_frames, 20)
+        self.assertAlmostEqual(args.pose_risk_utility_quarantine_risk_margin, 0.09)
+        self.assertEqual(args.pose_risk_utility_quarantine_cooldown_frames, 48)
         self.assertEqual(args.pose_risk_utility_review_iterations, 2)
         self.assertAlmostEqual(args.pose_risk_utility_review_min_coverage, 0.20)
         self.assertAlmostEqual(args.pose_risk_utility_review_max_rotation_deg, 1.2)
