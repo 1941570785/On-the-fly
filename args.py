@@ -150,6 +150,43 @@ def get_args():
         help='Risk admission mode. off keeps baseline runtime unchanged.',
     )
     parser.add_argument(
+        '--pose_initialization_risk_mode',
+        type=str,
+        default='off',
+        choices=['off', 'observe_v1', 'isolate_v1'],
+        help='Post-pose A-module mode. observe_v1 records risk; isolate_v1 also blocks risky training keyframes from representation updates.',
+    )
+    parser.add_argument(
+        '--pose_initialization_risk_absolute_threshold',
+        type=float,
+        default=0.10,
+        help='Absolute lower bound for the post-pose isolation threshold.',
+    )
+    parser.add_argument(
+        '--pose_initialization_risk_adaptive_sigma',
+        type=float,
+        default=2.0,
+        help='Robust-sigma multiplier used by the online adaptive risk threshold.',
+    )
+    parser.add_argument(
+        '--pose_initialization_risk_warmup',
+        type=int,
+        default=8,
+        help='Number of selected training frames observed before isolation can activate.',
+    )
+    parser.add_argument(
+        '--pose_initialization_risk_history_size',
+        type=int,
+        default=64,
+        help='Maximum number of recent selected-frame risk scores used for online calibration.',
+    )
+    parser.add_argument(
+        '--pose_initialization_risk_cooldown_frames',
+        type=int,
+        default=12,
+        help='Minimum source-frame interval between two representation-isolation decisions.',
+    )
+    parser.add_argument(
         '--paper_aligned_tau_R_low',
         type=float,
         default=None,
@@ -211,11 +248,25 @@ def get_args():
         help='Recovery commit bridge mode for semantic runtime.',
     )
     parser.add_argument(
+        '--paper_aligned_recovery_commit_materialization',
+        type=str,
+        default='off',
+        choices=['off', 'on', 'controlled'],
+        help='Allow true-source recovery commits to materialize render keyframes. controlled routes them through recovery commit control.',
+    )
+    parser.add_argument(
         '--paper_aligned_defer_recovery_support_bridge',
         type=str,
         default=None,
         choices=['off', 'v1'],
         help='Defer-recoverable recovery support bridge (anchor transition + reference propagation).',
+    )
+    parser.add_argument(
+        '--paper_aligned_support_bridge_keyframe_gate',
+        type=str,
+        default='off',
+        choices=['off', 'on'],
+        help='Allow support-bridge matches to override the baseline keyframe gate.',
     )
     parser.add_argument(
         '--paper_aligned_bridge_max_refs',
@@ -244,6 +295,7 @@ def get_args():
             'recovery_commit_rescue_v5',
             'recovery_commit_materialization_aware_v6',
             'recovery_commit_early_seed_v7',
+            'recovery_commit_sparse_late_v8',
         ],
         help='Post-success recovery commit control mode. off keeps prior behavior.',
     )
@@ -292,6 +344,658 @@ def get_args():
         default='off',
         choices=['off', 'v1'],
         help='Use online pose-memory geometry context to calibrate pose/representation decoupling.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_assimilation_profile',
+        type=str,
+        default='off',
+        choices=['off', 'render_frame_assimilation_v1', 'pose_only_render_skeleton_v1', 'pose_only_baseline_render_lock_v1', 'baseline_render_lock_intra_frame_v1', 'baseline_render_lock_intra_frame_v2', 'baseline_render_lock_intra_frame_v3', 'baseline_render_lock_intra_frame_v4', 'baseline_render_lock_intra_frame_v5', 'baseline_render_lock_intra_frame_v6', 'baseline_render_lock_intra_frame_v7', 'baseline_render_lock_intra_frame_v8', 'baseline_render_lock_intra_frame_v9', 'baseline_render_lock_intra_frame_v10', 'baseline_render_lock_intra_frame_v11', 'baseline_render_lock_intra_frame_v12', 'baseline_render_lock_intra_frame_v13', 'baseline_render_lock_intra_frame_v14', 'baseline_render_lock_intra_frame_v15', 'baseline_render_lock_intra_frame_v16', 'baseline_render_lock_intra_frame_v17', 'baseline_render_lock_intra_frame_v18', 'baseline_render_lock_intra_frame_v19', 'baseline_render_lock_intra_frame_v20', 'baseline_render_lock_intra_frame_v21', 'baseline_render_lock_intra_frame_v22', 'baseline_render_lock_intra_frame_v23', 'baseline_render_lock_intra_frame_v24', 'baseline_render_lock_intra_frame_v25', 'baseline_render_lock_intra_frame_v26', 'baseline_render_lock_intra_frame_v27', 'baseline_render_lock_intra_frame_v28', 'baseline_render_lock_intra_frame_v29', 'baseline_render_lock_intra_frame_v30', 'baseline_render_lock_intra_frame_v31', 'baseline_render_lock_intra_frame_v32', 'baseline_render_lock_intra_frame_v33', 'baseline_render_lock_intra_frame_v34', 'baseline_render_lock_intra_frame_v35', 'baseline_render_lock_intra_frame_v36', 'baseline_render_lock_intra_frame_v37', 'baseline_render_lock_intra_frame_v38', 'baseline_render_lock_intra_frame_v39', 'baseline_render_lock_intra_frame_v40', 'baseline_render_lock_intra_frame_v41', 'baseline_render_lock_intra_frame_v42', 'baseline_render_lock_intra_frame_v43', 'baseline_render_lock_intra_frame_v44', 'baseline_render_lock_intra_frame_v45', 'baseline_render_lock_intra_frame_v46', 'baseline_render_lock_intra_frame_v47', 'baseline_render_lock_intra_frame_v48', 'baseline_render_lock_intra_frame_v49', 'baseline_render_lock_intra_frame_v50', 'baseline_render_lock_intra_frame_v51', 'baseline_render_lock_intra_frame_v52', 'baseline_render_lock_intra_frame_v53', 'baseline_render_lock_intra_frame_v54', 'baseline_render_lock_intra_frame_v55', 'baseline_render_lock_intra_frame_v56', 'baseline_render_lock_intra_frame_v57', 'baseline_render_lock_intra_frame_v58', 'baseline_render_lock_intra_frame_v59', 'baseline_render_lock_intra_frame_v60', 'baseline_render_lock_intra_frame_v61', 'baseline_render_lock_intra_frame_v62', 'baseline_render_lock_intra_frame_v63', 'baseline_render_lock_intra_frame_v64'],
+        help='Preset that keeps baseline render-frame selection while applying pose-risk-aware render assimilation.',
+    )
+    parser.add_argument(
+        '--paper_aligned_render_frame_policy',
+        type=str,
+        default='off',
+        choices=['off', 'baseline_keyframe_lock_v1'],
+        help='Render-frame selection policy used by paper-aligned runtime gates.',
+    )
+    parser.add_argument(
+        '--paper_aligned_test_exposure_harmonization',
+        type=str,
+        default='neighbor_average_v1',
+        choices=['off', 'neighbor_average_v1', 'source_time_interp_v1', 'source_time_guarded_v1', 'source_time_adaptive_v2', 'dark_scene_off_guarded_v1'],
+        help='Exposure harmonization policy for held-out test render frames.',
+    )
+    parser.add_argument(
+        '--paper_aligned_test_exposure_guard_max_delta',
+        type=float,
+        default=0.0,
+        help='Max neighbor exposure matrix delta allowed before guarded source-time exposure falls back to baseline averaging.',
+    )
+    parser.add_argument(
+        '--paper_aligned_test_render_calibration',
+        type=str,
+        default='off',
+        choices=['off', 'diag_affine_v1'],
+        help='Per-held-out-frame render calibration applied after rendering. off preserves baseline metrics.',
+    )
+    parser.add_argument(
+        '--paper_aligned_training_background_mode',
+        type=str,
+        default='random_v1',
+        choices=['random_v1', 'fixed_black_v1', 'target_mean_v1', 'deterministic_random_v1', 'dark_scene_fixed_black_v1', 'mask_aware_fixed_black_v1', 'mask_aware_dark_scene_fixed_black_v1', 'mask_aware_dark_scene_deterministic_random_v1'],
+        help='Background color policy for online training renders; random_v1 preserves the baseline behavior.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_texture_sampling',
+        type=str,
+        default='off',
+        choices=['off', 'residual_edge_v1', 'residual_edge_response_guard_v2', 'residual_edge_response_guard_v4', 'residual_edge_response_guard_non_dark_v5', 'residual_edge_response_guard_mask_conservative_v6'],
+        help='Pose-render coupling for representation sampling. off keeps baseline/v8 sampling.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_texture_sampling_alpha',
+        type=float,
+        default=0.12,
+        help='Max residual-edge sampling redistribution strength; preserves total sampling budget.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_texture_sampling_min_selectivity',
+        type=float,
+        default=0.18,
+        help='Minimum residual-edge selectivity required before redistributing sampling probability.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_keyframe_sampling',
+        type=str,
+        default='off',
+        choices=['off', 'pose_confidence_temporal_v1'],
+        help='Pose-render confidence weighting for random training keyframe sampling. off keeps baseline sampling.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_keyframe_sampling_min_weight',
+        type=float,
+        default=0.35,
+        help='Minimum random-sampling weight for pose-risky keyframes in pose_confidence_temporal_v1.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_keyframe_sampling_max_pose_risk',
+        type=float,
+        default=0.38,
+        help='Pose risk above which pose_confidence_temporal_v1 uses the minimum sampling weight.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_keyframe_sampling_max_utility_drift',
+        type=float,
+        default=0.75,
+        help='Utility drift above which pose_confidence_temporal_v1 uses the minimum sampling weight.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_keyframe_sampling_min_pose_support',
+        type=float,
+        default=0.35,
+        help='Minimum pose support before pose_confidence_temporal_v1 uses the minimum sampling weight.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_keyframe_sampling_min_match_support',
+        type=float,
+        default=0.35,
+        help='Minimum match support before pose_confidence_temporal_v1 uses the minimum sampling weight.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_edge_loss',
+        type=str,
+        default='off',
+        choices=['off', 'gradient_v1', 'gradient_pose_safe_v1', 'gradient_pose_adaptive_v1'],
+        help='Pose-render coupling loss on image gradients. off keeps baseline/v8 optimization loss.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_edge_loss_weight',
+        type=float,
+        default=0.03,
+        help='Weight for pose-render edge consistency loss.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_edge_loss_max_pose_risk',
+        type=float,
+        default=0.50,
+        help='Maximum pose risk allowed by gradient_pose_safe_v1 edge loss.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_edge_loss_max_utility_drift',
+        type=float,
+        default=0.65,
+        help='Maximum utility drift risk allowed by gradient_pose_safe_v1 edge loss.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_edge_loss_min_pose_support',
+        type=float,
+        default=0.45,
+        help='Minimum pose support score required by gradient_pose_safe_v1 edge loss.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_edge_loss_min_match_support',
+        type=float,
+        default=0.45,
+        help='Minimum match support score required by gradient_pose_safe_v1 edge loss.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_edge_loss_min_weight_scale',
+        type=float,
+        default=0.25,
+        help='Minimum effective/base weight ratio for gradient_pose_adaptive_v1 edge loss.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_edge_loss_target_raw_loss',
+        type=float,
+        default=0.02,
+        help='Raw gradient residual target used to clip gradient_pose_adaptive_v1 edge weight.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_edge_loss_risk_free_threshold',
+        type=float,
+        default=0.25,
+        help='Posterior pose risk below which gradient_pose_adaptive_v1 preserves the base edge weight.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss',
+        type=str,
+        default='off',
+        choices=['off', 'mse_pose_safe_v1', 'robust_mse_pose_risk_v1', 'freq_mse_pose_risk_v1'],
+        help='Pose-safe RGB MSE auxiliary loss aligned with PSNR. off keeps baseline/v8 optimization loss.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_weight',
+        type=float,
+        default=0.10,
+        help='Weight for the pose-safe RGB MSE auxiliary loss.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_max_pose_risk',
+        type=float,
+        default=0.30,
+        help='Maximum posterior pose risk allowed by mse_pose_safe_v1 PSNR loss.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_max_utility_drift',
+        type=float,
+        default=0.55,
+        help='Maximum utility drift risk allowed by mse_pose_safe_v1 PSNR loss.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_min_pose_support',
+        type=float,
+        default=0.45,
+        help='Minimum pose support score required by mse_pose_safe_v1 PSNR loss.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_min_match_support',
+        type=float,
+        default=0.45,
+        help='Minimum match support score required by mse_pose_safe_v1 PSNR loss.',
+    )
+
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_target_mask',
+        type=str,
+        default='off',
+        choices=['off', 'nonzero_gt_v1', 'mask_aware_random_nonzero_gt_v1'],
+        help='Optional target-validity mask for pose-safe RGB MSE. nonzero_gt_v1 aligns TUM-style black invalid pixels with evaluation masking.',
+    )
+
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_support_weight',
+        type=str,
+        default='off',
+        choices=['off', 'raw_pose_support_v1', 'raw_pose_support_gate_v1'],
+        help='Optional raw pose-support adaptive weight for pose-safe RGB MSE.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_context_weight',
+        type=str,
+        default='off',
+        choices=['off', 'mask_aware_no_mask_boost_v1', 'mask_aware_no_mask_raw_response_boost_v1', 'mask_aware_no_mask_raw_response_gate_boost_v1', 'mask_aware_no_mask_scene_low_gate_boost_v1', 'mask_aware_no_mask_scene_low_fast_gate_boost_v1'],
+        help='Optional scene-context adaptive weight for pose-safe RGB MSE.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_support_min_scale',
+        type=float,
+        default=0.45,
+        help='Minimum multiplier used by raw_pose_support_v1 PSNR support weighting.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_support_corr_low',
+        type=float,
+        default=3000.0,
+        help='Raw correspondence count where raw_pose_support_v1 starts lifting above the minimum scale.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_support_corr_high',
+        type=float,
+        default=8000.0,
+        help='Raw correspondence count where raw_pose_support_v1 restores full PSNR loss weight.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_support_inlier_low',
+        type=float,
+        default=900.0,
+        help='Final pose inlier count where raw_pose_support_v1 starts lifting above the minimum scale.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_support_inlier_high',
+        type=float,
+        default=2500.0,
+        help='Final pose inlier count where raw_pose_support_v1 restores full PSNR loss weight.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_max_applied_ratio',
+        type=float,
+        default=1.0,
+        help='Maximum online applied/event ratio for pose-safe PSNR loss. Values below 1.0 turn the loss into a sparse correction budget.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_ambiguity_low',
+        type=float,
+        default=0.0,
+        help='Lower raw-loss bound for skipping ambiguous pose-safe PSNR corrections. Disabled when high <= low.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_ambiguity_high',
+        type=float,
+        default=0.0,
+        help='Upper raw-loss bound for skipping ambiguous pose-safe PSNR corrections. Disabled when high <= low.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_ambiguity_min_applied_ratio',
+        type=float,
+        default=1.0,
+        help='Minimum online applied/event ratio before the ambiguous residual PSNR gate can skip corrections.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_scene_guard',
+        type=str,
+        default='off',
+        choices=['off', 'raw_loss_ratio_guard_v1', 'raw_loss_ratio_precommit_guard_v1', 'raw_loss_ratio_precommit_render_gap_guard_v1', 'raw_loss_ratio_precommit_coverage_guard_v1', 'raw_loss_ratio_precommit_non_dark_guard_v2', 'raw_loss_ratio_precommit_non_dark_mask_guard_v3', 'mask_aware_dark_background_guard_v4'],
+        help='Scene-level online guard for disabling unreliable pose-safe PSNR corrections.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_scene_guard_raw_low',
+        type=float,
+        default=0.0,
+        help='Lower cumulative raw-loss mean bound for the scene-level PSNR guard.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_scene_guard_raw_high',
+        type=float,
+        default=0.0,
+        help='Upper cumulative raw-loss mean bound for the scene-level PSNR guard.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_scene_guard_min_ratio',
+        type=float,
+        default=1.0,
+        help='Minimum cumulative applied/event ratio required by the scene-level PSNR guard.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_scene_guard_min_events',
+        type=int,
+        default=0,
+        help='Minimum cumulative PSNR-loss events required by the scene-level PSNR guard.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_scene_guard_min_applied',
+        type=int,
+        default=0,
+        help='Minimum cumulative applied PSNR-loss events required by the scene-level PSNR guard.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_scene_guard_max_events',
+        type=int,
+        default=0,
+        help='Latest cumulative PSNR-loss event index allowed to trigger the scene-level PSNR guard; 0 disables the limit.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_structure_gate',
+        type=str,
+        default='off',
+        choices=['off', 'gradient_correlation_v1'],
+        help='Low-cost full-frame structure agreement gate for pose-safe RGB MSE corrections.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_structure_min_score',
+        type=float,
+        default=0.0,
+        help='Minimum gradient-correlation structure score required by the pose-safe RGB MSE gate.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_structure_min_raw_mean',
+        type=float,
+        default=0.0,
+        help='Minimum projected cumulative raw PSNR loss mean before the structure gate can run.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_late_raw_stop',
+        type=str,
+        default='off',
+        choices=['off', 'raw_mean_stop_v1'],
+        help='Stop late PSNR corrections when the early scene guard window expired with high raw residuals.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_late_raw_stop_min_mean',
+        type=float,
+        default=0.0,
+        help='Minimum projected cumulative raw PSNR loss mean required by the late raw stop gate.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_health_gate',
+        type=str,
+        default='off',
+        choices=['off', 'gradient_correlation_v1'],
+        help='Lightweight frame-internal health gate before applying pose-safe PSNR corrections.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_health_min_score',
+        type=float,
+        default=0.0,
+        help='Minimum gradient-correlation score required by the PSNR health gate.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_psnr_loss_health_min_raw_loss',
+        type=float,
+        default=0.0,
+        help='Minimum raw PSNR loss before the frame-internal health gate is evaluated.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_extra_optimization',
+        type=str,
+        default='off',
+        choices=['off', 'pose_confidence_v1', 'pose_confidence_render_response_v2', 'render_response_v3', 'render_response_v4', 'render_response_v5', 'render_response_mask_conservative_v6'],
+        help='Add bounded latest-keyframe optimization iterations when posterior pose confidence is high.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_extra_optimization_min_confidence',
+        type=float,
+        default=0.75,
+        help='Minimum pose-render confidence required by pose_confidence_v1 extra optimization.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_extra_optimization_fraction',
+        type=float,
+        default=0.25,
+        help='Fraction of base per-keyframe iterations used to compute extra optimization iterations.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_extra_optimization_max_extra',
+        type=int,
+        default=8,
+        help='Maximum latest-keyframe extra optimization iterations per materialized keyframe.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_extra_optimization_max_pose_risk',
+        type=float,
+        default=0.35,
+        help='Maximum posterior pose risk allowed by pose_confidence_v1 extra optimization.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_extra_optimization_max_utility_drift',
+        type=float,
+        default=0.60,
+        help='Maximum utility drift risk allowed by pose_confidence_v1 extra optimization.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_extra_optimization_min_pose_support',
+        type=float,
+        default=0.55,
+        help='Minimum pose support score required by pose_confidence_v1 extra optimization.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_extra_optimization_min_match_support',
+        type=float,
+        default=0.55,
+        help='Minimum match support score required by pose_confidence_v1 extra optimization.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_update_gate',
+        type=str,
+        default='off',
+        choices=['off', 'pose_confidence_v1', 'pose_confidence_soft_v1', 'pose_confidence_soft_psnr_health_v1'],
+        help='Pose-confidence gate for Gaussian representation updates. Pose parameters still receive gradients.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_update_gate_min_confidence',
+        type=float,
+        default=0.35,
+        help='Minimum pose-render confidence required to update Gaussian parameters.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_update_gate_max_pose_risk',
+        type=float,
+        default=0.55,
+        help='Pose risk normalization threshold for pose_confidence_v1 update gate.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_update_gate_max_utility_drift',
+        type=float,
+        default=0.75,
+        help='Utility drift normalization threshold for pose_confidence_v1 update gate.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_update_gate_soft_min_scale',
+        type=float,
+        default=0.65,
+        help='Minimum Gaussian gradient scale for pose_confidence_soft_v1 update gate.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_update_gate_psnr_health_min_score',
+        type=float,
+        default=0.0,
+        help='Minimum PSNR health score required before pose_confidence_soft_psnr_health_v1 caps Gaussian updates.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_update_gate_psnr_health_min_raw_loss',
+        type=float,
+        default=0.0,
+        help='Minimum raw PSNR residual required before pose_confidence_soft_psnr_health_v1 caps Gaussian updates.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_update_gate_psnr_health_scale',
+        type=float,
+        default=1.0,
+        help='Gaussian gradient scale used for high-structure high-residual PSNR health aliases.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_pre_refine',
+        type=str,
+        default='off',
+        choices=['off', 'pose_only_v1'],
+        help='Risk-aware pose-only render alignment before initializing new Gaussian points.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_pre_refine_iterations',
+        type=int,
+        default=2,
+        help='Number of pose-only pre-refinement steps before adding new Gaussian points.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_pre_refine_min_pose_risk',
+        type=float,
+        default=0.08,
+        help='Minimum posterior pose-render risk required for pose-only pre-refinement.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_pre_refine_max_pose_risk',
+        type=float,
+        default=0.38,
+        help='Maximum posterior pose-render risk allowed for pose-only pre-refinement.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_pre_refine_min_existing_gaussians',
+        type=int,
+        default=5000,
+        help='Minimum existing Gaussian count before pose-only pre-refinement may run.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_pre_refine_min_existing_keyframes',
+        type=int,
+        default=8,
+        help='Minimum existing keyframe count before pose-only pre-refinement may run.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_pre_refine_min_render_coverage',
+        type=float,
+        default=0.18,
+        help='Minimum current-render visible pixel coverage for pose-only pre-refinement.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting',
+        type=str,
+        default='off',
+        choices=['off', 'risk_opacity_v1', 'risk_opacity_adaptive_v2'],
+        help='Transfer posterior pose-render risk into new-Gaussian initialization confidence.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_min_pose_risk',
+        type=float,
+        default=0.16,
+        help='Minimum posterior pose-render risk for new-Gaussian opacity downweighting.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_max_pose_risk',
+        type=float,
+        default=0.38,
+        help='Risk value mapped to the maximum opacity downweight for new Gaussians.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_min_sample_opacity_scale',
+        type=float,
+        default=0.82,
+        help='Minimum opacity scale for MVS/image-sampled new Gaussians under high risk.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_min_match_opacity_scale',
+        type=float,
+        default=0.92,
+        help='Minimum opacity scale for triangulated match Gaussians under high risk.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_max_representation_value',
+        type=float,
+        default=0.65,
+        help='Do not downweight new Gaussians when representation value is above this guard.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_max_novelty_value',
+        type=float,
+        default=0.65,
+        help='Do not downweight new Gaussians when novelty/new-view value is above this guard.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_min_pose_risk',
+        type=float,
+        default=0.20,
+        help='Adaptive v2 minimum pose risk for gentler new-Gaussian opacity downweighting.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_max_pose_risk',
+        type=float,
+        default=0.32,
+        help='Adaptive v2 risk value mapped to the maximum gentler opacity downweight.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_min_sample_opacity_scale',
+        type=float,
+        default=0.88,
+        help='Adaptive v2 minimum opacity scale for MVS/image-sampled new Gaussians.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_min_match_opacity_scale',
+        type=float,
+        default=0.95,
+        help='Adaptive v2 minimum opacity scale for triangulated match Gaussians.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_novelty_threshold',
+        type=float,
+        default=0.45,
+        help='Adaptive v2 preserves high-value new-view Gaussians above this novelty score.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_risk_override_alpha',
+        type=float,
+        default=1.0,
+        help='Adaptive v2 still downweights high-novelty frames when risk alpha reaches this value.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_scene_min_events',
+        type=int,
+        default=16,
+        help='Adaptive v2 minimum observed init events before scene-level gentle calibration.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_scene_gentle_pose_risk_mean',
+        type=float,
+        default=0.20,
+        help='Adaptive v2 scene mean pose risk required for gentle high-novelty protection.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_scene_gentle_novelty_mean',
+        type=float,
+        default=0.35,
+        help='Adaptive v2 scene mean novelty required for gentle high-novelty protection.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_scene_max_risk_alpha_mean',
+        type=float,
+        default=1.0,
+        help='Optional adaptive v2 cap: disables gentle high-novelty protection when scene risk-alpha mean is above this value.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_scene_low_pose_risk_mean',
+        type=float,
+        default=-1.0,
+        help='Optional adaptive v2 bypass: pose-risk mean threshold; negative disables the bypass.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_scene_low_novelty_mean',
+        type=float,
+        default=-1.0,
+        help='Optional adaptive v2 bypass: novelty mean threshold; negative disables the bypass.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_scene_low_risk_min_events',
+        type=int,
+        default=64,
+        help='Optional adaptive v2 bypass: minimum observed init events before low-risk scene bypass.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_scene_stable_low_risk_min_events',
+        type=int,
+        default=32,
+        help='Optional adaptive v2 bypass: early window size for extremely stable low-risk scenes.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_scene_stable_low_pose_risk_mean',
+        type=float,
+        default=0.06,
+        help='Optional adaptive v2 bypass: stricter pose-risk mean for early stable low-risk bypass.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_scene_stable_low_novelty_mean',
+        type=float,
+        default=0.12,
+        help='Optional adaptive v2 bypass: stricter novelty mean for early stable low-risk bypass.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_scene_high_uncertainty_bypass_risk_alpha_mean',
+        type=float,
+        default=2.0,
+        help='Optional adaptive v2 bypass: risk-alpha mean threshold; values above 1 disable the bypass.',
+    )
+    parser.add_argument(
+        '--paper_aligned_pose_render_init_weighting_adaptive_scene_high_uncertainty_bypass_novelty_mean',
+        type=float,
+        default=2.0,
+        help='Optional adaptive v2 bypass: novelty mean threshold; values above 1 disable the bypass.',
     )
     parser.add_argument(
         '--paper_aligned_direct_v2_2_2_1_post500_gap_rescue_budget_per_100',
@@ -930,6 +1634,60 @@ def get_args():
         type=float,
         default=0.35,
         help='Trigger early coverage rescue when recent materialization rate drops below this value.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v8_start_frame',
+        type=int,
+        default=500,
+        help='Sparse-late v8 earliest runtime frame allowed to materialize recovery commits.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v8_sparse_density_upper_per_100',
+        type=float,
+        default=12.0,
+        help='Sparse-late v8 maximum keyframe density before recovery materialization is considered sparse.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v8_materialized_budget_per_window',
+        type=int,
+        default=3,
+        help='Sparse-late v8 maximum recovery materializations in the recent materialization window.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v8_candidate_max_age',
+        type=int,
+        default=45,
+        help='Sparse-late v8 maximum source age for recovery commit materialization.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v8_min_feasibility',
+        type=float,
+        default=0.52,
+        help='Sparse-late v8 minimum materialization feasibility inherited from v6 rescue candidates.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v8_min_matches',
+        type=int,
+        default=450,
+        help='Sparse-late v8 minimum feature match support for recovery materialization.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v8_min_inliers',
+        type=int,
+        default=1200,
+        help='Sparse-late v8 bootstrap minimum pose inlier support before recovery materialization updates rendering.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v8_late_min_inliers',
+        type=int,
+        default=1200,
+        help='Optional sparse-late v8 stricter pose inlier support after the bootstrap recovery window.',
+    )
+    parser.add_argument(
+        '--paper_aligned_recovery_v8_bootstrap_end_frame',
+        type=int,
+        default=800,
+        help='Sparse-late v8 frame index before which moderate-inlier recovery candidates may bootstrap the chain.',
     )
     parser.add_argument(
         '--paper_aligned_recovery_v7_early_seed_start',

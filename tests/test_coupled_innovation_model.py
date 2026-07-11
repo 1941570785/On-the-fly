@@ -15,6 +15,7 @@ from paper_aligned_policy.recovery_commit_control import RecoveryCommitControlle
 from paper_aligned_policy.runtime_gate import PaperAlignedRuntimeGate
 from poses.feature_detector import DescribedKeypoints
 from poses.pose_initializer import PoseInitializer
+from scene.scene_model import SceneModel
 
 
 def _pose_pool_desc(num_keypoints=768, support_count=512, match_score=220):
@@ -45,9 +46,12 @@ def _args(**overrides):
         "risk_admission_mode": "on_the_fly_innovation_v1",
         "paper_aligned_contract_trace_path": "",
         "paper_aligned_recovery_commit_bridge": None,
+        "paper_aligned_recovery_commit_materialization": None,
         "paper_aligned_defer_recovery_support_bridge": None,
+        "paper_aligned_support_bridge_keyframe_gate": None,
         "paper_aligned_recovery_commit_control": None,
         "paper_aligned_direct_density_control": None,
+        "paper_aligned_pose_render_assimilation_profile": "off",
         "paper_aligned_pose_memory_geometry_context": None,
         "paper_aligned_direct_update_prev_desc_on_hold": None,
         "paper_aligned_direct_density_upper_per_100": None,
@@ -180,6 +184,20 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertEqual(args.paper_aligned_semantic_recovery_max_attempts, 6)
         self.assertEqual(args.paper_aligned_semantic_recovery_attempts_per_tick, 2)
         self.assertEqual(args.paper_aligned_direct_density_control, "pose_rep_value_decouple_v3")
+
+    def test_cli_accepts_off_test_exposure_harmonization(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "--paper_aligned_test_exposure_harmonization",
+                "off",
+            ]
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(args.paper_aligned_test_exposure_harmonization, "off")
 
     def test_cli_accepts_long_video_active_memory_direct_density_mode(self):
         with tempfile.TemporaryDirectory() as td:
@@ -396,6 +414,3311 @@ class CoupledInnovationModelTests(unittest.TestCase):
         )
         self.assertEqual(args.paper_aligned_pose_memory_geometry_context, "v1")
 
+    def test_cli_accepts_render_frame_assimilation_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "render_frame_assimilation_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "render_frame_assimilation_v1",
+        )
+
+    def test_cli_accepts_pose_only_render_skeleton_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "pose_only_render_skeleton_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "pose_only_render_skeleton_v1",
+        )
+
+    def test_cli_accepts_pose_only_baseline_render_lock_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "pose_only_baseline_render_lock_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "pose_only_baseline_render_lock_v1",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v1",
+        )
+
+    def test_render_frame_assimilation_profile_preserves_baseline_render_skeleton(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="render_frame_assimilation_v1"
+        )
+
+        gate = PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(gate.mode, "paper_aligned_semantic_v1")
+        self.assertEqual(
+            args.paper_aligned_direct_density_control,
+            "pose_safe_streaming_memory_v1",
+        )
+        self.assertEqual(args.paper_aligned_recovery_commit_materialization, "off")
+        self.assertEqual(args.paper_aligned_recovery_commit_control, "off")
+        self.assertFalse(gate.should_process_recovery_commits())
+        self.assertFalse(gate.should_materialize_recovery_commits())
+        self.assertEqual(
+            args.paper_aligned_pose_render_keyframe_sampling,
+            "pose_confidence_temporal_v1",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_edge_loss, "gradient_pose_adaptive_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "pose_confidence_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_update_gate,
+            "pose_confidence_soft_v1",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_pre_refine, "pose_only_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_init_weighting,
+            "risk_opacity_adaptive_v2",
+        )
+
+    def test_pose_only_render_skeleton_profile_keeps_render_modules_off(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="pose_only_render_skeleton_v1"
+        )
+
+        gate = PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(gate.mode, "paper_aligned_semantic_v1")
+        self.assertEqual(
+            args.paper_aligned_direct_density_control,
+            "pose_safe_streaming_memory_v1",
+        )
+        self.assertEqual(args.paper_aligned_recovery_commit_materialization, "off")
+        self.assertEqual(args.paper_aligned_recovery_commit_control, "off")
+        self.assertFalse(gate.should_process_recovery_commits())
+        self.assertFalse(gate.should_materialize_recovery_commits())
+        for attr in (
+            "paper_aligned_pose_render_texture_sampling",
+            "paper_aligned_pose_render_keyframe_sampling",
+            "paper_aligned_pose_render_edge_loss",
+            "paper_aligned_pose_render_psnr_loss",
+            "paper_aligned_pose_render_extra_optimization",
+            "paper_aligned_pose_render_update_gate",
+            "paper_aligned_pose_render_pre_refine",
+            "paper_aligned_pose_render_init_weighting",
+        ):
+            self.assertEqual(getattr(args, attr), "off", attr)
+
+    def test_pose_only_baseline_render_lock_profile_forces_baseline_render_policy(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="pose_only_baseline_render_lock_v1"
+        )
+
+        gate = PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(gate.mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(args.paper_aligned_recovery_commit_materialization, "off")
+        self.assertEqual(args.paper_aligned_recovery_commit_control, "off")
+        self.assertEqual(
+            args.paper_aligned_render_frame_policy,
+            "baseline_keyframe_lock_v1",
+        )
+        self.assertTrue(
+            gate.should_lock_baseline_render_keyframe(
+                action="defer_recoverable",
+                baseline_should_add=True,
+                phase="incremental",
+            )
+        )
+        self.assertFalse(
+            gate.should_lock_baseline_render_keyframe(
+                action="discard",
+                baseline_should_add=False,
+                phase="incremental",
+            )
+        )
+        for attr in (
+            "paper_aligned_pose_render_texture_sampling",
+            "paper_aligned_pose_render_keyframe_sampling",
+            "paper_aligned_pose_render_edge_loss",
+            "paper_aligned_pose_render_psnr_loss",
+            "paper_aligned_pose_render_extra_optimization",
+            "paper_aligned_pose_render_update_gate",
+            "paper_aligned_pose_render_pre_refine",
+            "paper_aligned_pose_render_init_weighting",
+        ):
+            self.assertEqual(getattr(args, attr), "off", attr)
+
+    def test_baseline_render_lock_intra_frame_v2_profile_only_enables_lightweight_frame_losses(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v2"
+        )
+
+        gate = PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_recovery_commit_materialization, "off")
+        self.assertEqual(args.paper_aligned_recovery_commit_control, "off")
+        self.assertTrue(
+            gate.should_lock_baseline_render_keyframe(
+                action="defer_recoverable",
+                baseline_should_add=True,
+                phase="incremental",
+            )
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_update_gate,
+            "pose_confidence_soft_v1",
+        )
+        for attr in (
+            "paper_aligned_pose_render_texture_sampling",
+            "paper_aligned_pose_render_keyframe_sampling",
+            "paper_aligned_pose_render_edge_loss",
+            "paper_aligned_pose_render_extra_optimization",
+            "paper_aligned_pose_render_pre_refine",
+            "paper_aligned_pose_render_init_weighting",
+        ):
+            self.assertEqual(getattr(args, attr), "off", attr)
+
+
+    def test_baseline_render_lock_intra_frame_v3_profile_uses_valid_gt_psnr_mask(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v3"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_target_mask,
+            "nonzero_gt_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_update_gate,
+            "pose_confidence_soft_v1",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v4_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v4",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v4",
+        )
+
+    def test_baseline_render_lock_intra_frame_v4_profile_uses_raw_support_adaptive_psnr_weight(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v4"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_target_mask, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_support_weight,
+            "raw_pose_support_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_update_gate,
+            "pose_confidence_soft_v1",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v5_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v5",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v5",
+        )
+
+    def test_baseline_render_lock_intra_frame_v5_profile_uses_high_support_psnr_gate(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v5"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_support_weight,
+            "raw_pose_support_gate_v1",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v6_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v6",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v6",
+        )
+
+    def test_baseline_render_lock_intra_frame_v6_profile_uses_pose_risk_robust_psnr(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v6"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss,
+            "robust_mse_pose_risk_v1",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_target_mask, "off")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_support_weight, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "pose_confidence_soft_v1")
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v7_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v7",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v7",
+        )
+
+    def test_baseline_render_lock_intra_frame_v7_profile_uses_frequency_psnr(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v7"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss,
+            "freq_mse_pose_risk_v1",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_target_mask, "off")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_support_weight, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "pose_confidence_soft_v1")
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v8_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v8",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v8",
+        )
+
+    def test_baseline_render_lock_intra_frame_v8_profile_uses_sampling_without_psnr_loss(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v8"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_texture_sampling, "residual_edge_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v9_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v9",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v9",
+        )
+
+    def test_baseline_render_lock_intra_frame_v9_profile_budgets_psnr_loss(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v9"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertAlmostEqual(args.paper_aligned_pose_render_psnr_loss_max_applied_ratio, 0.08)
+        self.assertEqual(args.paper_aligned_pose_render_texture_sampling, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "pose_confidence_soft_v1")
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v10_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v10",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v10",
+        )
+
+    def test_baseline_render_lock_intra_frame_v10_profile_gates_ambiguous_psnr_residuals(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v10"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_psnr_loss_ambiguity_low,
+            0.003,
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_psnr_loss_ambiguity_high,
+            0.005,
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_psnr_loss_ambiguity_min_applied_ratio,
+            0.08,
+        )
+        self.assertEqual(args.paper_aligned_pose_render_texture_sampling, "off")
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v11_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v11",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v11",
+        )
+
+    def test_baseline_render_lock_intra_frame_v11_profile_uses_scene_psnr_guard(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v11"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_guard_v1",
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard_raw_low,
+            0.0028,
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard_raw_high,
+            0.0055,
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard_min_ratio,
+            0.10,
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard_min_applied,
+            48,
+        )
+        self.assertEqual(args.paper_aligned_pose_render_texture_sampling, "off")
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v12_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v12",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v12",
+        )
+
+    def test_baseline_render_lock_intra_frame_v12_profile_limits_late_scene_guard(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v12"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_guard_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard_max_events,
+            1000,
+        )
+
+    def test_baseline_render_lock_intra_frame_v13_profile_uses_structure_gate(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v13"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_guard_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard_max_events,
+            1000,
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_structure_gate,
+            "gradient_correlation_v1",
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_psnr_loss_structure_min_score,
+            0.55,
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_psnr_loss_structure_min_raw_mean,
+            0.0065,
+        )
+
+    def test_baseline_render_lock_intra_frame_v14_profile_uses_late_raw_stop(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v14"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_guard_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard_max_events,
+            1000,
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_late_raw_stop,
+            "raw_mean_stop_v1",
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_psnr_loss_late_raw_stop_min_mean,
+            0.0065,
+        )
+
+    def test_baseline_render_lock_intra_frame_v15_profile_uses_target_mean_background(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v15"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_guard_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard_max_events,
+            1000,
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_late_raw_stop,
+            "raw_mean_stop_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "target_mean_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v16_profile_uses_deterministic_background(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v16"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_guard_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard_max_events,
+            1000,
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_late_raw_stop,
+            "raw_mean_stop_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "deterministic_random_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v17_profile_uses_health_gate(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v17"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_guard_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_late_raw_stop,
+            "raw_mean_stop_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_health_gate,
+            "gradient_correlation_v1",
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_psnr_loss_health_min_score,
+            0.62,
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_psnr_loss_health_min_raw_loss,
+            0.0045,
+        )
+
+    def test_baseline_render_lock_intra_frame_v18_profile_damps_psnr_health_alias_updates(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v18"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_health_gate,
+            "gradient_correlation_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_update_gate,
+            "pose_confidence_soft_psnr_health_v1",
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_update_gate_psnr_health_min_score,
+            0.84,
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_update_gate_psnr_health_min_raw_loss,
+            0.0045,
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_update_gate_psnr_health_scale,
+            0.55,
+        )
+
+    def test_baseline_render_lock_intra_frame_v19_profile_interpolates_test_exposure(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v19"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_update_gate,
+            "pose_confidence_soft_psnr_health_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "source_time_interp_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v20_profile_guards_test_exposure_interp(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v20"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_update_gate,
+            "pose_confidence_soft_psnr_health_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "source_time_guarded_v1",
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_test_exposure_guard_max_delta,
+            0.35,
+        )
+        self.assertEqual(
+            args.paper_aligned_test_render_calibration,
+            "diag_affine_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v25_profile_uses_render_response_extra_optimization(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v25"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_update_gate,
+            "pose_confidence_soft_psnr_health_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "source_time_interp_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "pose_confidence_render_response_v2",
+        )
+
+    def test_baseline_render_lock_intra_frame_v26_profile_couples_sampling_with_response_extra(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v26"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_texture_sampling, "residual_edge_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "pose_confidence_render_response_v2",
+        )
+
+    def test_baseline_render_lock_intra_frame_v27_profile_is_response_only_joint_optimization(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v27"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_texture_sampling, "off")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "pose_confidence_render_response_v2",
+        )
+
+    def test_baseline_render_lock_intra_frame_v28_profile_gates_sampling_and_joint_optimization_by_response(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v28"
+        )
+
+        PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_v2",
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_texture_sampling_alpha,
+            0.03,
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_texture_sampling_min_selectivity,
+            1.8,
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "pose_confidence_render_response_v2",
+        )
+
+    def test_baseline_render_lock_intra_frame_v29_profile_is_render_only_response_gated_sampling(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v29"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "off")
+        self.assertEqual(args.risk_admission_mode, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_v2",
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_texture_sampling_alpha,
+            0.03,
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_texture_sampling_min_selectivity,
+            1.8,
+        )
+        self.assertEqual(args.paper_aligned_pose_render_extra_optimization, "off")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+
+    def test_baseline_render_lock_intra_frame_v30_profile_is_render_only_response_gated_joint_refine(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v30"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "off")
+        self.assertEqual(args.risk_admission_mode, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_v2",
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_texture_sampling_alpha,
+            0.03,
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_texture_sampling_min_selectivity,
+            1.8,
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "pose_confidence_render_response_v2",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+
+    def test_baseline_render_lock_intra_frame_v31_profile_uses_render_response_only_joint_refine(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v31"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "off")
+        self.assertEqual(args.risk_admission_mode, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_v2",
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_texture_sampling_alpha,
+            0.03,
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_texture_sampling_min_selectivity,
+            1.8,
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v3",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+
+    def test_baseline_render_lock_intra_frame_v32_profile_uses_lazy_response_hooks_without_render_lock(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v32"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "off")
+        self.assertEqual(args.risk_admission_mode, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_v2",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v3",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+
+    def test_baseline_render_lock_intra_frame_v33_profile_uses_sharp_response_sampling(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v33"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "off")
+        self.assertEqual(args.risk_admission_mode, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_v2",
+        )
+        self.assertAlmostEqual(args.paper_aligned_pose_render_texture_sampling_alpha, 0.03)
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_texture_sampling_min_selectivity,
+            2.0,
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v3",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+
+    def test_baseline_render_lock_intra_frame_v34_profile_uses_high_coverage_bypass_sampling(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v34"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "off")
+        self.assertEqual(args.risk_admission_mode, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_v4",
+        )
+        self.assertAlmostEqual(args.paper_aligned_pose_render_texture_sampling_alpha, 0.03)
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_texture_sampling_min_selectivity,
+            2.0,
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v3",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+
+    def test_baseline_render_lock_intra_frame_v35_profile_uses_adaptive_exposure_gate(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v35"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "off")
+        self.assertEqual(args.risk_admission_mode, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_v2",
+        )
+        self.assertAlmostEqual(args.paper_aligned_pose_render_texture_sampling_alpha, 0.03)
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_texture_sampling_min_selectivity,
+            2.0,
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v3",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "source_time_adaptive_v2",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+
+    def test_baseline_render_lock_intra_frame_v36_profile_uses_soft_render_response_polish(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v36"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "off")
+        self.assertEqual(args.risk_admission_mode, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_v2",
+        )
+        self.assertAlmostEqual(args.paper_aligned_pose_render_texture_sampling_alpha, 0.03)
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_texture_sampling_min_selectivity,
+            2.0,
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v4",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "source_time_adaptive_v2",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+
+    def test_baseline_render_lock_intra_frame_v37_profile_hybridizes_structure_loss(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v37"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "off")
+        self.assertEqual(args.risk_admission_mode, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_v2",
+        )
+        self.assertAlmostEqual(args.paper_aligned_pose_render_texture_sampling_alpha, 0.03)
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_texture_sampling_min_selectivity,
+            2.0,
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v4",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "source_time_adaptive_v2",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_guard_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_structure_gate,
+            "gradient_correlation_v1",
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_psnr_loss_structure_min_score,
+            0.55,
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_psnr_loss_structure_min_raw_mean,
+            0.0065,
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_update_gate,
+            "pose_confidence_soft_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v38_profile_restores_pose_gated_structure(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v38"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "off")
+        self.assertEqual(args.risk_admission_mode, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_texture_sampling, "off")
+        self.assertEqual(args.paper_aligned_pose_render_extra_optimization, "off")
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "source_time_adaptive_v2",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_guard_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_structure_gate,
+            "gradient_correlation_v1",
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_psnr_loss_structure_min_score,
+            0.55,
+        )
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_psnr_loss_structure_min_raw_mean,
+            0.0065,
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_update_gate,
+            "pose_confidence_soft_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v39_profile_uses_precommit_structure_response(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v39"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "off")
+        self.assertEqual(args.risk_admission_mode, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_v2",
+        )
+        self.assertAlmostEqual(args.paper_aligned_pose_render_texture_sampling_alpha, 0.03)
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_texture_sampling_min_selectivity,
+            2.0,
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v4",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "source_time_adaptive_v2",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_precommit_guard_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_structure_gate,
+            "gradient_correlation_v1",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+
+    def test_baseline_render_lock_intra_frame_v40_profile_uses_render_gap_precommit_guard(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v40"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.risk_admission_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_v2",
+        )
+        self.assertAlmostEqual(args.paper_aligned_pose_render_texture_sampling_alpha, 0.03)
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_texture_sampling_min_selectivity,
+            2.0,
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v4",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "source_time_adaptive_v2",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_precommit_render_gap_guard_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_structure_gate,
+            "gradient_correlation_v1",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+
+    def test_baseline_render_lock_intra_frame_v41_profile_uses_render_gap_rescue_optimization(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v41"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.risk_admission_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_v2",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_precommit_render_gap_guard_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_structure_gate,
+            "gradient_correlation_v1",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+
+    def test_baseline_render_lock_intra_frame_v42_profile_uses_precommit_rescue_joint_optimization(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v42"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.risk_admission_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_v2",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_precommit_guard_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_structure_gate,
+            "gradient_correlation_v1",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+
+    def test_baseline_render_lock_intra_frame_v43_profile_uses_coverage_aware_precommit_rescue(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v43"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.risk_admission_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_precommit_coverage_guard_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_structure_gate,
+            "gradient_correlation_v1",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v44_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v44",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v44",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v45_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v45",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v45",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v46_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v46",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v46",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v47_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v47",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v47",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v48_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v48",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v48",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v49_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v49",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v49",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v50_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v50",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v50",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v51_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v51",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v51",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v52_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v52",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v52",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v53_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v53",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v53",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v54_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v54",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v54",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v55_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v55",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v55",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v56_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v56",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v56",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v57_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v57",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v57",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v58_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v58",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v58",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v59_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v59",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v59",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v60_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v60",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v60",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v61_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v61",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v61",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v62_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v62",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v62",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v63_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v63",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v63",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v64_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v64",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v64",
+        )
+
+    def test_cli_accepts_mask_aware_random_nonzero_gt_psnr_target_mask(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_pose_render_psnr_loss_target_mask",
+                "mask_aware_random_nonzero_gt_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_target_mask,
+            "mask_aware_random_nonzero_gt_v1",
+        )
+
+    def test_cli_accepts_mask_aware_no_mask_boost_psnr_context_weight(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_pose_render_psnr_loss_context_weight",
+                "mask_aware_no_mask_boost_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_context_weight,
+            "mask_aware_no_mask_boost_v1",
+        )
+
+    def test_cli_accepts_mask_aware_no_mask_raw_response_boost_psnr_context_weight(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_pose_render_psnr_loss_context_weight",
+                "mask_aware_no_mask_raw_response_boost_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_context_weight,
+            "mask_aware_no_mask_raw_response_boost_v1",
+        )
+
+    def test_cli_accepts_mask_aware_no_mask_raw_response_gate_boost_psnr_context_weight(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_pose_render_psnr_loss_context_weight",
+                "mask_aware_no_mask_raw_response_gate_boost_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_context_weight,
+            "mask_aware_no_mask_raw_response_gate_boost_v1",
+        )
+
+    def test_cli_accepts_mask_aware_no_mask_scene_low_gate_boost_psnr_context_weight(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_pose_render_psnr_loss_context_weight",
+                "mask_aware_no_mask_scene_low_gate_boost_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_context_weight,
+            "mask_aware_no_mask_scene_low_gate_boost_v1",
+        )
+
+    def test_cli_accepts_mask_aware_no_mask_scene_low_fast_gate_boost_psnr_context_weight(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_pose_render_psnr_loss_context_weight",
+                "mask_aware_no_mask_scene_low_fast_gate_boost_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_context_weight,
+            "mask_aware_no_mask_scene_low_fast_gate_boost_v1",
+        )
+
+    def test_cli_accepts_dark_scene_guarded_test_exposure_harmonization(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "--paper_aligned_test_exposure_harmonization",
+                "dark_scene_off_guarded_v1",
+            ]
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "dark_scene_off_guarded_v1",
+        )
+
+    def test_cli_accepts_dark_scene_fixed_black_training_background(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_training_background_mode",
+                "dark_scene_fixed_black_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "dark_scene_fixed_black_v1",
+        )
+
+    def test_cli_accepts_mask_aware_fixed_black_training_background(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_training_background_mode",
+                "mask_aware_fixed_black_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "mask_aware_fixed_black_v1",
+        )
+
+    def test_cli_accepts_mask_aware_dark_scene_fixed_black_training_background(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_training_background_mode",
+                "mask_aware_dark_scene_fixed_black_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "mask_aware_dark_scene_fixed_black_v1",
+        )
+
+    def test_cli_accepts_mask_aware_dark_scene_deterministic_random_training_background(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_training_background_mode",
+                "mask_aware_dark_scene_deterministic_random_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "mask_aware_dark_scene_deterministic_random_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v44_profile_uses_dark_scene_background_guard(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v44"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.risk_admission_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(args.paper_aligned_pose_render_texture_sampling, "off")
+        self.assertEqual(args.paper_aligned_pose_render_extra_optimization, "off")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "dark_scene_fixed_black_v1",
+        )
+        self.assertEqual(args.paper_aligned_test_exposure_harmonization, "off")
+
+    def test_baseline_render_lock_intra_frame_v45_profile_guards_dark_scene_exposure(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v45"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(args.paper_aligned_pose_render_texture_sampling, "off")
+        self.assertEqual(args.paper_aligned_pose_render_extra_optimization, "off")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "dark_scene_fixed_black_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "dark_scene_off_guarded_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v46_profile_couples_render_response_budget(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v46"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_v2",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard, "off")
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "dark_scene_fixed_black_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "dark_scene_off_guarded_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v47_profile_uses_non_dark_response_budget(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v47"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_non_dark_v5",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_precommit_non_dark_guard_v2",
+        )
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "dark_scene_fixed_black_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "dark_scene_off_guarded_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v48_profile_uses_mask_aware_scene_guard(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v48"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_non_dark_v5",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_precommit_non_dark_mask_guard_v3",
+        )
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "dark_scene_fixed_black_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "dark_scene_off_guarded_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v49_profile_uses_mask_conservative_response_budget(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v49"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_mask_conservative_v6",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_mask_conservative_v6",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard, "off")
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "dark_scene_fixed_black_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "dark_scene_off_guarded_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v50_profile_adds_non_dark_quality_guard(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v50"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_mask_conservative_v6",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_mask_conservative_v6",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_precommit_non_dark_guard_v2",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_raw_low, 0.0028)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_raw_high, 0.0055)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_min_ratio, 0.10)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_min_events, 384)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_min_applied, 48)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_max_events, 1000)
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "dark_scene_fixed_black_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "dark_scene_off_guarded_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v51_profile_restores_v47_quality_core_without_update_gate(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v51"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_non_dark_v5",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_precommit_non_dark_guard_v2",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_raw_low, 0.0028)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_raw_high, 0.0055)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_min_ratio, 0.10)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_min_events, 384)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_min_applied, 48)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_max_events, 1000)
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "dark_scene_fixed_black_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "dark_scene_off_guarded_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v52_profile_uses_baseline_admission_with_v47_render_core(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v52"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "off")
+        self.assertEqual(args.risk_admission_mode, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_non_dark_v5",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "pose_confidence_soft_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_precommit_non_dark_guard_v2",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_raw_low, 0.0028)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_raw_high, 0.0055)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_min_ratio, 0.10)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_min_events, 384)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_min_applied, 48)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_max_events, 1000)
+
+    def test_baseline_render_lock_intra_frame_v53_profile_uses_v22_quality_fallback(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v53"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "off")
+        self.assertEqual(args.risk_admission_mode, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(args.paper_aligned_pose_render_texture_sampling, "off")
+        self.assertEqual(args.paper_aligned_pose_render_extra_optimization, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard, "off")
+        self.assertEqual(args.paper_aligned_training_background_mode, "random_v1")
+        self.assertEqual(args.paper_aligned_test_exposure_harmonization, "neighbor_average_v1")
+
+    def test_baseline_render_lock_intra_frame_v54_profile_uses_mask_aware_background(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v54"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "off")
+        self.assertEqual(args.risk_admission_mode, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(args.paper_aligned_pose_render_texture_sampling, "off")
+        self.assertEqual(args.paper_aligned_pose_render_extra_optimization, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard, "off")
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "mask_aware_fixed_black_v1",
+        )
+        self.assertEqual(args.paper_aligned_test_exposure_harmonization, "neighbor_average_v1")
+
+    def test_baseline_render_lock_intra_frame_v55_profile_couples_v47_quality_core_with_mask_background(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v55"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.risk_admission_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_non_dark_v5",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "pose_confidence_soft_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_precommit_non_dark_guard_v2",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_raw_low, 0.0028)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_raw_high, 0.0055)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_min_ratio, 0.10)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_min_events, 384)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_min_applied, 48)
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_scene_guard_max_events, 1000)
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "mask_aware_fixed_black_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "dark_scene_off_guarded_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v56_profile_uses_dark_mask_background_router(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v56"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.risk_admission_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_direct_density_control, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_non_dark_v5",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "pose_confidence_soft_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "mask_aware_dark_background_guard_v4",
+        )
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "mask_aware_dark_scene_fixed_black_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "dark_scene_off_guarded_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v57_profile_masks_only_random_mask_background(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v57"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.risk_admission_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_non_dark_v5",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "pose_confidence_soft_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_target_mask,
+            "mask_aware_random_nonzero_gt_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "mask_aware_dark_background_guard_v4",
+        )
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "mask_aware_dark_scene_fixed_black_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "dark_scene_off_guarded_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v58_profile_stabilizes_random_mask_background(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v58"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.risk_admission_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_non_dark_v5",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "pose_confidence_soft_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_target_mask,
+            "mask_aware_random_nonzero_gt_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "mask_aware_dark_background_guard_v4",
+        )
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "mask_aware_dark_scene_deterministic_random_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "dark_scene_off_guarded_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v59_profile_boosts_unmasked_psnr_only(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v59"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.risk_admission_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_non_dark_v5",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "pose_confidence_soft_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_target_mask, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_context_weight,
+            "mask_aware_no_mask_boost_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "mask_aware_dark_background_guard_v4",
+        )
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "mask_aware_dark_scene_fixed_black_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v60_profile_uses_raw_response_context_boost(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v60"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.risk_admission_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_non_dark_v5",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "pose_confidence_soft_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_target_mask, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_context_weight,
+            "mask_aware_no_mask_raw_response_boost_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "mask_aware_dark_background_guard_v4",
+        )
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "mask_aware_dark_scene_fixed_black_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v61_profile_gates_low_raw_response_context_boost(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v61"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.risk_admission_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_non_dark_v5",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "pose_confidence_soft_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_target_mask, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_context_weight,
+            "mask_aware_no_mask_raw_response_gate_boost_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "mask_aware_dark_background_guard_v4",
+        )
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "mask_aware_dark_scene_fixed_black_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v62_profile_adds_scene_low_response_gate(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v62"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.risk_admission_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_non_dark_v5",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "pose_confidence_soft_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss_target_mask, "off")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_context_weight,
+            "mask_aware_no_mask_scene_low_gate_boost_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "mask_aware_dark_background_guard_v4",
+        )
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "mask_aware_dark_scene_fixed_black_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v63_profile_adds_fast_scene_low_response_gate(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v63"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.risk_admission_mode, "paper_aligned_semantic_v1")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_non_dark_v5",
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "mse_pose_safe_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_context_weight,
+            "mask_aware_no_mask_scene_low_fast_gate_boost_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v64_profile_uses_v31_with_dark_scene_background_guard(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v64"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertEqual(cfg.runtime_mode, "off")
+        self.assertEqual(args.risk_admission_mode, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(
+            args.paper_aligned_pose_render_texture_sampling,
+            "residual_edge_response_guard_v2",
+        )
+        self.assertAlmostEqual(args.paper_aligned_pose_render_texture_sampling_alpha, 0.03)
+        self.assertAlmostEqual(
+            args.paper_aligned_pose_render_texture_sampling_min_selectivity,
+            1.8,
+        )
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v3",
+        )
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(
+            args.paper_aligned_training_background_mode,
+            "mask_aware_dark_scene_fixed_black_v1",
+        )
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "dark_scene_off_guarded_v1",
+        )
+
+    def test_baseline_render_lock_intra_frame_v21_profile_uses_runtime_passthrough(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v21"
+        )
+
+        gate = PaperAlignedRuntimeGate(args)
+
+        self.assertEqual(gate.mode, "paper_aligned_baseline_passthrough")
+        self.assertEqual(gate.training_risk_mode, "paper_aligned_baseline_passthrough")
+        self.assertIsNone(gate.semantic_policy)
+        self.assertEqual(args.risk_admission_mode, "paper_aligned_baseline_passthrough")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+        self.assertEqual(
+            args.paper_aligned_test_exposure_harmonization,
+            "neighbor_average_v1",
+        )
+        self.assertEqual(args.paper_aligned_test_render_calibration, "off")
+
+    def test_baseline_render_lock_intra_frame_v22_profile_resolves_without_runtime_gate(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v22"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertTrue(cfg.enabled)
+        self.assertEqual(cfg.runtime_mode, "off")
+        self.assertEqual(args.risk_admission_mode, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "baseline_keyframe_lock_v1")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+        self.assertEqual(args.paper_aligned_test_exposure_harmonization, "neighbor_average_v1")
+        self.assertEqual(args.paper_aligned_test_render_calibration, "off")
+
+    def test_baseline_render_lock_intra_frame_v23_profile_keeps_scene_side_baseline_clean(self):
+        args = _args(
+            paper_aligned_pose_render_assimilation_profile="baseline_render_lock_intra_frame_v23"
+        )
+
+        cfg = policy_config.apply_coupled_innovation_defaults(args)
+
+        self.assertTrue(cfg.enabled)
+        self.assertEqual(cfg.runtime_mode, "off")
+        self.assertEqual(args.risk_admission_mode, "off")
+        self.assertEqual(args.paper_aligned_defer_recovery_support_bridge, "off")
+        self.assertEqual(args.paper_aligned_render_frame_policy, "off")
+        self.assertEqual(args.paper_aligned_pose_render_psnr_loss, "off")
+        self.assertEqual(args.paper_aligned_pose_render_update_gate, "off")
+        self.assertEqual(args.paper_aligned_test_exposure_harmonization, "neighbor_average_v1")
+        self.assertEqual(args.paper_aligned_test_render_calibration, "off")
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v24_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v24",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v24",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v27_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v27",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v27",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v28_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v28",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v28",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v29_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v29",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v29",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v30_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v30",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v30",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v31_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v31",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v31",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v32_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v32",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v32",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v33_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v33",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v33",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v34_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v34",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v34",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v35_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v35",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v35",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v36_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v36",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v36",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v37_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v37",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v37",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v38_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v38",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v38",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v39_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v39",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v39",
+        )
+
+    def test_cli_accepts_precommit_psnr_scene_guard(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_pose_render_psnr_loss_scene_guard",
+                "raw_loss_ratio_precommit_guard_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_precommit_guard_v1",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v40_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v40",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v40",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v41_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v41",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v41",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v42_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v42",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v42",
+        )
+
+    def test_cli_accepts_baseline_render_lock_intra_frame_v43_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--risk_admission_mode",
+                "on_the_fly_innovation_v1",
+                "--paper_aligned_pose_render_assimilation_profile",
+                "baseline_render_lock_intra_frame_v43",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_assimilation_profile,
+            "baseline_render_lock_intra_frame_v43",
+        )
+
+    def test_cli_accepts_coverage_aware_precommit_psnr_scene_guard(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_pose_render_psnr_loss_scene_guard",
+                "raw_loss_ratio_precommit_coverage_guard_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_precommit_coverage_guard_v1",
+        )
+
+    def test_cli_accepts_render_response_v5_extra_optimization(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_pose_render_extra_optimization",
+                "render_response_v5",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_extra_optimization,
+            "render_response_v5",
+        )
+
+    def test_cli_accepts_render_gap_precommit_psnr_scene_guard(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--paper_aligned_pose_render_psnr_loss_scene_guard",
+                "raw_loss_ratio_precommit_render_gap_guard_v1",
+            ]
+
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(
+            args.paper_aligned_pose_render_psnr_loss_scene_guard,
+            "raw_loss_ratio_precommit_render_gap_guard_v1",
+        )
+
+    def test_train_resolves_v30_render_only_profile_before_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        self.assertIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V30_PROFILE", train_source)
+        self.assertIn("profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V30_PROFILE", train_source)
+
+    def test_train_resolves_v31_render_only_profile_before_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        self.assertIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V31_PROFILE", train_source)
+        self.assertIn("profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V31_PROFILE", train_source)
+
+    def test_train_resolves_v32_lazy_response_profile_before_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        self.assertIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V32_PROFILE", train_source)
+        self.assertIn("profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V32_PROFILE", train_source)
+
+    def test_train_resolves_v33_sharp_response_profile_before_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        self.assertIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V33_PROFILE", train_source)
+        self.assertIn("profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V33_PROFILE", train_source)
+
+    def test_train_resolves_v34_high_coverage_bypass_profile_before_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        self.assertIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V34_PROFILE", train_source)
+        self.assertIn("profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V34_PROFILE", train_source)
+
+    def test_train_resolves_v35_adaptive_exposure_profile_before_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        self.assertIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V35_PROFILE", train_source)
+        self.assertIn("profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V35_PROFILE", train_source)
+
+    def test_train_resolves_v36_soft_render_response_profile_before_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        self.assertIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V36_PROFILE", train_source)
+        self.assertIn("profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V36_PROFILE", train_source)
+
+    def test_train_resolves_v37_hybrid_structure_profile_before_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        self.assertIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V37_PROFILE", train_source)
+        self.assertIn("profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V37_PROFILE", train_source)
+
+    def test_train_leaves_v38_pose_gated_profile_for_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V38_PROFILE", train_source)
+        self.assertNotIn("profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V38_PROFILE", train_source)
+
+    def test_train_leaves_v39_precommit_response_profile_for_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V39_PROFILE", train_source)
+        self.assertNotIn("profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V39_PROFILE", train_source)
+
+    def test_train_leaves_v40_render_gap_precommit_profile_for_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V40_PROFILE", train_source)
+        self.assertNotIn("profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V40_PROFILE", train_source)
+
+    def test_train_leaves_v41_render_gap_rescue_profile_for_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V41_PROFILE", train_source)
+        self.assertNotIn("profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V41_PROFILE", train_source)
+
+    def test_train_leaves_v42_precommit_rescue_profile_for_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V42_PROFILE", train_source)
+        self.assertNotIn("profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V42_PROFILE", train_source)
+
+    def test_train_leaves_v43_coverage_precommit_rescue_profile_for_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V43_PROFILE", train_source)
+        self.assertNotIn("profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V43_PROFILE", train_source)
+
     def test_runtime_gate_applies_coupled_preset_to_args_before_subsystems_use_them(self):
         args = _args(paper_aligned_tau_R_low=0.31, paper_aligned_recovery_delay_frames=4)
 
@@ -549,6 +3872,349 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertFalse(decision.debug["can_be_early_seed_candidate"])
         self.assertTrue(decision.debug["early_seed_blocked_by_density_hold"])
         self.assertEqual(decision.debug["density_state"], "above_hard")
+
+    def test_sparse_late_recovery_holds_early_candidates_even_when_v6_would_rescue(self):
+        controller = RecoveryCommitController(
+            _args(paper_aligned_recovery_commit_control="recovery_commit_sparse_late_v8")
+        )
+        recovered = {
+            "source_frame_id": 16,
+            "source_input_index": 16,
+            "scores": {"R_t": 0.05, "V_t": 0.9, "Q_t": 0.9},
+            "source_payload": {"inlier_evidence": {"num_matches": 1800}},
+        }
+        context = {
+            "current_tick_frame_id": 24,
+            "source_num_inliers": 900,
+            "keyframe_density_per_100": 20.0,
+            "source_gap_to_last_committed": 8,
+            "predicted_gap_if_hold": 16,
+            "keyframe_growth_recent": 4,
+            "recent_materialization_rate": 0.0,
+            "recent_pose_fail_rate": 0.0,
+            "recent_runtime_attempt_count": 0,
+            "recent_materialized_count": 0,
+            "recent_failed_no_materialization_count": 0,
+            "source_pose_fail_count": 0,
+            "keyframes_since_last_pose_fail": 999,
+            "source_already_committed": False,
+            "is_surrogate": False,
+            "is_contamination_risk": False,
+            "anchor_count_available": False,
+            "anchor_count_before": None,
+        }
+
+        decision = controller.decide(recovered, context)
+
+        self.assertEqual(decision.action, "hold")
+        self.assertEqual(decision.reason, "v8_hold_before_sparse_late_start")
+        self.assertEqual(decision.debug["v8_fallback_decision"], "commit")
+        self.assertIn("v6_", decision.debug["v8_fallback_reason"])
+
+    def test_sparse_late_recovery_holds_dense_late_candidates_without_hard_gap(self):
+        controller = RecoveryCommitController(
+            _args(paper_aligned_recovery_commit_control="recovery_commit_sparse_late_v8")
+        )
+        recovered = {
+            "source_frame_id": 520,
+            "source_input_index": 520,
+            "scores": {"R_t": 0.05, "V_t": 0.9, "Q_t": 0.9},
+            "source_payload": {"inlier_evidence": {"num_matches": 1800}},
+        }
+        context = {
+            "current_tick_frame_id": 560,
+            "source_num_inliers": 900,
+            "keyframe_density_per_100": 22.0,
+            "source_gap_to_last_committed": 4,
+            "predicted_gap_if_hold": 12,
+            "keyframe_growth_recent": 4,
+            "recent_materialization_rate": 0.0,
+            "recent_pose_fail_rate": 0.0,
+            "recent_runtime_attempt_count": 0,
+            "recent_materialized_count": 0,
+            "recent_failed_no_materialization_count": 0,
+            "source_pose_fail_count": 0,
+            "keyframes_since_last_pose_fail": 999,
+            "source_already_committed": False,
+            "is_surrogate": False,
+            "is_contamination_risk": False,
+            "anchor_count_available": False,
+            "anchor_count_before": None,
+        }
+
+        decision = controller.decide(recovered, context)
+
+        self.assertEqual(decision.action, "hold")
+        self.assertEqual(decision.reason, "v8_hold_density_not_sparse")
+        self.assertEqual(decision.debug["v8_density_state"], "dense")
+
+    def test_sparse_late_recovery_commits_late_sparse_gap_candidates(self):
+        controller = RecoveryCommitController(
+            _args(paper_aligned_recovery_commit_control="recovery_commit_sparse_late_v8")
+        )
+        recovered = {
+            "source_frame_id": 1180,
+            "source_input_index": 1180,
+            "scores": {"R_t": 0.05, "V_t": 0.9, "Q_t": 0.9},
+            "source_payload": {"inlier_evidence": {"num_matches": 1800}},
+        }
+        context = {
+            "current_tick_frame_id": 1200,
+            "source_num_inliers": 1800,
+            "keyframe_density_per_100": 7.0,
+            "source_gap_to_last_committed": 28,
+            "predicted_gap_if_hold": 36,
+            "keyframe_growth_recent": 4,
+            "recent_materialization_rate": 0.0,
+            "recent_pose_fail_rate": 0.0,
+            "recent_runtime_attempt_count": 0,
+            "recent_materialized_count": 0,
+            "recent_failed_no_materialization_count": 0,
+            "source_pose_fail_count": 0,
+            "keyframes_since_last_pose_fail": 999,
+            "source_already_committed": False,
+            "is_surrogate": False,
+            "is_contamination_risk": False,
+            "anchor_count_available": False,
+            "anchor_count_before": None,
+        }
+
+        decision = controller.decide(recovered, context)
+
+        self.assertEqual(decision.action, "commit")
+        self.assertEqual(decision.reason, "v8_sparse_late_recovery_commit")
+        self.assertEqual(decision.debug["v8_density_state"], "sparse")
+        self.assertEqual(decision.debug["v8_min_inliers"], 1200)
+        self.assertEqual(decision.debug["v8_effective_min_inliers"], 1200)
+
+    def test_sparse_late_recovery_accepts_moderately_sparse_density_band(self):
+        controller = RecoveryCommitController(
+            _args(paper_aligned_recovery_commit_control="recovery_commit_sparse_late_v8")
+        )
+        recovered = {
+            "source_frame_id": 1180,
+            "source_input_index": 1180,
+            "scores": {"R_t": 0.05, "V_t": 0.9, "Q_t": 0.9},
+            "source_payload": {"inlier_evidence": {"num_matches": 1800}},
+        }
+        context = {
+            "current_tick_frame_id": 1200,
+            "source_num_inliers": 1800,
+            "keyframe_density_per_100": 11.0,
+            "source_gap_to_last_committed": 28,
+            "predicted_gap_if_hold": 36,
+            "keyframe_growth_recent": 4,
+            "recent_materialization_rate": 0.0,
+            "recent_pose_fail_rate": 0.0,
+            "recent_runtime_attempt_count": 0,
+            "recent_materialized_count": 0,
+            "recent_failed_no_materialization_count": 0,
+            "source_pose_fail_count": 0,
+            "keyframes_since_last_pose_fail": 999,
+            "source_already_committed": False,
+            "is_surrogate": False,
+            "is_contamination_risk": False,
+            "anchor_count_available": False,
+            "anchor_count_before": None,
+        }
+
+        decision = controller.decide(recovered, context)
+
+        self.assertEqual(decision.action, "commit")
+        self.assertEqual(decision.debug["v8_sparse_density_upper_per_100"], 12.0)
+
+    def test_sparse_late_recovery_holds_low_inlier_materialization_candidates(self):
+        controller = RecoveryCommitController(
+            _args(paper_aligned_recovery_commit_control="recovery_commit_sparse_late_v8")
+        )
+        recovered = {
+            "source_frame_id": 1180,
+            "source_input_index": 1180,
+            "scores": {"R_t": 0.05, "V_t": 0.9, "Q_t": 0.9},
+            "source_payload": {"inlier_evidence": {"num_matches": 2200}},
+        }
+        context = {
+            "current_tick_frame_id": 1200,
+            "source_num_inliers": 516,
+            "keyframe_density_per_100": 7.0,
+            "source_gap_to_last_committed": 28,
+            "predicted_gap_if_hold": 36,
+            "keyframe_growth_recent": 4,
+            "recent_materialization_rate": 0.0,
+            "recent_pose_fail_rate": 0.0,
+            "recent_runtime_attempt_count": 0,
+            "recent_materialized_count": 0,
+            "recent_failed_no_materialization_count": 0,
+            "source_pose_fail_count": 0,
+            "keyframes_since_last_pose_fail": 999,
+            "source_already_committed": False,
+            "is_surrogate": False,
+            "is_contamination_risk": False,
+            "anchor_count_available": False,
+            "anchor_count_before": None,
+        }
+
+        decision = controller.decide(recovered, context)
+
+        self.assertEqual(decision.action, "hold")
+        self.assertEqual(decision.reason, "v8_hold_sparse_late_geometry_low")
+        self.assertEqual(decision.debug["blocked_reason"], "sparse_late_geometry_low")
+        self.assertEqual(decision.debug["v8_min_inliers"], 1200)
+        self.assertEqual(decision.debug["v8_effective_min_inliers"], 1200)
+
+    def test_sparse_late_recovery_holds_moderate_inlier_late_candidates_when_late_gate_enabled(self):
+        controller = RecoveryCommitController(
+            _args(
+                paper_aligned_recovery_commit_control="recovery_commit_sparse_late_v8",
+                paper_aligned_recovery_v8_late_min_inliers=1600,
+            )
+        )
+        recovered = {
+            "source_frame_id": 1180,
+            "source_input_index": 1180,
+            "scores": {"R_t": 0.05, "V_t": 0.9, "Q_t": 0.9},
+            "source_payload": {"inlier_evidence": {"num_matches": 2200}},
+        }
+        context = {
+            "current_tick_frame_id": 1200,
+            "source_num_inliers": 1500,
+            "keyframe_density_per_100": 7.0,
+            "source_gap_to_last_committed": 28,
+            "predicted_gap_if_hold": 36,
+            "keyframe_growth_recent": 4,
+            "recent_materialization_rate": 0.0,
+            "recent_pose_fail_rate": 0.0,
+            "recent_runtime_attempt_count": 0,
+            "recent_materialized_count": 0,
+            "recent_failed_no_materialization_count": 0,
+            "source_pose_fail_count": 0,
+            "keyframes_since_last_pose_fail": 999,
+            "source_already_committed": False,
+            "is_surrogate": False,
+            "is_contamination_risk": False,
+            "anchor_count_available": False,
+            "anchor_count_before": None,
+        }
+
+        decision = controller.decide(recovered, context)
+
+        self.assertEqual(decision.action, "hold")
+        self.assertEqual(decision.reason, "v8_hold_sparse_late_geometry_low")
+        self.assertEqual(decision.debug["v8_effective_min_inliers"], 1600)
+
+    def test_sparse_late_recovery_keeps_moderate_inlier_bootstrap_candidates(self):
+        controller = RecoveryCommitController(
+            _args(
+                paper_aligned_recovery_commit_control="recovery_commit_sparse_late_v8",
+                paper_aligned_recovery_v8_late_min_inliers=1600,
+            )
+        )
+        recovered = {
+            "source_frame_id": 680,
+            "source_input_index": 680,
+            "scores": {"R_t": 0.05, "V_t": 0.9, "Q_t": 0.9},
+            "source_payload": {"inlier_evidence": {"num_matches": 2200}},
+        }
+        context = {
+            "current_tick_frame_id": 700,
+            "source_num_inliers": 1500,
+            "keyframe_density_per_100": 7.0,
+            "source_gap_to_last_committed": 28,
+            "predicted_gap_if_hold": 36,
+            "keyframe_growth_recent": 4,
+            "recent_materialization_rate": 0.0,
+            "recent_pose_fail_rate": 0.0,
+            "recent_runtime_attempt_count": 0,
+            "recent_materialized_count": 0,
+            "recent_failed_no_materialization_count": 0,
+            "source_pose_fail_count": 0,
+            "keyframes_since_last_pose_fail": 999,
+            "source_already_committed": False,
+            "is_surrogate": False,
+            "is_contamination_risk": False,
+            "anchor_count_available": False,
+            "anchor_count_before": None,
+        }
+
+        decision = controller.decide(recovered, context)
+
+        self.assertEqual(decision.action, "commit")
+        self.assertEqual(decision.reason, "v8_sparse_late_recovery_commit")
+        self.assertEqual(decision.debug["v8_effective_min_inliers"], 1200)
+
+    def test_sparse_late_recovery_holds_when_recent_materialization_budget_is_reached(self):
+        controller = RecoveryCommitController(
+            _args(paper_aligned_recovery_commit_control="recovery_commit_sparse_late_v8")
+        )
+        recovered = {
+            "source_frame_id": 1180,
+            "source_input_index": 1180,
+            "scores": {"R_t": 0.05, "V_t": 0.9, "Q_t": 0.9},
+            "source_payload": {"inlier_evidence": {"num_matches": 1800}},
+        }
+        context = {
+            "current_tick_frame_id": 1200,
+            "source_num_inliers": 1800,
+            "keyframe_density_per_100": 7.0,
+            "source_gap_to_last_committed": 28,
+            "predicted_gap_if_hold": 36,
+            "keyframe_growth_recent": 4,
+            "recent_materialization_rate": 0.0,
+            "recent_pose_fail_rate": 0.0,
+            "recent_runtime_attempt_count": 0,
+            "recent_materialized_count": 3,
+            "recent_failed_no_materialization_count": 0,
+            "source_pose_fail_count": 0,
+            "keyframes_since_last_pose_fail": 999,
+            "source_already_committed": False,
+            "is_surrogate": False,
+            "is_contamination_risk": False,
+            "anchor_count_available": False,
+            "anchor_count_before": None,
+        }
+
+        decision = controller.decide(recovered, context)
+
+        self.assertEqual(decision.action, "hold")
+        self.assertEqual(decision.reason, "v8_hold_recent_materialized_budget")
+        self.assertEqual(decision.debug["v8_materialized_budget_per_window"], 3)
+
+    def test_sparse_late_recovery_rejects_stale_v8_candidates(self):
+        controller = RecoveryCommitController(
+            _args(paper_aligned_recovery_commit_control="recovery_commit_sparse_late_v8")
+        )
+        recovered = {
+            "source_frame_id": 520,
+            "source_input_index": 520,
+            "scores": {"R_t": 0.05, "V_t": 0.9, "Q_t": 0.9},
+            "source_payload": {"inlier_evidence": {"num_matches": 1800}},
+        }
+        context = {
+            "current_tick_frame_id": 600,
+            "source_num_inliers": 900,
+            "keyframe_density_per_100": 7.0,
+            "source_gap_to_last_committed": 28,
+            "predicted_gap_if_hold": 36,
+            "keyframe_growth_recent": 4,
+            "recent_materialization_rate": 0.0,
+            "recent_pose_fail_rate": 0.0,
+            "recent_runtime_attempt_count": 0,
+            "recent_materialized_count": 0,
+            "recent_failed_no_materialization_count": 0,
+            "source_pose_fail_count": 0,
+            "keyframes_since_last_pose_fail": 999,
+            "source_already_committed": False,
+            "is_surrogate": False,
+            "is_contamination_risk": False,
+            "anchor_count_available": False,
+            "anchor_count_before": None,
+        }
+
+        decision = controller.decide(recovered, context)
+
+        self.assertEqual(decision.action, "reject")
+        self.assertEqual(decision.reason, "v8_reject_candidate_age")
+        self.assertEqual(decision.debug["v8_max_candidate_age"], 45)
 
     def test_pose_rep_decouple_mode_holds_dense_redundant_direct_frame(self):
         controller = DirectDensityController(
@@ -2929,6 +6595,14 @@ class CoupledInnovationModelTests(unittest.TestCase):
                 pose_only_frame.debug["density_state"],
             )
         )
+        self.assertTrue(
+            controller.should_update_prev_desc_after_hold(
+                pose_only_frame.decision,
+                pose_only_frame.debug["density_state"],
+                is_test=False,
+                pose_safe_tracking_only=True,
+            )
+        )
         self.assertFalse(controller.should_enqueue_hold_recovery(pose_only_frame.decision))
 
     def test_pose_safe_streaming_memory_tracks_only_strong_deferred_frames(self):
@@ -3003,6 +6677,79 @@ class CoupledInnovationModelTests(unittest.TestCase):
                 phase="incremental",
             )
         )
+
+    def test_support_bridge_keyframe_gate_is_trace_only_unless_explicitly_enabled(self):
+        default_gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+        explicit_gate = PaperAlignedRuntimeGate(
+            _args(
+                paper_aligned_direct_density_control="pose_safe_streaming_memory_v1",
+                paper_aligned_support_bridge_keyframe_gate="on",
+            )
+        )
+
+        self.assertFalse(default_gate.should_support_bridge_override_keyframe_gate())
+        self.assertTrue(explicit_gate.should_support_bridge_override_keyframe_gate())
+
+    def test_recovery_commit_materialization_is_trace_only_unless_explicitly_enabled(self):
+        default_gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+        explicit_gate = PaperAlignedRuntimeGate(
+            _args(
+                paper_aligned_direct_density_control="pose_safe_streaming_memory_v1",
+                paper_aligned_recovery_commit_materialization="on",
+            )
+        )
+
+        self.assertFalse(default_gate.should_materialize_recovery_commits())
+        self.assertTrue(explicit_gate.should_materialize_recovery_commits())
+
+    def test_recovery_commit_processing_supports_controlled_materialization(self):
+        default_gate = PaperAlignedRuntimeGate(
+            _args(paper_aligned_direct_density_control="pose_safe_streaming_memory_v1")
+        )
+        uncontrolled_gate = PaperAlignedRuntimeGate(
+            _args(
+                paper_aligned_direct_density_control="pose_safe_streaming_memory_v1",
+                paper_aligned_recovery_commit_materialization="controlled",
+            )
+        )
+        controlled_gate = PaperAlignedRuntimeGate(
+            _args(
+                paper_aligned_direct_density_control="pose_safe_streaming_memory_v1",
+                paper_aligned_recovery_commit_materialization="controlled",
+                paper_aligned_recovery_commit_control="recovery_commit_materialization_aware_v6",
+            )
+        )
+
+        self.assertFalse(default_gate.should_process_recovery_commits())
+        self.assertFalse(uncontrolled_gate.should_process_recovery_commits())
+        self.assertTrue(controlled_gate.should_process_recovery_commits())
+        self.assertFalse(controlled_gate.should_materialize_recovery_commits())
+
+    def test_sparse_late_recovery_processing_requires_late_sparse_stream_state(self):
+        gate = PaperAlignedRuntimeGate(
+            _args(
+                paper_aligned_direct_density_control="pose_safe_streaming_memory_v1",
+                paper_aligned_recovery_commit_materialization="controlled",
+                paper_aligned_recovery_commit_control="recovery_commit_sparse_late_v8",
+            )
+        )
+
+        gate.trace_events = [
+            {"frame_id": i, "final_keyframe_incremented": True}
+            for i in range(25)
+        ]
+        self.assertFalse(gate.should_process_recovery_commits_for_frame(400))
+        self.assertTrue(gate.should_process_recovery_commits_for_frame(500))
+
+        gate.trace_events = [
+            {"frame_id": i, "final_keyframe_incremented": True}
+            for i in range(120)
+        ]
+        self.assertFalse(gate.should_process_recovery_commits_for_frame(500))
 
     def test_pose_safe_streaming_memory_budgets_deferred_tracking_per_window(self):
         gate = PaperAlignedRuntimeGate(
@@ -3441,7 +7188,12 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertIn("should_pose_safe_preserve_baseline_keyframe", train_source)
         self.assertIn("pose_safe_tracking_only", train_source)
         self.assertIn("pose_safe_baseline_skeleton_forced", train_source)
-        self.assertIn("and not pose_safe_tracking_only", train_source)
+        self.assertIn("should_update_prev_desc_after_hold", train_source)
+        self.assertIn("should_support_bridge_override_keyframe_gate", train_source)
+        self.assertIn("should_process_recovery_commits", train_source)
+        self.assertIn("should_process_recovery_commits_for_frame", train_source)
+        self.assertNotIn("and runtime_gate.should_materialize_recovery_commits()", train_source)
+        self.assertNotIn("and not pose_safe_tracking_only", train_source)
         self.assertIn("is_pose_only_baseline_repr_family", train_source)
 
     def test_pose_safe_memory_pose_choice_rejects_weaker_or_unused_memory(self):
@@ -4423,6 +8175,840 @@ class CoupledInnovationModelTests(unittest.TestCase):
         self.assertIn("viewpoint_pose_history", train_source)
         self.assertIn("viewpoint_rotation_deg_window_max", train_source)
         self.assertNotIn("new_view_event_score >= ", train_source)
+
+    def test_train_resolves_v22_profile_before_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        profile_check = (
+            "profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V22_PROFILE"
+        )
+        self.assertIn("apply_coupled_innovation_defaults", train_source)
+        self.assertIn(profile_check, train_source)
+        self.assertLess(
+            train_source.index(profile_check),
+            train_source.index("if risk_mode != \"off\":"),
+        )
+
+    def test_train_resolves_v52_baseline_admission_render_core_before_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        profile_check = (
+            "profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V52_PROFILE"
+        )
+        self.assertIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V52_PROFILE", train_source)
+        self.assertIn(profile_check, train_source)
+        self.assertLess(
+            train_source.index(profile_check),
+            train_source.index("if risk_mode != \"off\":"),
+        )
+
+    def test_train_resolves_v53_quality_fallback_before_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        profile_check = (
+            "profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V53_PROFILE"
+        )
+        self.assertIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V53_PROFILE", train_source)
+        self.assertIn(profile_check, train_source)
+        self.assertLess(
+            train_source.index(profile_check),
+            train_source.index("if risk_mode != \"off\":"),
+        )
+
+    def test_train_resolves_v54_mask_aware_background_before_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        profile_check = (
+            "profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V54_PROFILE"
+        )
+        self.assertIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V54_PROFILE", train_source)
+        self.assertIn(profile_check, train_source)
+        self.assertLess(
+            train_source.index(profile_check),
+            train_source.index("if risk_mode != \"off\":"),
+        )
+
+    def test_train_resolves_v23_profile_before_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        self.assertIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V23_PROFILE", train_source)
+        self.assertLess(
+            train_source.index("BASELINE_RENDER_LOCK_INTRA_FRAME_V23_PROFILE"),
+            train_source.index("if risk_mode != \"off\":"),
+        )
+
+    def test_train_resolves_v24_profile_without_coupled_defaults(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        profile_check = (
+            "profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V24_PROFILE"
+        )
+        self.assertIn(profile_check, train_source)
+        self.assertIn('setattr(args, "risk_admission_mode", "off")', train_source)
+        self.assertLess(
+            train_source.index(profile_check),
+            train_source.index("apply_coupled_innovation_defaults(args)"),
+        )
+        self.assertLess(
+            train_source.index(profile_check),
+            train_source.index("if risk_mode != \"off\":"),
+        )
+
+    def test_train_resolves_v29_render_only_profile_before_runtime_gate(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+
+        profile_check = (
+            "profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V29_PROFILE"
+        )
+        self.assertIn("BASELINE_RENDER_LOCK_INTRA_FRAME_V29_PROFILE", train_source)
+        self.assertIn(profile_check, train_source)
+        self.assertLess(
+            train_source.index(profile_check),
+            train_source.index("if risk_mode != \"off\":"),
+        )
+        self.assertIn("apply_coupled_innovation_defaults(args)", train_source)
+
+    def test_bootstrap_pose_render_coupling_metadata_is_runtime_gated(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+        start = train_source.index("if n_keyframes == args.num_keyframes_miniba_bootstrap - 1:")
+        end = train_source.index("# 【场景表示模块】创建关键帧对象", start)
+        bootstrap_block = train_source[start:end]
+
+        self.assertIn("if runtime_gate is not None:", bootstrap_block)
+        self.assertIn("_write_pose_render_coupling_info(", bootstrap_block)
+        self.assertLess(
+            bootstrap_block.index("if runtime_gate is not None:"),
+            bootstrap_block.index("_write_pose_render_coupling_info("),
+        )
+
+    def test_non_dark_psnr_scene_guard_bypasses_fixed_black_dark_scenes(self):
+        model = SimpleNamespace(
+            pose_render_psnr_loss_scene_guard=(
+                "raw_loss_ratio_precommit_non_dark_guard_v2"
+            ),
+            pose_render_psnr_loss_scene_guard_triggered=False,
+            pose_render_psnr_loss_stats={},
+            pose_render_texture_sampling_stats={},
+            pose_render_psnr_loss_scene_guard_raw_low=0.0028,
+            pose_render_psnr_loss_scene_guard_raw_high=0.0055,
+            pose_render_psnr_loss_scene_guard_min_ratio=0.10,
+            pose_render_psnr_loss_scene_guard_min_events=384,
+            pose_render_psnr_loss_scene_guard_min_applied=48,
+            pose_render_psnr_loss_scene_guard_max_events=1000,
+            paper_aligned_training_background_mode="dark_scene_fixed_black_v1",
+            _training_background_scene_dark_decision=True,
+            training_background_stats={
+                "mode": "dark_scene_fixed_black_v1",
+                "dark_scene_decision": "fixed_black",
+                "dark_scene_mask_blocked": 0,
+            },
+        )
+        model._dark_fixed_black_scene_latched = lambda: True
+
+        should_block, debug = SceneModel._pose_render_psnr_scene_guard_should_block(
+            model,
+            {"applied": True, "raw_loss": 0.0035},
+        )
+
+        self.assertFalse(should_block)
+        self.assertEqual(debug["reason"], "psnr_scene_guard_dark_fixed_bypass")
+        self.assertTrue(debug["scene_guard_non_dark_only"])
+
+    def test_mask_aware_non_dark_psnr_scene_guard_bypasses_mask_blocked_scenes(self):
+        model = SimpleNamespace(
+            pose_render_psnr_loss_scene_guard=(
+                "raw_loss_ratio_precommit_non_dark_mask_guard_v3"
+            ),
+            pose_render_psnr_loss_scene_guard_triggered=False,
+            pose_render_psnr_loss_stats={},
+            pose_render_texture_sampling_stats={},
+            pose_render_psnr_loss_scene_guard_raw_low=0.0028,
+            pose_render_psnr_loss_scene_guard_raw_high=0.0055,
+            pose_render_psnr_loss_scene_guard_min_ratio=0.10,
+            pose_render_psnr_loss_scene_guard_min_events=384,
+            pose_render_psnr_loss_scene_guard_min_applied=48,
+            pose_render_psnr_loss_scene_guard_max_events=1000,
+            paper_aligned_training_background_mode="dark_scene_fixed_black_v1",
+            _training_background_scene_dark_decision=None,
+            training_background_stats={
+                "mode": "dark_scene_fixed_black_v1",
+                "dark_scene_decision": None,
+                "dark_scene_observations": 0,
+                "dark_scene_mask_blocked": 8670,
+            },
+        )
+        model._dark_fixed_black_scene_latched = lambda: False
+        model._dark_scene_mask_blocked_scene_latched = lambda: True
+
+        should_block, debug = SceneModel._pose_render_psnr_scene_guard_should_block(
+            model,
+            {"applied": True, "raw_loss": 0.0035},
+        )
+
+        self.assertFalse(should_block)
+        self.assertEqual(debug["reason"], "psnr_scene_guard_mask_blocked_bypass")
+        self.assertTrue(debug["scene_guard_mask_aware"])
+
+    def test_mask_aware_dark_background_psnr_scene_guard_blocks_dark_fixed_background(self):
+        model = SimpleNamespace(
+            pose_render_psnr_loss_scene_guard="mask_aware_dark_background_guard_v4",
+            pose_render_psnr_loss_scene_guard_triggered=False,
+            pose_render_psnr_loss_stats={},
+            pose_render_texture_sampling_stats={},
+            pose_render_psnr_loss_scene_guard_raw_low=0.0028,
+            pose_render_psnr_loss_scene_guard_raw_high=0.0055,
+            pose_render_psnr_loss_scene_guard_min_ratio=0.10,
+            pose_render_psnr_loss_scene_guard_min_events=384,
+            pose_render_psnr_loss_scene_guard_min_applied=48,
+            pose_render_psnr_loss_scene_guard_max_events=1000,
+            paper_aligned_training_background_mode=(
+                "mask_aware_dark_scene_fixed_black_v1"
+            ),
+        )
+        model._dark_fixed_black_scene_latched = lambda: False
+        model._dark_scene_mask_blocked_scene_latched = lambda: False
+
+        should_block, debug = SceneModel._pose_render_psnr_scene_guard_should_block(
+            model,
+            {
+                "applied": True,
+                "raw_loss": 0.0045,
+                "training_background_decision": "mask_aware_dark_fixed_black",
+                "training_background_target_mean": 0.45,
+            },
+        )
+
+        self.assertTrue(should_block)
+        self.assertEqual(
+            debug["reason"],
+            "psnr_mask_aware_dark_background_blocked",
+        )
+        self.assertTrue(debug["scene_guard_mask_aware_dark_background"])
+
+    def test_mask_aware_fixed_black_background_only_applies_to_masked_keyframes(self):
+        import torch
+
+        model = object.__new__(SceneModel)
+        model.paper_aligned_training_background_mode = "mask_aware_fixed_black_v1"
+        model.training_background_stats = model._new_training_background_stats()
+        target = torch.ones(3, 2, 2)
+        masked_keyframe = SimpleNamespace(
+            image_pyr=[target],
+            mask_pyr=[torch.ones(2, 2)],
+        )
+
+        masked_bg = SceneModel._training_background_for_keyframe(
+            model,
+            masked_keyframe,
+            0,
+        )
+
+        self.assertTrue(torch.equal(masked_bg, torch.zeros(3)))
+        self.assertEqual(
+            model.training_background_stats["mask_aware_fixed_black_applied"],
+            1,
+        )
+
+        unmasked_keyframe = SimpleNamespace(
+            image_pyr=[target],
+            mask_pyr=None,
+        )
+        random_bg = torch.tensor([0.2, 0.3, 0.4])
+        with patch("scene.scene_model.torch.rand", return_value=random_bg) as rand:
+            unmasked_bg = SceneModel._training_background_for_keyframe(
+                model,
+                unmasked_keyframe,
+                0,
+            )
+
+        rand.assert_called_once()
+        self.assertTrue(torch.equal(unmasked_bg, random_bg))
+        self.assertEqual(
+            model.training_background_stats["mask_aware_random_fallback"],
+            1,
+        )
+
+    def test_mask_aware_dark_scene_background_routes_bright_masks_to_random(self):
+        import torch
+
+        model = object.__new__(SceneModel)
+        model.paper_aligned_training_background_mode = (
+            "mask_aware_dark_scene_fixed_black_v1"
+        )
+        model.training_background_stats = model._new_training_background_stats()
+        target = torch.full((3, 2, 2), 0.60)
+        keyframe = SimpleNamespace(
+            image_pyr=[target],
+            mask_pyr=[torch.ones(2, 2)],
+            info={},
+        )
+        random_bg = torch.tensor([0.2, 0.3, 0.4])
+
+        with patch("scene.scene_model.torch.rand", return_value=random_bg) as rand:
+            bg = SceneModel._training_background_for_keyframe(model, keyframe, 0)
+
+        rand.assert_called_once()
+        self.assertTrue(torch.equal(bg, random_bg))
+        self.assertEqual(
+            model.training_background_stats["mask_aware_dark_random_fallback"],
+            1,
+        )
+        self.assertEqual(
+            keyframe.info["_paper_aligned_training_background_frame"]["decision"],
+            "mask_aware_dark_random",
+        )
+
+    def test_mask_aware_dark_scene_background_routes_dark_masks_to_fixed_black(self):
+        import torch
+
+        model = object.__new__(SceneModel)
+        model.paper_aligned_training_background_mode = (
+            "mask_aware_dark_scene_fixed_black_v1"
+        )
+        model.training_background_stats = model._new_training_background_stats()
+        target = torch.full((3, 2, 2), 0.40)
+        keyframe = SimpleNamespace(
+            image_pyr=[target],
+            mask_pyr=[torch.ones(2, 2)],
+            info={},
+        )
+
+        bg = SceneModel._training_background_for_keyframe(model, keyframe, 0)
+
+        self.assertTrue(torch.equal(bg, torch.zeros(3)))
+        self.assertEqual(
+            model.training_background_stats["mask_aware_dark_fixed_black_applied"],
+            1,
+        )
+        self.assertEqual(
+            keyframe.info["_paper_aligned_training_background_frame"]["decision"],
+            "mask_aware_dark_fixed_black",
+        )
+
+    def test_mask_aware_dark_scene_background_can_stabilize_bright_random_fallback(self):
+        import torch
+
+        model = object.__new__(SceneModel)
+        model.paper_aligned_training_background_mode = (
+            "mask_aware_dark_scene_deterministic_random_v1"
+        )
+        model._training_background_step = 0
+        model.training_background_stats = model._new_training_background_stats()
+        target = torch.full((3, 2, 2), 0.60)
+        keyframe = SimpleNamespace(
+            index=7,
+            image_pyr=[target],
+            mask_pyr=[torch.ones(2, 2)],
+            info={},
+        )
+
+        with patch("scene.scene_model.torch.rand") as rand:
+            bg_first = SceneModel._training_background_for_keyframe(model, keyframe, 0)
+            model._training_background_step = 0
+            bg_second = SceneModel._training_background_for_keyframe(model, keyframe, 0)
+
+        self.assertEqual(rand.call_count, 2)
+        self.assertTrue(torch.equal(bg_first, bg_second))
+        self.assertEqual(bg_first.shape, torch.Size([3]))
+        self.assertEqual(
+            model.training_background_stats["mask_aware_dark_random_fallback"],
+            2,
+        )
+        self.assertEqual(
+            keyframe.info["_paper_aligned_training_background_frame"]["decision"],
+            "mask_aware_dark_random",
+        )
+
+    def test_mask_aware_random_target_mask_applies_only_to_random_mask_background(self):
+        import torch
+
+        from scene.pose_render_psnr_loss import pose_render_mse_loss
+
+        image = torch.zeros(3, 2, 2)
+        target = torch.tensor(
+            [
+                [[1.0, 0.0], [1.0, 0.0]],
+                [[1.0, 0.0], [1.0, 0.0]],
+                [[1.0, 0.0], [1.0, 0.0]],
+            ]
+        )
+        keyframe_info = {
+            "pose_render_risk_score": 0.10,
+            "utility_drift_risk": 0.10,
+            "pose_support_score": 1.0,
+            "match_support_score": 1.0,
+            "_paper_aligned_training_background_frame": {
+                "decision": "mask_aware_dark_random",
+            },
+        }
+
+        loss, debug = pose_render_mse_loss(
+            image,
+            target,
+            mode="mse_pose_safe_v1",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info=keyframe_info,
+            weight=0.10,
+            target_mask_mode="mask_aware_random_nonzero_gt_v1",
+        )
+
+        self.assertTrue(debug["applied"])
+        self.assertTrue(debug["target_mask_applied"])
+        self.assertAlmostEqual(debug["target_valid_ratio"], 0.5)
+        self.assertAlmostEqual(debug["raw_loss"], 1.0)
+        self.assertAlmostEqual(float(loss.item()), 0.10)
+
+        fixed_info = dict(keyframe_info)
+        fixed_info["_paper_aligned_training_background_frame"] = {
+            "decision": "mask_aware_dark_fixed_black",
+        }
+        _loss, fixed_debug = pose_render_mse_loss(
+            image,
+            target,
+            mode="mse_pose_safe_v1",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info=fixed_info,
+            weight=0.10,
+            target_mask_mode="mask_aware_random_nonzero_gt_v1",
+        )
+
+        self.assertTrue(fixed_debug["applied"])
+        self.assertFalse(fixed_debug["target_mask_applied"])
+        self.assertAlmostEqual(fixed_debug["target_valid_ratio"], 1.0)
+        self.assertAlmostEqual(fixed_debug["raw_loss"], 0.5)
+
+    def test_mask_aware_random_target_mask_does_not_apply_without_background_decision(self):
+        import torch
+
+        from scene.pose_render_psnr_loss import pose_render_mse_loss
+
+        image = torch.zeros(3, 2, 2)
+        target = torch.tensor(
+            [
+                [[1.0, 0.0], [1.0, 0.0]],
+                [[1.0, 0.0], [1.0, 0.0]],
+                [[1.0, 0.0], [1.0, 0.0]],
+            ]
+        )
+        keyframe_info = {
+            "pose_render_risk_score": 0.10,
+            "utility_drift_risk": 0.10,
+            "pose_support_score": 1.0,
+            "match_support_score": 1.0,
+        }
+
+        _loss, debug = pose_render_mse_loss(
+            image,
+            target,
+            mode="mse_pose_safe_v1",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info=keyframe_info,
+            weight=0.10,
+            target_mask_mode="mask_aware_random_nonzero_gt_v1",
+        )
+
+        self.assertTrue(debug["applied"])
+        self.assertFalse(debug["target_mask_applied"])
+        self.assertAlmostEqual(debug["target_valid_ratio"], 1.0)
+
+    def test_mask_aware_no_mask_context_weight_boosts_only_unmasked_backgrounds(self):
+        import torch
+
+        from scene.pose_render_psnr_loss import pose_render_mse_loss
+
+        image = torch.zeros(3, 2, 2)
+        target = torch.ones(3, 2, 2)
+        common_info = {
+            "pose_render_risk_score": 0.10,
+            "utility_drift_risk": 0.10,
+            "pose_support_score": 1.0,
+            "match_support_score": 1.0,
+        }
+        no_mask_info = dict(common_info)
+        no_mask_info["_paper_aligned_training_background_frame"] = {
+            "decision": "mask_aware_dark_no_mask_random",
+        }
+
+        loss, debug = pose_render_mse_loss(
+            image,
+            target,
+            mode="mse_pose_safe_v1",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info=no_mask_info,
+            weight=0.10,
+            context_weight_mode="mask_aware_no_mask_boost_v1",
+        )
+
+        self.assertTrue(debug["applied"])
+        self.assertEqual(debug["context_weight_reason"], "mask_aware_no_mask_boost")
+        self.assertAlmostEqual(debug["context_weight_scale"], 1.5)
+        self.assertAlmostEqual(debug["weight"], 0.15)
+        self.assertAlmostEqual(float(loss.item()), 0.15)
+
+        masked_info = dict(common_info)
+        masked_info["_paper_aligned_training_background_frame"] = {
+            "decision": "mask_aware_dark_random",
+        }
+        _loss, masked_debug = pose_render_mse_loss(
+            image,
+            target,
+            mode="mse_pose_safe_v1",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info=masked_info,
+            weight=0.10,
+            context_weight_mode="mask_aware_no_mask_boost_v1",
+        )
+
+        self.assertEqual(masked_debug["context_weight_reason"], "mask_aware_masked")
+        self.assertAlmostEqual(masked_debug["context_weight_scale"], 1.0)
+        self.assertAlmostEqual(masked_debug["weight"], 0.10)
+        self.assertAlmostEqual(debug["raw_loss"], 1.0)
+
+    def test_mask_aware_no_mask_raw_response_context_boost_requires_residual_gap(self):
+        import torch
+
+        from scene.pose_render_psnr_loss import pose_render_mse_loss
+
+        image = torch.zeros(3, 2, 2)
+        low_gap_target = torch.full((3, 2, 2), 0.02)
+        high_gap_target = torch.ones(3, 2, 2)
+        common_info = {
+            "pose_render_risk_score": 0.10,
+            "utility_drift_risk": 0.10,
+            "pose_support_score": 1.0,
+            "match_support_score": 1.0,
+        }
+        no_mask_info = dict(common_info)
+        no_mask_info["_paper_aligned_training_background_frame"] = {
+            "decision": "mask_aware_dark_no_mask_random",
+        }
+
+        low_loss, low_debug = pose_render_mse_loss(
+            image,
+            low_gap_target,
+            mode="mse_pose_safe_v1",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info=no_mask_info,
+            weight=0.10,
+            context_weight_mode="mask_aware_no_mask_raw_response_boost_v1",
+        )
+
+        self.assertTrue(low_debug["applied"])
+        self.assertEqual(
+            low_debug["context_weight_reason"],
+            "mask_aware_no_mask_raw_response_low",
+        )
+        self.assertAlmostEqual(low_debug["context_weight_scale"], 1.0)
+        self.assertAlmostEqual(low_debug["weight"], 0.10)
+        self.assertAlmostEqual(low_debug["raw_loss"], 0.0004)
+        self.assertAlmostEqual(float(low_loss.item()), 0.00004)
+
+        high_loss, high_debug = pose_render_mse_loss(
+            image,
+            high_gap_target,
+            mode="mse_pose_safe_v1",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info=no_mask_info,
+            weight=0.10,
+            context_weight_mode="mask_aware_no_mask_raw_response_boost_v1",
+        )
+
+        self.assertTrue(high_debug["applied"])
+        self.assertEqual(
+            high_debug["context_weight_reason"],
+            "mask_aware_no_mask_raw_response_boost",
+        )
+        self.assertAlmostEqual(high_debug["context_weight_scale"], 1.5)
+        self.assertAlmostEqual(high_debug["weight"], 0.15)
+        self.assertAlmostEqual(high_debug["raw_loss"], 1.0)
+        self.assertAlmostEqual(float(high_loss.item()), 0.15)
+
+        masked_info = dict(common_info)
+        masked_info["_paper_aligned_training_background_frame"] = {
+            "decision": "mask_aware_dark_random",
+        }
+        _masked_loss, masked_debug = pose_render_mse_loss(
+            image,
+            high_gap_target,
+            mode="mse_pose_safe_v1",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info=masked_info,
+            weight=0.10,
+            context_weight_mode="mask_aware_no_mask_raw_response_boost_v1",
+        )
+
+        self.assertEqual(masked_debug["context_weight_reason"], "mask_aware_masked")
+        self.assertAlmostEqual(masked_debug["context_weight_scale"], 1.0)
+        self.assertAlmostEqual(masked_debug["weight"], 0.10)
+
+    def test_mask_aware_no_mask_raw_response_context_gate_disables_low_residual_gap(self):
+        import torch
+
+        from scene.pose_render_psnr_loss import pose_render_mse_loss
+
+        image = torch.zeros(3, 2, 2)
+        low_gap_target = torch.full((3, 2, 2), 0.02)
+        high_gap_target = torch.ones(3, 2, 2)
+        common_info = {
+            "pose_render_risk_score": 0.10,
+            "utility_drift_risk": 0.10,
+            "pose_support_score": 1.0,
+            "match_support_score": 1.0,
+        }
+        no_mask_info = dict(common_info)
+        no_mask_info["_paper_aligned_training_background_frame"] = {
+            "decision": "mask_aware_dark_no_mask_random",
+        }
+
+        low_loss, low_debug = pose_render_mse_loss(
+            image,
+            low_gap_target,
+            mode="mse_pose_safe_v1",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info=no_mask_info,
+            weight=0.10,
+            context_weight_mode="mask_aware_no_mask_raw_response_gate_boost_v1",
+        )
+
+        self.assertFalse(low_debug["applied"])
+        self.assertEqual(
+            low_debug["reason"],
+            "mask_aware_no_mask_raw_response_low_gate",
+        )
+        self.assertEqual(
+            low_debug["context_weight_reason"],
+            "mask_aware_no_mask_raw_response_low_gate",
+        )
+        self.assertAlmostEqual(low_debug["context_weight_scale"], 0.0)
+        self.assertAlmostEqual(low_debug["weight"], 0.0)
+        self.assertAlmostEqual(low_debug["raw_loss"], 0.0004)
+        self.assertAlmostEqual(float(low_loss.item()), 0.0)
+
+        high_loss, high_debug = pose_render_mse_loss(
+            image,
+            high_gap_target,
+            mode="mse_pose_safe_v1",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info=no_mask_info,
+            weight=0.10,
+            context_weight_mode="mask_aware_no_mask_raw_response_gate_boost_v1",
+        )
+
+        self.assertTrue(high_debug["applied"])
+        self.assertEqual(
+            high_debug["context_weight_reason"],
+            "mask_aware_no_mask_raw_response_boost",
+        )
+        self.assertAlmostEqual(high_debug["context_weight_scale"], 1.5)
+        self.assertAlmostEqual(high_debug["weight"], 0.15)
+        self.assertAlmostEqual(float(high_loss.item()), 0.15)
+
+        masked_info = dict(common_info)
+        masked_info["_paper_aligned_training_background_frame"] = {
+            "decision": "mask_aware_dark_random",
+        }
+        _masked_loss, masked_debug = pose_render_mse_loss(
+            image,
+            high_gap_target,
+            mode="mse_pose_safe_v1",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info=masked_info,
+            weight=0.10,
+            context_weight_mode="mask_aware_no_mask_raw_response_gate_boost_v1",
+        )
+
+        self.assertEqual(masked_debug["context_weight_reason"], "mask_aware_masked")
+        self.assertAlmostEqual(masked_debug["context_weight_scale"], 1.0)
+        self.assertAlmostEqual(masked_debug["weight"], 0.10)
+
+    def test_mask_aware_no_mask_scene_low_gate_context_uses_per_frame_low_gate(self):
+        import torch
+
+        from scene.pose_render_psnr_loss import pose_render_mse_loss
+
+        image = torch.zeros(3, 2, 2)
+        low_gap_target = torch.full((3, 2, 2), 0.02)
+        high_gap_target = torch.ones(3, 2, 2)
+        no_mask_info = {
+            "pose_render_risk_score": 0.10,
+            "utility_drift_risk": 0.10,
+            "pose_support_score": 1.0,
+            "match_support_score": 1.0,
+            "_paper_aligned_training_background_frame": {
+                "decision": "mask_aware_dark_no_mask_random",
+            },
+        }
+
+        low_loss, low_debug = pose_render_mse_loss(
+            image,
+            low_gap_target,
+            mode="mse_pose_safe_v1",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info=no_mask_info,
+            weight=0.10,
+            context_weight_mode="mask_aware_no_mask_scene_low_gate_boost_v1",
+        )
+
+        self.assertFalse(low_debug["applied"])
+        self.assertEqual(
+            low_debug["context_weight_reason"],
+            "mask_aware_no_mask_raw_response_low_gate",
+        )
+        self.assertAlmostEqual(low_debug["context_weight_scale"], 0.0)
+        self.assertAlmostEqual(float(low_loss.item()), 0.0)
+
+        high_loss, high_debug = pose_render_mse_loss(
+            image,
+            high_gap_target,
+            mode="mse_pose_safe_v1",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info=no_mask_info,
+            weight=0.10,
+            context_weight_mode="mask_aware_no_mask_scene_low_gate_boost_v1",
+        )
+
+        self.assertTrue(high_debug["applied"])
+        self.assertEqual(
+            high_debug["context_weight_reason"],
+            "mask_aware_no_mask_raw_response_boost",
+        )
+        self.assertAlmostEqual(high_debug["context_weight_scale"], 1.5)
+        self.assertAlmostEqual(float(high_loss.item()), 0.15)
+
+    def test_scene_low_response_gate_latches_low_unmasked_residual_scene(self):
+        model = SimpleNamespace(
+            pose_render_psnr_loss_context_weight=(
+                "mask_aware_no_mask_scene_low_gate_boost_v1"
+            ),
+            pose_render_psnr_scene_low_response_latched=False,
+            pose_render_psnr_loss_scene_guard_raw_low=0.0028,
+            pose_render_psnr_loss_scene_guard_min_applied=48,
+            pose_render_psnr_loss_stats={
+                "scene_low_response_events": 47,
+                "scene_low_response_raw_loss_sum": 47 * 0.0012,
+            },
+        )
+
+        should_block, debug = (
+            SceneModel._pose_render_psnr_scene_low_response_should_block(
+                model,
+                {
+                    "raw_loss": 0.0012,
+                    "training_background_decision": (
+                        "mask_aware_dark_no_mask_random"
+                    ),
+                },
+            )
+        )
+
+        self.assertTrue(should_block)
+        self.assertTrue(model.pose_render_psnr_scene_low_response_latched)
+        self.assertEqual(debug["reason"], "psnr_scene_low_response_gate")
+        self.assertEqual(debug["scene_low_response_events"], 48)
+        self.assertLess(debug["scene_low_response_raw_loss_mean"], 0.0028)
+
+    def test_scene_low_response_gate_keeps_high_residual_scene_open(self):
+        model = SimpleNamespace(
+            pose_render_psnr_loss_context_weight=(
+                "mask_aware_no_mask_scene_low_gate_boost_v1"
+            ),
+            pose_render_psnr_scene_low_response_latched=False,
+            pose_render_psnr_loss_scene_guard_raw_low=0.0028,
+            pose_render_psnr_loss_scene_guard_min_applied=48,
+            pose_render_psnr_loss_stats={
+                "scene_low_response_events": 47,
+                "scene_low_response_raw_loss_sum": 47 * 0.0032,
+            },
+        )
+
+        should_block, debug = (
+            SceneModel._pose_render_psnr_scene_low_response_should_block(
+                model,
+                {
+                    "raw_loss": 0.0032,
+                    "training_background_decision": (
+                        "mask_aware_dark_no_mask_random"
+                    ),
+                },
+            )
+        )
+
+        self.assertFalse(should_block)
+        self.assertFalse(model.pose_render_psnr_scene_low_response_latched)
+        self.assertEqual(debug["reason"], "psnr_scene_low_response_open")
+        self.assertEqual(debug["scene_low_response_events"], 48)
+        self.assertGreater(debug["scene_low_response_raw_loss_mean"], 0.0028)
+
+    def test_fast_scene_low_response_gate_latches_after_short_window(self):
+        model = SimpleNamespace(
+            pose_render_psnr_loss_context_weight=(
+                "mask_aware_no_mask_scene_low_fast_gate_boost_v1"
+            ),
+            pose_render_psnr_scene_low_response_latched=False,
+            pose_render_psnr_loss_scene_guard_raw_low=0.0028,
+            pose_render_psnr_loss_scene_guard_min_applied=48,
+            pose_render_psnr_loss_stats={
+                "scene_low_response_events": 31,
+                "scene_low_response_raw_loss_sum": 31 * 0.0012,
+            },
+        )
+
+        should_block, debug = (
+            SceneModel._pose_render_psnr_scene_low_response_should_block(
+                model,
+                {
+                    "raw_loss": 0.0012,
+                    "training_background_decision": (
+                        "mask_aware_dark_no_mask_random"
+                    ),
+                },
+            )
+        )
+
+        self.assertTrue(should_block)
+        self.assertTrue(model.pose_render_psnr_scene_low_response_latched)
+        self.assertEqual(debug["scene_low_response_min_events"], 32)
+        self.assertEqual(debug["scene_low_response_events"], 32)
+
+    def test_texture_sampling_bypasses_scene_low_response_latched_scene(self):
+        import torch
+
+        from scene.pose_render_texture_sampling import (
+            SCENE_LOW_RESPONSE_KEY,
+            residual_edge_guided_sampling_probability,
+        )
+
+        sample_proba = torch.ones(4, 4)
+        residual_edge = torch.ones(4, 4)
+        _guided, debug = residual_edge_guided_sampling_probability(
+            sample_proba,
+            residual_edge,
+            mode="residual_edge_response_guard_non_dark_v5",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info={
+                SCENE_LOW_RESPONSE_KEY: {
+                    "disabled": True,
+                    "reason": "psnr_scene_low_response_gate",
+                }
+            },
+        )
+
+        self.assertFalse(debug["applied"])
+        self.assertEqual(debug["reason"], "scene_low_response_latched")
 
 
 if __name__ == "__main__":

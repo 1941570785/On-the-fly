@@ -248,6 +248,31 @@ class RecoveryCommitController:
         self.v6_materialization_rate_trigger = float(
             getattr(args, "paper_aligned_recovery_v6_materialization_rate_trigger", 0.35) or 0.35
         )
+        self.v8_start_frame = int(getattr(args, "paper_aligned_recovery_v8_start_frame", 500) or 500)
+        self.v8_sparse_density_upper = float(
+            getattr(args, "paper_aligned_recovery_v8_sparse_density_upper_per_100", 12.0) or 12.0
+        )
+        self.v8_materialized_budget_per_window = int(
+            getattr(args, "paper_aligned_recovery_v8_materialized_budget_per_window", 3) or 3
+        )
+        self.v8_max_candidate_age = int(
+            getattr(args, "paper_aligned_recovery_v8_candidate_max_age", 45) or 45
+        )
+        self.v8_min_feasibility = float(
+            getattr(args, "paper_aligned_recovery_v8_min_feasibility", 0.52) or 0.52
+        )
+        self.v8_min_matches = int(
+            getattr(args, "paper_aligned_recovery_v8_min_matches", 450) or 450
+        )
+        self.v8_min_inliers = int(
+            getattr(args, "paper_aligned_recovery_v8_min_inliers", 1200) or 1200
+        )
+        self.v8_late_min_inliers = int(
+            getattr(args, "paper_aligned_recovery_v8_late_min_inliers", 1200) or 1200
+        )
+        self.v8_bootstrap_end_frame = int(
+            getattr(args, "paper_aligned_recovery_v8_bootstrap_end_frame", 800) or 800
+        )
         self.v7_early_seed_start = int(
             getattr(args, "paper_aligned_recovery_v7_early_seed_start", 150) or 150
         )
@@ -1137,6 +1162,70 @@ class RecoveryCommitController:
         ws["attempts"] = int(ws["attempts"]) + 1
         return RecoveryCommitDecision("commit", "v6_support_ranked_sparse_commit", debug)
 
+    def _decide_sparse_late_v8(
+        self,
+        candidate: dict[str, Any],
+        context: dict[str, Any],
+        base_debug: dict[str, Any],
+    ) -> RecoveryCommitDecision:
+        fallback = self._decide_materialization_aware_v6(candidate, context, base_debug)
+        debug = dict(fallback.debug)
+        current_tick = int(context.get("current_tick_frame_id", -1))
+        source_input = int(candidate.get("source_input_index", candidate.get("source_frame_id", -1)))
+        candidate_age = max(0, current_tick - source_input)
+        density_before = _f(context.get("keyframe_density_per_100", 0.0))
+        recent_materialized_count = int(context.get("recent_materialized_count", 0) or 0)
+        feasibility = _f(debug.get("materialization_feasibility_score", 0.0))
+        num_matches = int(debug.get("num_matches", 0) or 0)
+        num_inliers = int(debug.get("num_inliers", -1) or -1)
+        effective_min_inliers = self.v8_min_inliers
+        if current_tick >= self.v8_bootstrap_end_frame:
+            effective_min_inliers = max(self.v8_min_inliers, self.v8_late_min_inliers)
+
+        debug.update(
+            {
+                "v8_fallback_decision": str(fallback.action),
+                "v8_fallback_reason": str(fallback.reason),
+                "v8_start_frame": int(self.v8_start_frame),
+                "v8_sparse_density_upper_per_100": float(self.v8_sparse_density_upper),
+                "v8_density_state": "sparse"
+                if density_before <= self.v8_sparse_density_upper
+                else "dense",
+                "v8_candidate_age": int(candidate_age),
+                "v8_max_candidate_age": int(self.v8_max_candidate_age),
+                "v8_recent_materialized_count": recent_materialized_count,
+                "v8_materialized_budget_per_window": int(self.v8_materialized_budget_per_window),
+                "v8_min_feasibility": float(self.v8_min_feasibility),
+                "v8_min_matches": int(self.v8_min_matches),
+                "v8_min_inliers": int(self.v8_min_inliers),
+                "v8_late_min_inliers": int(self.v8_late_min_inliers),
+                "v8_bootstrap_end_frame": int(self.v8_bootstrap_end_frame),
+                "v8_effective_min_inliers": int(effective_min_inliers),
+            }
+        )
+        if fallback.action != "commit":
+            return RecoveryCommitDecision(fallback.action, fallback.reason, debug)
+        if current_tick < self.v8_start_frame:
+            debug["blocked_reason"] = "before_sparse_late_start"
+            return RecoveryCommitDecision("hold", "v8_hold_before_sparse_late_start", debug)
+        if candidate_age > self.v8_max_candidate_age:
+            debug["blocked_reason"] = "candidate_age"
+            return RecoveryCommitDecision("reject", "v8_reject_candidate_age", debug)
+        if density_before > self.v8_sparse_density_upper:
+            debug["blocked_reason"] = "density_not_sparse"
+            return RecoveryCommitDecision("hold", "v8_hold_density_not_sparse", debug)
+        if recent_materialized_count >= self.v8_materialized_budget_per_window:
+            debug["blocked_reason"] = "recent_materialized_budget"
+            return RecoveryCommitDecision("hold", "v8_hold_recent_materialized_budget", debug)
+        if feasibility < self.v8_min_feasibility or num_matches < self.v8_min_matches:
+            debug["blocked_reason"] = "sparse_late_support_low"
+            return RecoveryCommitDecision("hold", "v8_hold_sparse_late_support_low", debug)
+        if num_inliers >= 0 and num_inliers < effective_min_inliers:
+            debug["blocked_reason"] = "sparse_late_geometry_low"
+            return RecoveryCommitDecision("hold", "v8_hold_sparse_late_geometry_low", debug)
+        debug["blocked_reason"] = ""
+        return RecoveryCommitDecision("commit", "v8_sparse_late_recovery_commit", debug)
+
     def _decide_early_seed_v7(
         self,
         candidate: dict[str, Any],
@@ -1522,6 +1611,8 @@ class RecoveryCommitController:
             return self._decide_materialization_aware_v6(candidate, context, debug)
         if self.mode == "recovery_commit_early_seed_v7":
             return self._decide_early_seed_v7(candidate, context, debug)
+        if self.mode == "recovery_commit_sparse_late_v8":
+            return self._decide_sparse_late_v8(candidate, context, debug)
         if not age_ok:
             debug["blocked_reason"] = "reject_age"
             return RecoveryCommitDecision("reject", "reject_age", debug)

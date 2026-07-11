@@ -303,6 +303,55 @@ class Keyframe:
         uv, uvs_others, chosen_kfs_ids = self.triangulator.prepare_matches(
             self.desc_kpts
         )
+        if resolution_mode == "baseline":
+            keyframe_id_to_list_index = {
+                int(kf.index): i for i, kf in enumerate(all_keyframes)
+            }
+            baseline_indices = []
+            invalid_chosen_ids = []
+            for raw in chosen_kfs_ids:
+                try:
+                    cid = int(raw)
+                except Exception:
+                    invalid_chosen_ids.append(raw)
+                    continue
+                if 0 <= cid < len(all_keyframes):
+                    baseline_indices.append(cid)
+                    continue
+                if cid in keyframe_id_to_list_index:
+                    baseline_indices.append(int(keyframe_id_to_list_index[cid]))
+                    continue
+                invalid_chosen_ids.append(cid)
+            if invalid_chosen_ids:
+                raise IndexError(
+                    f"chosen_kfs_ids cannot resolve in baseline mode, "
+                    f"invalid={invalid_chosen_ids}, scene_size={len(all_keyframes)}"
+                )
+            Rts_others = torch.stack(
+                [all_keyframes[index].get_Rt() for index in baseline_indices],
+                dim=0,
+            )
+            if len(Rts_others < self.triangulator.n_cams):
+                Rts_others = torch.cat(
+                    [
+                        Rts_others,
+                        torch.eye(4, device="cuda")[None].repeat(
+                            self.triangulator.n_cams - len(Rts_others), 1, 1
+                        ),
+                    ],
+                    dim=0,
+                )
+
+            new_pts, depth, best_dis, valid_matches = self.triangulator(
+                uv, uvs_others, self.get_Rt(), Rts_others, self.f, self.centre
+            )
+            self.desc_kpts.update_3D_pts(
+                new_pts[valid_matches], depth[valid_matches], 1, valid_matches
+            )
+            if unload_desc_kpts:
+                self.desc_kpts.to("cpu")
+            return
+
         (
             resolved_indices,
             invalid_ids,

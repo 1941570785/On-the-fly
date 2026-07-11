@@ -629,6 +629,18 @@ class DirectDensityController:
             return decision == "hold_redundant" and density_state == "in_band"
         return False
 
+    def should_update_prev_desc_after_hold(
+        self,
+        decision: str,
+        density_state: str,
+        *,
+        is_test: bool,
+        pose_safe_tracking_only: bool = False,
+    ) -> bool:
+        if bool(is_test):
+            return False
+        return self.should_update_prev_desc_on_hold(decision, density_state)
+
     def should_enqueue_hold_recovery(self, decision: str | None = None) -> bool:
         if self.is_pose_only_baseline_repr_family:
             return False

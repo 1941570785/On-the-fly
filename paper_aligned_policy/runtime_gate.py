@@ -35,7 +35,16 @@ class PaperAlignedRuntimeGate:
         self.recovery_commit_control_mode = str(
             getattr(args, "paper_aligned_recovery_commit_control", "off") or "off"
         )
+        self.recovery_commit_materialization_mode = str(
+            getattr(args, "paper_aligned_recovery_commit_materialization", "off") or "off"
+        ).strip().lower()
         self.recovery_window_size = int(getattr(args, "paper_aligned_recovery_window_size", 30) or 30)
+        self.support_bridge_keyframe_gate_mode = str(
+            getattr(args, "paper_aligned_support_bridge_keyframe_gate", "off") or "off"
+        ).strip().lower()
+        self.render_frame_policy = str(
+            getattr(args, "paper_aligned_render_frame_policy", "off") or "off"
+        ).strip().lower()
         self.trace_events: list[dict[str, Any]] = []
         self._event_index: dict[int, int] = {}
         self._pending_true_source_commits: list[dict[str, Any]] = []
@@ -653,6 +662,21 @@ class PaperAlignedRuntimeGate:
             "recent_pose_fail_rate": float(decision.debug.get("recent_pose_fail_rate", 0.0) or 0.0),
             "keyframe_growth_recent": int(decision.debug.get("keyframe_growth_recent", 0) or 0),
             "starvation_risk": bool(decision.debug.get("starvation_risk", False)),
+            "v8_fallback_decision": str(decision.debug.get("v8_fallback_decision", "")),
+            "v8_fallback_reason": str(decision.debug.get("v8_fallback_reason", "")),
+            "v8_start_frame": int(decision.debug.get("v8_start_frame", 0) or 0),
+            "v8_density_state": str(decision.debug.get("v8_density_state", "")),
+            "v8_candidate_age": int(decision.debug.get("v8_candidate_age", 0) or 0),
+            "v8_max_candidate_age": int(decision.debug.get("v8_max_candidate_age", 0) or 0),
+            "v8_sparse_density_upper_per_100": float(
+                decision.debug.get("v8_sparse_density_upper_per_100", 0.0) or 0.0
+            ),
+            "v8_recent_materialized_count": int(
+                decision.debug.get("v8_recent_materialized_count", 0) or 0
+            ),
+            "v8_materialized_budget_per_window": int(
+                decision.debug.get("v8_materialized_budget_per_window", 0) or 0
+            ),
             "is_gap_critical": bool(decision.debug.get("is_gap_critical", False)),
             "is_coverage_floor": bool(decision.debug.get("is_coverage_floor", False)),
             "is_support_topk": bool(decision.debug.get("is_support_topk", False)),
@@ -785,6 +809,34 @@ class PaperAlignedRuntimeGate:
         self.trace_events.append(event)
         return admit, action
 
+    def should_support_bridge_override_keyframe_gate(self) -> bool:
+        return self.support_bridge_keyframe_gate_mode in {"1", "true", "yes", "y", "t", "on"}
+
+    def should_materialize_recovery_commits(self) -> bool:
+        return self.recovery_commit_materialization_mode in {"1", "true", "yes", "y", "t", "on"}
+
+    def should_process_recovery_commits(self) -> bool:
+        if self.should_materialize_recovery_commits():
+            return True
+        if self.recovery_commit_materialization_mode != "controlled":
+            return False
+        control_mode = str(self.recovery_commit_control_mode).strip().lower()
+        return control_mode not in {"", "off", "none", "0", "false", "no"}
+
+    def should_process_recovery_commits_for_frame(self, current_tick_frame_id: int) -> bool:
+        if not self.should_process_recovery_commits():
+            return False
+        if self.should_materialize_recovery_commits():
+            return True
+        control_mode = str(self.recovery_commit_control_mode).strip().lower()
+        if control_mode != "recovery_commit_sparse_late_v8":
+            return True
+        controller = self.recovery_commit_controller
+        if int(current_tick_frame_id) < int(getattr(controller, "v8_start_frame", 500)):
+            return False
+        density = self._current_keyframe_density(int(current_tick_frame_id))
+        return density <= float(getattr(controller, "v8_sparse_density_upper", 12.0))
+
     def _sync_pose_safe_tracking_budget(self, frame_id: int) -> None:
         window_id = int(frame_id) // 100
         if window_id != int(self._pose_safe_tracking_budget_window):
@@ -876,6 +928,21 @@ class PaperAlignedRuntimeGate:
             event["pose_safe_tracking_num_matches"] = int(num_matches)
             event["pose_safe_tracking_motion_ratio"] = float(motion_ratio)
         return True
+
+    def should_lock_baseline_render_keyframe(
+        self,
+        *,
+        action: str,
+        baseline_should_add: bool,
+        phase: str,
+    ) -> bool:
+        if self.render_frame_policy != "baseline_keyframe_lock_v1":
+            return False
+        if not bool(baseline_should_add):
+            return False
+        if str(action) == "direct_admit":
+            return False
+        return str(phase) in {"bootstrap", "incremental"}
 
     def should_pose_safe_preserve_baseline_keyframe(
         self,
@@ -2058,6 +2125,11 @@ class PaperAlignedRuntimeGate:
             "events": self.trace_events,
             "true_recovery_commit_events": self.true_recovery_commit_events,
             "recovery_commit_control_mode": self.recovery_commit_control_mode,
+            "recovery_commit_materialization_mode": str(self.recovery_commit_materialization_mode),
+            "recovery_commit_processing_enabled": bool(self.should_process_recovery_commits()),
+            "recovery_commit_controlled_materialization": bool(
+                self.recovery_commit_materialization_mode == "controlled"
+            ),
             "recovery_commit_control_events": self.recovery_commit_control_events,
             "recovery_commit_materialization_events": self.recovery_commit_materialization_events,
             "keyframe_timeline_events": self.keyframe_timeline_events,
@@ -2082,6 +2154,7 @@ class PaperAlignedRuntimeGate:
             "direct_density_control_mode": str(
                 getattr(self.direct_density_controller, "mode", "off")
             ),
+            "support_bridge_keyframe_gate_mode": str(self.support_bridge_keyframe_gate_mode),
             "direct_density_control_events": self.direct_density_control_events,
             "direct_density_control_v2_events": self.direct_density_control_v2_events,
             "direct_density_control_v2_1_events": self.direct_density_control_v2_1_events,

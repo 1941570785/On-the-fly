@@ -42,8 +42,31 @@ from gaussianviewer import GaussianViewer
 from webviewer.webviewer import WebViewer
 from graphdecoviewer.types import ViewerMode
 from utils import align_mean_up_fwd, increment_runtime
+from paper_aligned_policy.config import (
+    BASELINE_RENDER_LOCK_INTRA_FRAME_V22_PROFILE,
+    BASELINE_RENDER_LOCK_INTRA_FRAME_V23_PROFILE,
+    BASELINE_RENDER_LOCK_INTRA_FRAME_V24_PROFILE,
+    BASELINE_RENDER_LOCK_INTRA_FRAME_V29_PROFILE,
+    BASELINE_RENDER_LOCK_INTRA_FRAME_V30_PROFILE,
+    BASELINE_RENDER_LOCK_INTRA_FRAME_V31_PROFILE,
+    BASELINE_RENDER_LOCK_INTRA_FRAME_V32_PROFILE,
+    BASELINE_RENDER_LOCK_INTRA_FRAME_V33_PROFILE,
+    BASELINE_RENDER_LOCK_INTRA_FRAME_V34_PROFILE,
+    BASELINE_RENDER_LOCK_INTRA_FRAME_V35_PROFILE,
+    BASELINE_RENDER_LOCK_INTRA_FRAME_V36_PROFILE,
+    BASELINE_RENDER_LOCK_INTRA_FRAME_V37_PROFILE,
+    BASELINE_RENDER_LOCK_INTRA_FRAME_V52_PROFILE,
+    BASELINE_RENDER_LOCK_INTRA_FRAME_V53_PROFILE,
+    BASELINE_RENDER_LOCK_INTRA_FRAME_V54_PROFILE,
+    COUPLED_INNOVATION_MODE,
+    apply_coupled_innovation_defaults,
+)
 from paper_aligned_policy.runtime_gate import PaperAlignedRuntimeGate
 from paper_aligned_policy.viewpoint_coverage import build_viewpoint_coverage_event
+from scene.pose_render_posterior_risk import (
+    augment_pose_render_payload_with_posterior_risk,
+)
+from scene.pose_initialization_risk import PoseInitializationRiskGate
 from scene.keyframe import pop_chosen_kfs_resolution_events
 
 if __name__ == "__main__":
@@ -66,6 +89,45 @@ if __name__ == "__main__":
     args = get_args()
 
     risk_mode = getattr(args, "risk_admission_mode", "off") or "off"
+    profile_mode = str(
+        getattr(args, "paper_aligned_pose_render_assimilation_profile", "off") or "off"
+    )
+    if (
+        risk_mode == COUPLED_INNOVATION_MODE
+        and profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V24_PROFILE
+    ):
+        setattr(args, "risk_admission_mode", "off")
+        risk_mode = "off"
+        print(
+            f"[risk_admission_mode={COUPLED_INNOVATION_MODE}] profile-only passthrough "
+            f"{profile_mode} resolved runtime mode: {risk_mode}"
+        )
+    elif (
+        risk_mode == COUPLED_INNOVATION_MODE
+        and (
+            profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V22_PROFILE
+            or profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V23_PROFILE
+            or profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V29_PROFILE
+            or profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V30_PROFILE
+            or profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V31_PROFILE
+            or profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V32_PROFILE
+            or profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V33_PROFILE
+            or profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V34_PROFILE
+            or profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V35_PROFILE
+            or profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V36_PROFILE
+            or profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V37_PROFILE
+            or profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V52_PROFILE
+            or profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V53_PROFILE
+            or profile_mode == BASELINE_RENDER_LOCK_INTRA_FRAME_V54_PROFILE
+        )
+    ):
+        cfg = apply_coupled_innovation_defaults(args)
+        risk_mode = getattr(args, "risk_admission_mode", "off") or "off"
+        print(
+            f"[risk_admission_mode={COUPLED_INNOVATION_MODE}] profile-only preset "
+            f"{cfg.pose_render_assimilation_profile} resolved runtime mode: {risk_mode}"
+        )
+
     runtime_gate = None
     if risk_mode != "off":
         print(
@@ -89,6 +151,39 @@ if __name__ == "__main__":
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(json.dumps(events, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         atexit.register(_flush_chosen_kfs_resolution_events)
+
+    pose_initialization_risk_gate = None
+    pose_initialization_risk_mode = str(
+        getattr(args, "pose_initialization_risk_mode", "off") or "off"
+    ).strip().lower()
+    if pose_initialization_risk_mode != "off":
+        pose_initialization_risk_gate = PoseInitializationRiskGate(
+            mode=pose_initialization_risk_mode,
+            absolute_threshold=float(
+                getattr(args, "pose_initialization_risk_absolute_threshold", 0.10)
+            ),
+            adaptive_sigma=float(
+                getattr(args, "pose_initialization_risk_adaptive_sigma", 2.0)
+            ),
+            warmup=int(getattr(args, "pose_initialization_risk_warmup", 8)),
+            history_size=int(
+                getattr(args, "pose_initialization_risk_history_size", 64)
+            ),
+            cooldown_frames=int(
+                getattr(args, "pose_initialization_risk_cooldown_frames", 12)
+            ),
+        )
+        pose_initialization_risk_trace_path = (
+            Path(args.model_path) / "pose_initialization_risk_trace.json"
+        )
+        atexit.register(
+            pose_initialization_risk_gate.flush,
+            pose_initialization_risk_trace_path,
+        )
+        print(
+            f"[pose_initialization_risk_mode={pose_initialization_risk_mode}] "
+            "post-pose risk observer enabled."
+        )
 
     # 根据输入路径类型选择数据集加载器
     # - 流式数据集：URL格式（如rtsp://），用于实时视频流
@@ -371,6 +466,144 @@ if __name__ == "__main__":
                 "blocking_stage": str(stage),
                 "blocking_reason": str(reason or ""),
             }
+        )
+
+    def _write_pose_render_coupling_info(
+        info: dict[str, Any],
+        payload: dict[str, Any],
+        source: str,
+    ) -> None:
+        keep_keys = (
+            "frame_id",
+            "source_frame_id",
+            "direct_keyframe_finalized",
+            "direct_finalization_decision",
+            "direct_finalization_reason",
+            "pose_safe_tracking_only",
+            "density_state",
+            "pose_risk_score",
+            "pose_risk_high",
+            "semantic_pose_risk_score",
+            "pose_render_posterior_risk_score",
+            "pose_render_risk_score",
+            "pose_render_pose_confidence",
+            "pose_render_risk_high",
+            "pose_render_risk_reason",
+            "pose_render_support_ratio",
+            "pose_render_inlier_ratio",
+            "pose_render_pnp_inlier_ratio",
+            "pose_render_miniba_inlier_ratio",
+            "pose_render_correspondence_count",
+            "pose_render_match_count",
+            "pose_render_final_pose_inliers",
+            "pose_render_grid_coverage",
+            "pose_render_grid_entropy",
+            "pose_render_support_concentration",
+            "finalize_pose_risk_reference",
+            "semantic_R_t",
+            "semantic_Q_t",
+            "semantic_B_R_t",
+            "representation_value_score",
+            "novelty_value_score",
+            "high_novelty_score",
+            "support_needed_score",
+            "pose_reference_value_score",
+            "utility_drift_risk",
+            "utility_representation",
+            "utility_coverage_gain",
+            "pose_support_score",
+            "match_support_score",
+            "active_memory_stable_pose_reference",
+            "active_memory_frame_role",
+            "stream_memory_frame_identity",
+            "stream_memory_write_action",
+            "stream_memory_representation_need",
+            "utility_tracking_safe_context",
+            "utility_representation_role",
+            "new_view_event_score",
+            "anchor_health_score",
+            "num_matches",
+            "pose_inliers",
+        )
+        summary: dict[str, Any] = {"gate_source": str(source)}
+        for key in keep_keys:
+            if key not in payload:
+                continue
+            value = payload[key]
+            if isinstance(value, (bool, int, float, str)):
+                summary[key] = value
+        if "source_frame_id" not in summary:
+            summary["source_frame_id"] = int(info.get("_paper_aligned_source_frame_id", -1))
+        if "frame_id" not in summary:
+            summary["frame_id"] = int(summary.get("source_frame_id", -1))
+        if "pose_risk_score" not in summary and "semantic_R_t" in summary:
+            summary["pose_risk_score"] = float(summary["semantic_R_t"])
+        info["_paper_aligned_pose_render_coupling"] = summary
+
+    def _write_baseline_render_lock_pose_support_info(
+        info: dict[str, Any],
+        *,
+        frame_id: int,
+        pose_debug: dict[str, Any] | None,
+        viewpoint_scores: dict[str, Any] | None,
+        num_matches: int,
+        pose_inliers: int,
+    ) -> None:
+        if (
+            str(getattr(args, "paper_aligned_render_frame_policy", "off") or "off")
+            != "baseline_keyframe_lock_v1"
+        ):
+            return
+        if (
+            str(
+                getattr(
+                    args,
+                    "paper_aligned_pose_render_psnr_loss_support_weight",
+                    "off",
+                )
+                or "off"
+            )
+            == "off"
+        ):
+            return
+        pose_debug = dict(pose_debug or {})
+        source_frame_id = int(info.get("_paper_aligned_source_frame_id", frame_id))
+        payload = {
+            "frame_id": int(frame_id),
+            "source_frame_id": source_frame_id,
+            "direct_keyframe_finalized": True,
+            "direct_finalization_decision": "baseline_render_lock",
+            "direct_finalization_reason": "baseline_render_keyframe_pose_support",
+            "pose_safe_tracking_only": False,
+            "density_state": "baseline_render_locked",
+            "pose_risk_score": 0.0,
+            "pose_risk_high": False,
+            "finalize_pose_risk_reference": False,
+            "semantic_R_t": 0.0,
+            "semantic_Q_t": 1.0,
+            "semantic_B_R_t": 1.0,
+            "utility_drift_risk": 0.0,
+            "pose_support_score": 1.0,
+            "match_support_score": 1.0,
+            "active_memory_stable_pose_reference": True,
+            "active_memory_frame_role": "baseline_render_lock",
+            "stream_memory_frame_identity": "render+pose",
+            "stream_memory_write_action": "baseline_render_lock_pose_support",
+            "utility_tracking_safe_context": True,
+            "utility_representation_role": True,
+            "num_matches": int(num_matches or 0),
+            "pose_inliers": int(pose_inliers or 0),
+        }
+        augment_pose_render_payload_with_posterior_risk(
+            payload,
+            pose_debug=pose_debug,
+            viewpoint_scores=dict(viewpoint_scores or {}),
+            min_num_inliers=int(args.min_num_inliers),
+        )
+        _write_pose_render_coupling_info(
+            info,
+            payload,
+            "baseline_render_lock_pose_support",
         )
 
     def _snapshot_pose_match_state(
@@ -1202,7 +1435,11 @@ if __name__ == "__main__":
             and len(curr_prev_matches.kpts) > args.min_num_inliers  # 匹配点数量足够
         )
         support_bridge_trace = None
+        support_bridge_overrides_keyframe_gate = False
         if runtime_gate is not None and risk_mode != "off":
+            support_bridge_overrides_keyframe_gate = bool(
+                runtime_gate.should_support_bridge_override_keyframe_gate()
+            )
             support_candidates = _support_eligible_recovery_keyframes()
             best_support = {
                 "keyframe_id": -1,
@@ -1253,7 +1490,13 @@ if __name__ == "__main__":
                 "best_support_source_frame_id": int(best_support["source_frame_id"]),
                 "best_support_num_matches": int(best_support["num_matches"]),
                 "best_support_median_displacement": float(best_support["median_displacement"]),
-                "support_triggered_keyframe_gate": bool(best_support["should_add"]),
+                "support_candidate_should_add": bool(best_support["should_add"]),
+                "support_bridge_keyframe_gate_enabled": bool(
+                    support_bridge_overrides_keyframe_gate
+                ),
+                "support_triggered_keyframe_gate": bool(
+                    best_support["should_add"] and support_bridge_overrides_keyframe_gate
+                ),
                 "baseline_prev_num_matches": int(len(curr_prev_matches.kpts)),
                 "baseline_prev_median_displacement": float(dist.median().item()) if len(dist) > 0 else 0.0,
                 "baseline_prev_should_add": bool(should_add_keyframe),
@@ -1262,10 +1505,14 @@ if __name__ == "__main__":
                 "seed_promoted_to_miniba_count": 0,
                 "bridge_block_reason": "",
             }
-            if bool(best_support["should_add"]):
+            if bool(best_support["should_add"] and support_bridge_overrides_keyframe_gate):
                 curr_prev_matches = best_support["matches"]
                 dist = best_support["dist"]
                 should_add_keyframe = True
+            elif bool(best_support["should_add"]):
+                support_bridge_trace["bridge_block_reason"] = (
+                    "support_bridge_keyframe_gate_disabled"
+                )
         # 测试帧始终加入，用于姿态估计和评估（但不参与训练）
         should_add_keyframe |= info["is_test"]
         baseline_should_add = should_add_keyframe
@@ -1328,41 +1575,61 @@ if __name__ == "__main__":
             should_add_keyframe, runtime_action = runtime_gate.decide(
                 frameID, info, bool(baseline_should_add), phase=phase, evidence=evidence
             )
-            pose_safe_baseline_skeleton_forced = bool(
-                runtime_gate.should_pose_safe_preserve_baseline_keyframe(
+            baseline_render_lock_forced = bool(
+                runtime_gate.should_lock_baseline_render_keyframe(
                     action=str(runtime_action),
                     baseline_should_add=bool(baseline_should_add_frame),
                     phase=phase,
                 )
             )
-            if pose_safe_baseline_skeleton_forced:
+            pose_safe_baseline_skeleton_forced = False
+            if baseline_render_lock_forced:
                 should_add_keyframe = True
                 runtime_action = "direct_admit"
                 trace_ev = runtime_gate._get_event(frameID)
                 if trace_ev is not None:
-                    trace_ev["pose_safe_baseline_skeleton_forced"] = True
+                    trace_ev["baseline_render_lock_forced"] = True
                     trace_ev["admit_to_chain"] = True
-                    trace_ev["action_before_pose_safe_baseline_force"] = str(
+                    trace_ev["action_before_baseline_render_lock"] = str(
                         trace_ev.get("action", "")
                     )
                     trace_ev["action"] = "direct_admit"
             else:
-                pose_safe_tracking_only = bool(
-                    runtime_gate.should_pose_safe_track_deferred(
-                        frame_id=int(frameID),
+                pose_safe_baseline_skeleton_forced = bool(
+                    runtime_gate.should_pose_safe_preserve_baseline_keyframe(
                         action=str(runtime_action),
+                        baseline_should_add=bool(baseline_should_add_frame),
                         phase=phase,
-                        evidence=evidence,
                     )
                 )
-                if pose_safe_tracking_only:
+                if pose_safe_baseline_skeleton_forced:
                     should_add_keyframe = True
                     runtime_action = "direct_admit"
-                    baseline_should_add_frame = False
                     trace_ev = runtime_gate._get_event(frameID)
                     if trace_ev is not None:
-                        trace_ev["pose_safe_tracking_only"] = True
-                        trace_ev["pose_safe_tracking_admitted_to_pose_path"] = True
+                        trace_ev["pose_safe_baseline_skeleton_forced"] = True
+                        trace_ev["admit_to_chain"] = True
+                        trace_ev["action_before_pose_safe_baseline_force"] = str(
+                            trace_ev.get("action", "")
+                        )
+                        trace_ev["action"] = "direct_admit"
+                else:
+                    pose_safe_tracking_only = bool(
+                        runtime_gate.should_pose_safe_track_deferred(
+                            frame_id=int(frameID),
+                            action=str(runtime_action),
+                            phase=phase,
+                            evidence=evidence,
+                        )
+                    )
+                    if pose_safe_tracking_only:
+                        should_add_keyframe = True
+                        runtime_action = "direct_admit"
+                        baseline_should_add_frame = False
+                        trace_ev = runtime_gate._get_event(frameID)
+                        if trace_ev is not None:
+                            trace_ev["pose_safe_tracking_only"] = True
+                            trace_ev["pose_safe_tracking_admitted_to_pose_path"] = True
             baseline_eval_frame = bool(
                 info.get("_baseline_eval_frame", info.get("is_test", False))
             )
@@ -1381,6 +1648,7 @@ if __name__ == "__main__":
                 risk_mode == "paper_aligned_semantic_v1"
                 and getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit")
                 == "true_source_commit"
+                and runtime_gate.should_process_recovery_commits_for_frame(frameID)
             ):
                 for recovered in runtime_gate.pop_pending_true_source_commits(current_tick_frame_id=frameID):
                     source_frame_id = int(recovered.get("source_frame_id", -1))
@@ -1640,6 +1908,38 @@ if __name__ == "__main__":
                     if args.use_colmap_poses:
                         Rt = keyframe_dict["info"]["Rt"]
                         f = keyframe_dict["info"]["focal"]
+                    if runtime_gate is not None:
+                        bootstrap_source_frame_id = int(
+                            keyframe_dict["info"].get(
+                                "_paper_aligned_source_frame_id", index
+                            )
+                        )
+                        _write_pose_render_coupling_info(
+                            keyframe_dict["info"],
+                            {
+                                "frame_id": bootstrap_source_frame_id,
+                                "source_frame_id": bootstrap_source_frame_id,
+                                "direct_keyframe_finalized": True,
+                                "direct_finalization_decision": "bootstrap_miniba",
+                                "direct_finalization_reason": "bootstrap_pose_batch",
+                                "pose_risk_score": 0.0,
+                                "pose_risk_high": False,
+                                "finalize_pose_risk_reference": False,
+                                "semantic_R_t": 0.0,
+                                "semantic_Q_t": 1.0,
+                                "semantic_B_R_t": 1.0,
+                                "utility_drift_risk": 0.0,
+                                "pose_support_score": 1.0,
+                                "match_support_score": 1.0,
+                                "active_memory_stable_pose_reference": True,
+                                "active_memory_frame_role": "bootstrap",
+                                "stream_memory_frame_identity": "render+pose",
+                                "stream_memory_write_action": "bootstrap_write",
+                                "utility_tracking_safe_context": True,
+                                "utility_representation_role": True,
+                            },
+                            "bootstrap_miniba",
+                        )
                     # 【场景表示模块】创建关键帧对象（包含图像、深度、特征等）
                     keyframe = Keyframe(
                         keyframe_dict["image"],
@@ -1745,7 +2045,16 @@ if __name__ == "__main__":
                 if runtime_gate is not None:
                     _append_candidate_trace(frameID)
                 increment_runtime(runtimes["tri"], start_time)
-                
+
+                pose_initialization_risk_match_before = (
+                    _snapshot_pose_match_state(
+                        desc_kpts,
+                        prev_keyframes_for_pose,
+                        n_keyframes,
+                    )
+                    if pose_initialization_risk_gate is not None
+                    else None
+                )
                 start_time = time.time()
                 # 【姿态估计模块】增量姿态初始化：使用PnP-RANSAC和Mini-BA估计新帧位姿
                 if runtime_gate is not None:
@@ -1918,7 +2227,10 @@ if __name__ == "__main__":
                     if args.use_colmap_poses:
                         Rt = info["Rt"]
                     viewpoint_coverage_event: dict[str, Any] = {}
-                    if runtime_gate is not None:
+                    if (
+                        runtime_gate is not None
+                        or pose_initialization_risk_gate is not None
+                    ):
                         active_anchor_ids = _active_anchor_keyframe_ids()
                         active_anchor_Rt = None
                         if active_anchor_ids:
@@ -1955,30 +2267,60 @@ if __name__ == "__main__":
                             ),
                             pose_history=list(viewpoint_pose_history),
                         )
-                        pose_memory_pool_summary = runtime_gate.pose_only_reference_pool_summary()
-                        pose_memory_candidate_pool_size = len(
-                            getattr(runtime_gate, "_pending_true_source_commits", [])
-                        ) + len(getattr(runtime_gate, "_held_true_source_commits", []))
-                        viewpoint_coverage_event.update(
-                            {
-                                "pose_memory_reference_count": int(len(pose_only_refs)),
-                                "pose_memory_pool_size": int(
-                                    pose_memory_pool_summary.get("pool_size", 0)
-                                ),
-                                "pose_memory_candidate_pool_size": int(
-                                    pose_memory_candidate_pool_size
-                                ),
-                            }
+                        if runtime_gate is not None:
+                            pose_memory_pool_summary = runtime_gate.pose_only_reference_pool_summary()
+                            pose_memory_candidate_pool_size = len(
+                                getattr(runtime_gate, "_pending_true_source_commits", [])
+                            ) + len(getattr(runtime_gate, "_held_true_source_commits", []))
+                            viewpoint_coverage_event.update(
+                                {
+                                    "pose_memory_reference_count": int(len(pose_only_refs)),
+                                    "pose_memory_pool_size": int(
+                                        pose_memory_pool_summary.get("pool_size", 0)
+                                    ),
+                                    "pose_memory_candidate_pool_size": int(
+                                        pose_memory_candidate_pool_size
+                                    ),
+                                }
+                            )
+                    pose_debug_incr = getattr(
+                        pose_initializer, "last_incremental_debug", {}
+                    ) or {}
+                    pose_initialization_risk_decision = None
+                    if pose_initialization_risk_gate is not None:
+                        recent_pose_fail_rate = (
+                            1.0
+                            - (sum(recent_pose_success) / max(len(recent_pose_success), 1))
+                            if recent_pose_success
+                            else 0.0
                         )
+                        pose_initialization_risk_decision = (
+                            pose_initialization_risk_gate.evaluate(
+                                frame_id=int(frameID),
+                                pose_debug=pose_debug_incr,
+                                viewpoint_scores=viewpoint_coverage_event,
+                                min_num_inliers=int(args.min_num_inliers),
+                                recent_pose_fail_rate=float(recent_pose_fail_rate),
+                                current_Rt=Rt,
+                                pose_history=list(viewpoint_pose_history),
+                                baseline_selected=bool(baseline_should_add_frame),
+                                is_test=bool(info.get("is_test", False)),
+                                is_bootstrap=False,
+                            )
+                        )
+                        info["_pose_initialization_risk"] = dict(
+                            pose_initialization_risk_decision
+                        )
+                    if (
+                        runtime_gate is not None
+                        or pose_initialization_risk_gate is not None
+                    ):
                         try:
                             history_Rt = Rt.detach().cpu().clone()
                         except Exception:
                             history_Rt = Rt
                         viewpoint_pose_history.append((int(frameID), history_Rt))
                         last_viewpoint_coverage_event = dict(viewpoint_coverage_event)
-                    pose_debug_incr = getattr(
-                        pose_initializer, "last_incremental_debug", {}
-                    ) or {}
                     direct_keyframe_finalized = True
                     fin_dec = None
                     if (
@@ -2045,9 +2387,15 @@ if __name__ == "__main__":
                         update_prev_on_hold = runtime_gate.direct_density_controller.should_update_prev_desc_on_hold(
                             str(fin_dec.decision), density_state
                         )
+                        update_prev_after_hold = runtime_gate.direct_density_controller.should_update_prev_desc_after_hold(
+                            str(fin_dec.decision),
+                            density_state,
+                            is_test=bool(info.get("is_test", False)),
+                            pose_safe_tracking_only=bool(pose_safe_tracking_only),
+                        )
                         held_bridge = bool(
                             not direct_keyframe_finalized
-                            and update_prev_on_hold
+                            and update_prev_after_hold
                             and runtime_gate.direct_density_controller.hold_tracking_bridge_mode != "none"
                         )
                         if trace_ev is not None:
@@ -2306,9 +2654,12 @@ if __name__ == "__main__":
                                 dbg.get("stream_memory_sparse_write", False)
                             ),
                             "pose_risk_score": float(dbg.get("pose_risk_score", 0.0)),
+                            "pose_risk_high": bool(dbg.get("pose_risk_high", False)),
                             "motion_value_score": float(dbg.get("motion_value_score", 0.0)),
                             "match_support_score": float(dbg.get("match_support_score", 0.0)),
                             "pose_support_score": float(dbg.get("pose_support_score", 0.0)),
+                            "num_matches": int(dbg.get("num_matches", 0)),
+                            "pose_inliers": int(dbg.get("pose_inliers", 0)),
                             "source_redundancy_score": float(
                                 dbg.get("source_redundancy_score", 0.0)
                             ),
@@ -2558,6 +2909,12 @@ if __name__ == "__main__":
                             runtime_gate.append_viewpoint_coverage_event(
                                 viewpoint_coverage_event
                             )
+                        augment_pose_render_payload_with_posterior_risk(
+                            v2_payload,
+                            pose_debug=pose_debug_incr,
+                            viewpoint_scores=viewpoint_coverage_event,
+                            min_num_inliers=int(args.min_num_inliers),
+                        )
                         if runtime_gate.direct_density_controller.is_v2221:
                             v2_payload.update(
                                 {
@@ -2831,13 +3188,19 @@ if __name__ == "__main__":
                                 if trace_ev is not None:
                                     trace_ev["pose_safe_rng_restored_on_hold"] = True
                             should_add_keyframe = False
-                            if (
-                                not info["is_test"]
-                                and update_prev_on_hold
-                                and not pose_safe_tracking_only
-                            ):
+                            if update_prev_after_hold:
                                 prev_desc_kpts = desc_kpts
                                 v2_payload["prev_desc_updated_on_hold"] = True
+                                v2_payload["prev_desc_update_role"] = (
+                                    "pose_safe_tracking_only"
+                                    if pose_safe_tracking_only
+                                    else "held_bridge"
+                                )
+                                if trace_ev is not None:
+                                    trace_ev["prev_desc_updated_on_hold"] = True
+                                    trace_ev["prev_desc_update_role"] = str(
+                                        v2_payload["prev_desc_update_role"]
+                                    )
                                 if runtime_gate.direct_density_controller.is_v2221:
                                     runtime_gate.direct_density_control_v2_2_2_1_events[-1][
                                         "prev_desc_updated_on_hold"
@@ -2866,7 +3229,64 @@ if __name__ == "__main__":
                                     runtime_gate.direct_density_control_events[-1][
                                         "prev_desc_updated_on_hold"
                                     ] = True
+                    if (
+                        pose_initialization_risk_decision is not None
+                        and pose_initialization_risk_decision["isolated"]
+                    ):
+                        direct_keyframe_finalized = False
+                        should_add_keyframe = False
+                        info["_pose_initialization_risk_isolated"] = True
+                        if pose_initialization_risk_match_before is not None:
+                            _restore_pose_match_state(
+                                desc_kpts,
+                                prev_keyframes_for_pose,
+                                n_keyframes,
+                                pose_initialization_risk_match_before,
+                            )
+                        if runtime_gate is not None:
+                            trace_ev = runtime_gate._get_event(frameID)
+                            if trace_ev is not None:
+                                trace_ev["pose_initialization_risk"] = dict(
+                                    pose_initialization_risk_decision
+                                )
+                                trace_ev["pose_initialization_risk_isolated"] = True
+                                trace_ev["admit_to_chain"] = False
+                                trace_ev["drop_reason"] = (
+                                    "pose_initialization_risk_isolated"
+                                )
                     if direct_keyframe_finalized:
+                        if runtime_gate is not None and fin_dec is not None:
+                            _write_pose_render_coupling_info(
+                                info,
+                                v2_payload,
+                                "direct_density_control",
+                            )
+                        elif runtime_gate is not None and fin_dec is None:
+                            try:
+                                baseline_lock_num_matches = int(len(curr_prev_matches.kpts))
+                            except Exception:
+                                baseline_lock_num_matches = int(
+                                    pose_debug_incr.get("match_count_total", 0) or 0
+                                )
+                            baseline_lock_pose_inliers = int(
+                                pose_debug_incr.get(
+                                    "num_miniba_inliers",
+                                    pose_debug_incr.get("num_pnp_inliers", 0),
+                                )
+                                or 0
+                            )
+                            _write_baseline_render_lock_pose_support_info(
+                                info,
+                                frame_id=int(frameID),
+                                pose_debug=pose_debug_incr,
+                                viewpoint_scores=(
+                                    viewpoint_coverage_event
+                                    if "viewpoint_coverage_event" in locals()
+                                    else {}
+                                ),
+                                num_matches=baseline_lock_num_matches,
+                                pose_inliers=baseline_lock_pose_inliers,
+                            )
                         # 【场景表示模块】创建新关键帧对象
                         keyframe = Keyframe(
                             image,
@@ -2888,6 +3308,10 @@ if __name__ == "__main__":
                             )
                         prev_keyframe = keyframe
                         increment_runtime(runtimes["Add"], start_time)
+
+                        start_time = time.time()
+                        scene_model.pose_render_pre_refine_keyframe(-1)
+                        increment_runtime(runtimes["Opt"], start_time)
 
                         # 【场景表示模块】为新关键帧初始化3D高斯点
                         # 使用Laplacian概率采样 + 引导MVS深度估计
