@@ -59,6 +59,29 @@ def pose_risk_candidate(risk_event: dict[str, Any] | None) -> bool:
     )
 
 
+def pose_review_acceptance(
+    *,
+    start_loss: float,
+    end_loss: float,
+    rotation_delta_deg: float,
+    translation_delta: float,
+    max_rotation_delta_deg: float,
+    max_translation_delta: float,
+    max_loss_increase_ratio: float = 0.0,
+) -> tuple[bool, str]:
+    start = max(_as_float(start_loss), 1e-8)
+    end = _as_float(end_loss, float("inf"))
+    if end > start * (1.0 + max(0.0, _as_float(max_loss_increase_ratio))):
+        return False, "loss_degraded"
+    if _as_float(rotation_delta_deg) > max(
+        0.0, _as_float(max_rotation_delta_deg)
+    ):
+        return False, "rotation_step_exceeded"
+    if _as_float(translation_delta) > max(0.0, _as_float(max_translation_delta)):
+        return False, "translation_step_exceeded"
+    return True, "accepted"
+
+
 class PoseRiskUtilityAdmissionGate:
     """Combine post-pose uncertainty with expected representation value."""
 

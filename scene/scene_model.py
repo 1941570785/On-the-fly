@@ -68,6 +68,7 @@ from scene.pose_render_texture_sampling import (
     residual_edge_guided_sampling_probability,
 )
 from scene.pose_render_update_gate import pose_render_update_gate_decision
+from scene.pose_risk_utility_admission import pose_review_acceptance
 from scene.test_render_calibration import calibrate_test_render
 from utils import (
     RGB2SH,
@@ -3685,6 +3686,228 @@ class SceneModel:
         )
         keyframe.info["_paper_aligned_pose_render_pre_refine"] = debug
         self._record_pose_render_pre_refine(debug)
+        return debug
+
+    @torch.no_grad()
+    def probe_pose_risk_utility(
+        self,
+        *,
+        image: torch.Tensor,
+        Rt: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        downsample: int = 4,
+    ) -> dict[str, object]:
+        scale = max(1, int(downsample))
+        width = max(1, int(self.width) // scale)
+        height = max(1, int(self.height) // scale)
+        if not hasattr(self, "xyz") or int(self.xyz.shape[0]) <= 0:
+            return {
+                "available": False,
+                "reason": "no_gaussians",
+                "render_coverage": 0.0,
+                "coverage_deficit": 1.0,
+                "residual_mean": 0.0,
+                "residual_selectivity": 0.0,
+                "probe_width": width,
+                "probe_height": height,
+            }
+
+        device = self.xyz.device
+        target = image.detach().to(device)
+        if target.ndim == 4:
+            target = target[0]
+        target = F.interpolate(
+            target[None],
+            size=(height, width),
+            mode="bilinear",
+            align_corners=False,
+        )[0]
+        view_matrix = Rt.detach().to(device).transpose(0, 1)
+        render_pkg = self.render(
+            width,
+            height,
+            view_matrix,
+            1.0,
+            torch.zeros(3, device=device),
+        )
+        rendered = render_pkg["render"].detach()
+        support = render_pkg["mainGaussID"][0] >= 0
+        valid = torch.ones_like(support, dtype=torch.bool)
+        if mask is not None:
+            valid_mask = mask.detach().to(device)
+            if valid_mask.ndim == 3:
+                valid_mask = valid_mask[0]
+            valid_mask = F.interpolate(
+                valid_mask[None, None].float(),
+                size=(height, width),
+                mode="nearest",
+            )[0, 0] > 0.5
+            valid &= valid_mask
+
+        valid_count = int(valid.sum().item())
+        if valid_count <= 0:
+            return {
+                "available": False,
+                "reason": "no_valid_pixels",
+                "render_coverage": 0.0,
+                "coverage_deficit": 1.0,
+                "residual_mean": 0.0,
+                "residual_selectivity": 0.0,
+                "probe_width": width,
+                "probe_height": height,
+            }
+
+        supported_valid = support & valid
+        render_coverage = float(
+            supported_valid.sum().float().div(float(valid_count)).item()
+        )
+        residual = (rendered - target).abs().mean(dim=0)
+        dx = F.pad((residual[:, 1:] - residual[:, :-1]).abs(), (0, 1, 0, 0))
+        dy = F.pad((residual[1:, :] - residual[:-1, :]).abs(), (0, 0, 0, 1))
+        response = 0.65 * residual + 0.35 * (dx + dy)
+        response_values = response[valid]
+        response_mean = response_values.mean().clamp_min(1e-6)
+        normalized = (response_values / response_mean).clamp(0.25, 4.0)
+        residual_selectivity = float(
+            (torch.quantile(normalized, 0.90) - torch.quantile(normalized, 0.50))
+            .detach()
+            .cpu()
+            .item()
+        )
+        return {
+            "available": True,
+            "reason": "ok",
+            "render_coverage": render_coverage,
+            "coverage_deficit": max(0.0, 1.0 - render_coverage),
+            "residual_mean": float(response_values.mean().detach().cpu().item()),
+            "residual_selectivity": max(0.0, residual_selectivity),
+            "valid_ratio": float(valid.float().mean().detach().cpu().item()),
+            "probe_width": width,
+            "probe_height": height,
+        }
+
+    def review_pose_risk_keyframe(
+        self,
+        keyframe_id: int = -1,
+        *,
+        iterations: int = 2,
+        min_render_coverage: float = 0.15,
+        max_rotation_delta_deg: float = 1.5,
+        max_translation_delta: float = 0.05,
+    ) -> dict[str, object]:
+        keyframe = self.keyframes[keyframe_id]
+        bounded_iterations = max(0, min(2, int(iterations)))
+        debug: dict[str, object] = {
+            "requested": True,
+            "applied": False,
+            "accepted": False,
+            "iterations": bounded_iterations,
+            "reason": "",
+        }
+        if bounded_iterations <= 0:
+            debug["reason"] = "zero_iterations"
+            return debug
+        if not hasattr(self, "xyz") or int(self.xyz.shape[0]) <= 0:
+            debug["reason"] = "no_gaussians"
+            return debug
+
+        start_Rt = keyframe.get_Rt().detach().clone()
+        pose_params = {"rW2C", "tW2C"}
+        lvl = keyframe.pyr_lvl
+        fixed_bg = torch.zeros(3, device=start_Rt.device)
+
+        def supported_loss() -> tuple[torch.Tensor | None, float]:
+            render_pkg = self.render_from_id(keyframe_id, pyr_lvl=lvl, bg=fixed_bg)
+            support = render_pkg["mainGaussID"][0] >= 0
+            if keyframe.mask_pyr is not None:
+                keyframe_mask = keyframe.mask_pyr[lvl]
+                if keyframe_mask.ndim == 3:
+                    keyframe_mask = keyframe_mask[0]
+                support &= keyframe_mask.bool()
+            coverage = float(support.float().mean().detach().cpu().item())
+            if coverage < float(min_render_coverage) or not bool(support.any()):
+                return None, coverage
+            residual = (render_pkg["render"] - keyframe.image_pyr[lvl]).abs().mean(dim=0)
+            return residual[support].mean(), coverage
+
+        with torch.no_grad():
+            initial_loss_tensor, initial_coverage = supported_loss()
+        debug["render_coverage"] = initial_coverage
+        if initial_loss_tensor is None:
+            debug["reason"] = "insufficient_render_coverage"
+            return debug
+        start_loss = float(initial_loss_tensor.detach().cpu().item())
+
+        completed = 0
+        for _ in range(bounded_iterations):
+            keyframe.zero_grad()
+            self.optimizer.zero_grad()
+            loss, coverage = supported_loss()
+            if loss is None:
+                debug["reason"] = "coverage_lost_during_review"
+                break
+            loss.backward()
+            with torch.no_grad():
+                for name, param_dict in keyframe.optimizer.params.items():
+                    if name not in pose_params:
+                        param_dict["val"].grad = None
+                keyframe.optimizer.step()
+            self.optimizer.zero_grad()
+            keyframe.zero_grad()
+            completed += 1
+
+        with torch.no_grad():
+            end_loss_tensor, end_coverage = supported_loss()
+            end_Rt = keyframe.get_Rt().detach().clone()
+            rotation_delta = rotation_distance(
+                start_Rt[:3, :3][None], end_Rt[:3, :3][None]
+            ) * (180.0 / math.pi)
+            translation_delta = torch.linalg.vector_norm(
+                start_Rt[:3, 3] - end_Rt[:3, 3]
+            )
+        end_loss = (
+            float(end_loss_tensor.detach().cpu().item())
+            if end_loss_tensor is not None
+            else float("inf")
+        )
+        rotation_delta_deg = float(rotation_delta.detach().cpu().view(-1)[0].item())
+        translation_delta_value = float(translation_delta.detach().cpu().item())
+        accepted, reason = pose_review_acceptance(
+            start_loss=start_loss,
+            end_loss=end_loss,
+            rotation_delta_deg=rotation_delta_deg,
+            translation_delta=translation_delta_value,
+            max_rotation_delta_deg=max_rotation_delta_deg,
+            max_translation_delta=max_translation_delta,
+        )
+        if not accepted:
+            keyframe.set_Rt(start_Rt)
+        keyframe.approx_centre = keyframe.get_centre().detach()
+        if hasattr(self, "approx_cam_centres") and self.approx_cam_centres is not None:
+            try:
+                self.approx_cam_centres[keyframe_id] = keyframe.approx_centre
+            except (IndexError, TypeError):
+                pass
+        if hasattr(self, "valid_Rt_cache") and len(self.valid_Rt_cache) > 0:
+            try:
+                self.valid_Rt_cache[keyframe_id] = False
+            except (IndexError, TypeError):
+                pass
+
+        debug.update(
+            {
+                "applied": bool(completed > 0),
+                "accepted": bool(accepted),
+                "reason": reason,
+                "completed_iterations": int(completed),
+                "start_loss": start_loss,
+                "end_loss": end_loss,
+                "end_render_coverage": float(end_coverage),
+                "rotation_delta_deg": rotation_delta_deg,
+                "translation_delta": translation_delta_value,
+            }
+        )
+        keyframe.info["_pose_risk_utility_review"] = dict(debug)
         return debug
 
     def optimization_loop(self, n_iters: int, run_until_interupt: bool = False):
