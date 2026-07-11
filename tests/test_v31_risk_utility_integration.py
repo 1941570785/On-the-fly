@@ -78,6 +78,15 @@ class V31RiskUtilityIntegrationTests(unittest.TestCase):
         self.assertIn('"estimated_Rt": _pose_matrix_for_trace(Rt)', source)
         self.assertIn('"gt_Rt": _pose_matrix_for_trace(info.get("gt_Rt"))', source)
 
+    def test_pose_quarantine_is_filtered_only_from_pose_reference_selection(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+        scene_source = Path("scene/scene_model.py").read_text(encoding="utf-8")
+
+        self.assertIn('info["_pose_reference_quarantined"] = True', train_source)
+        self.assertIn("exclude_pose_quarantined=", train_source)
+        self.assertIn("exclude_pose_quarantined: bool = False", scene_source)
+        self.assertIn("filter_pose_reference_indices", scene_source)
+
 
 if __name__ == "__main__":
     unittest.main()

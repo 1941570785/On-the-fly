@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import Any
 
 
-POSE_RISK_UTILITY_MODES = {"off", "observe_v1", "active_v1"}
+POSE_RISK_UTILITY_MODES = {
+    "off",
+    "observe_v1",
+    "active_v1",
+    "pose_quarantine_v1",
+}
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -57,6 +62,25 @@ def pose_risk_candidate(risk_event: dict[str, Any] | None) -> bool:
             or event.get("severe_pose_risk", False)
         )
     )
+
+
+def filter_pose_reference_indices(
+    keyframes: list[Any],
+    indices: list[int],
+    *,
+    enabled: bool,
+) -> list[int]:
+    original = [int(index) for index in indices]
+    if not enabled:
+        return original
+    filtered = [
+        index
+        for index in original
+        if not bool(
+            keyframes[index].info.get("_pose_reference_quarantined", False)
+        )
+    ]
+    return filtered if filtered else original
 
 
 def pose_review_acceptance(
@@ -152,16 +176,26 @@ class PoseRiskUtilityAdmissionGate:
             and int(frame_id) - self.last_isolated_frame_id
             < self.isolation_cooldown_frames
         )
-        if not candidate:
-            suggested_decision = "admit"
-        elif utility_score >= self.utility_threshold:
-            suggested_decision = "review_admit"
-        elif not strong_isolation_risk:
-            suggested_decision = "admit_conservative"
-        elif cooldown_active:
-            suggested_decision = "cooldown_admit"
+        if self.mode == "pose_quarantine_v1":
+            if not candidate:
+                suggested_decision = "admit"
+            elif utility_score >= self.utility_threshold:
+                suggested_decision = "render_admit_pose_quarantine"
+            elif strong_isolation_risk:
+                suggested_decision = "conservative_render_pose_quarantine"
+            else:
+                suggested_decision = "admit_conservative"
         else:
-            suggested_decision = "isolate_low_utility"
+            if not candidate:
+                suggested_decision = "admit"
+            elif utility_score >= self.utility_threshold:
+                suggested_decision = "review_admit"
+            elif not strong_isolation_risk:
+                suggested_decision = "admit_conservative"
+            elif cooldown_active:
+                suggested_decision = "cooldown_admit"
+            else:
+                suggested_decision = "isolate_low_utility"
 
         if not baseline_selected:
             decision = "bypass_not_selected"
@@ -194,6 +228,13 @@ class PoseRiskUtilityAdmissionGate:
             "probe_required": bool(candidate and not render_probe),
             "review": bool(decision == "review_admit"),
             "isolated": bool(decision == "isolate_low_utility"),
+            "pose_reference_quarantined": bool(
+                decision
+                in {
+                    "render_admit_pose_quarantine",
+                    "conservative_render_pose_quarantine",
+                }
+            ),
             "risk_score": risk_score,
             "risk_threshold": risk_threshold,
             "risk_margin": float(risk_margin),
@@ -229,6 +270,9 @@ class PoseRiskUtilityAdmissionGate:
             "observe": int(decisions.count("observe")),
             "admit_conservative": int(decisions.count("admit_conservative")),
             "cooldown_admit": int(decisions.count("cooldown_admit")),
+            "pose_reference_quarantined": int(
+                sum(bool(event["pose_reference_quarantined"]) for event in self.events)
+            ),
             "utility_score_mean": mean("utility_score"),
             "coverage_deficit_mean": mean("coverage_deficit"),
             "residual_selectivity_mean": mean("residual_selectivity"),

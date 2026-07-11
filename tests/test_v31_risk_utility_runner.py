@@ -38,7 +38,12 @@ class V31RiskUtilityRunnerTests(unittest.TestCase):
         self.assertEqual(args.test_hold, 8)
         self.assertEqual(
             [name for name, _ in VARIANTS],
-            ["V31_RU_observe", "V31_RU_active"],
+            [
+                "V31_RU_observe",
+                "V31_RU_active",
+                "V31_RU_active_no_review",
+                "V31_RU_pose_quarantine",
+            ],
         )
         for command in commands.values():
             joined = " ".join(command)
@@ -51,6 +56,14 @@ class V31RiskUtilityRunnerTests(unittest.TestCase):
             )
         self.assertIn("observe_v1", " ".join(commands["V31_RU_observe"]))
         self.assertIn("active_v1", " ".join(commands["V31_RU_active"]))
+        self.assertEqual(
+            commands["V31_RU_active_no_review"][-2:],
+            ["--pose_risk_utility_review_iterations", "0"],
+        )
+        self.assertIn(
+            "--pose_risk_utility_admission_mode pose_quarantine_v1",
+            " ".join(commands["V31_RU_pose_quarantine"]),
+        )
 
     def test_three_way_pose_evaluation_uses_one_common_frame_set(self):
         gt = {

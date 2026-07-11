@@ -190,7 +190,7 @@ def get_args():
         '--pose_risk_utility_admission_mode',
         type=str,
         default='off',
-        choices=['off', 'observe_v1', 'active_v1'],
+        choices=['off', 'observe_v1', 'active_v1', 'pose_quarantine_v1'],
         help='Joint post-pose admission using estimated pose risk and reduced-resolution rendering value.',
     )
     parser.add_argument(

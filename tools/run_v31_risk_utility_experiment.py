@@ -77,6 +77,28 @@ VARIANTS: list[tuple[str, tuple[str, ...]]] = [
             *JOINT_CONFIG_ARGS,
         ),
     ),
+    (
+        "V31_RU_active_no_review",
+        (
+            *V31_ARGS,
+            "--pose_risk_utility_admission_mode",
+            "active_v1",
+            *JOINT_CONFIG_ARGS,
+            "--pose_risk_utility_review_iterations",
+            "0",
+        ),
+    ),
+    (
+        "V31_RU_pose_quarantine",
+        (
+            *V31_ARGS,
+            "--pose_risk_utility_admission_mode",
+            "pose_quarantine_v1",
+            *JOINT_CONFIG_ARGS,
+            "--pose_risk_utility_review_iterations",
+            "0",
+        ),
+    ),
 ]
 
 SUMMARY_FIELDS = [
@@ -96,6 +118,7 @@ SUMMARY_FIELDS = [
     "isolate_low_utility",
     "admit_conservative",
     "cooldown_admit",
+    "pose_reference_quarantined",
     "utility_score_mean",
     "coverage_deficit_mean",
     "residual_selectivity_mean",
@@ -179,6 +202,9 @@ def summarize_run(spec: ExperimentSpec, returncode: int) -> dict[str, Any]:
         "isolate_low_utility": summary.get("isolate_low_utility", 0),
         "admit_conservative": summary.get("admit_conservative", 0),
         "cooldown_admit": summary.get("cooldown_admit", 0),
+        "pose_reference_quarantined": summary.get(
+            "pose_reference_quarantined", 0
+        ),
         "utility_score_mean": summary.get("utility_score_mean", 0.0),
         "coverage_deficit_mean": summary.get("coverage_deficit_mean", 0.0),
         "residual_selectivity_mean": summary.get(

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from scene.pose_risk_utility_admission import (
     PoseRiskUtilityAdmissionGate,
+    filter_pose_reference_indices,
     representation_utility_score,
 )
 
@@ -241,6 +242,48 @@ class PoseRiskUtilityAdmissionTests(unittest.TestCase):
         self.assertEqual(decision["source_frame_id"], 21)
         self.assertEqual(decision["estimated_Rt"], event["estimated_Rt"])
         self.assertEqual(decision["gt_Rt"], event["gt_Rt"])
+
+    def test_pose_quarantine_retains_render_frame_without_future_pose_use(self):
+        gate = PoseRiskUtilityAdmissionGate(
+            mode="pose_quarantine_v1", utility_threshold=0.24
+        )
+        decision = gate.evaluate(
+            frame_id=70,
+            risk_event=risk_event(),
+            render_probe={
+                "coverage_deficit": 0.0,
+                "residual_selectivity": 1.8,
+                "new_view_event_score": 0.50,
+            },
+            baseline_selected=True,
+            is_test=False,
+            is_bootstrap=False,
+        )
+
+        self.assertEqual(decision["decision"], "render_admit_pose_quarantine")
+        self.assertTrue(decision["pose_reference_quarantined"])
+        self.assertFalse(decision["isolated"])
+        self.assertFalse(decision["review"])
+
+    def test_pose_reference_filter_keeps_render_keyframes_but_excludes_quarantine(self):
+        class Frame:
+            def __init__(self, quarantined):
+                self.info = {"_pose_reference_quarantined": quarantined}
+
+        keyframes = [Frame(False), Frame(True), Frame(False)]
+
+        self.assertEqual(
+            filter_pose_reference_indices(keyframes, [0, 1, 2], enabled=True),
+            [0, 2],
+        )
+        self.assertEqual(
+            filter_pose_reference_indices(keyframes, [1], enabled=True),
+            [1],
+        )
+        self.assertEqual(
+            filter_pose_reference_indices(keyframes, [0, 1], enabled=False),
+            [0, 1],
+        )
 
 
 if __name__ == "__main__":

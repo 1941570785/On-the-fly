@@ -68,7 +68,10 @@ from scene.pose_render_texture_sampling import (
     residual_edge_guided_sampling_probability,
 )
 from scene.pose_render_update_gate import pose_render_update_gate_decision
-from scene.pose_risk_utility_admission import pose_review_acceptance
+from scene.pose_risk_utility_admission import (
+    filter_pose_reference_indices,
+    pose_review_acceptance,
+)
 from scene.test_render_calibration import calibrate_test_render
 from utils import (
     RGB2SH,
@@ -4563,6 +4566,7 @@ class SceneModel:
         update_3dpts: bool,
         desc_kpts: DescribedKeypoints = None,
         resolution_mode: str = "baseline",
+        exclude_pose_quarantined: bool = False,
     ):
         """
         【场景表示模块】获取最近的n个关键帧
@@ -4622,6 +4626,11 @@ class SceneModel:
                 for index, _score in has_pt3d_ranked[: max(n * 2, 12)]:
                     if index not in keyframes_indices_to_check:
                         keyframes_indices_to_check.append(index)
+            keyframes_indices_to_check = filter_pose_reference_indices(
+                self.keyframes,
+                keyframes_indices_to_check,
+                enabled=bool(exclude_pose_quarantined),
+            )
             n_matches = torch.zeros(len(keyframes_indices_to_check), device="cuda")
             has_pt3d_counts = torch.zeros(len(keyframes_indices_to_check), device="cuda")
             # 计算每个候选关键帧的匹配数量
@@ -4724,7 +4733,12 @@ class SceneModel:
             }
         # 如果没有提供特征点描述符，直接选择距离最近的n个关键帧
         else:
-            prev_keyframes_indices = self.sorted_frame_indices[:n]
+            pose_candidate_indices = filter_pose_reference_indices(
+                self.keyframes,
+                [int(index) for index in self.sorted_frame_indices],
+                enabled=bool(exclude_pose_quarantined),
+            )
+            prev_keyframes_indices = pose_candidate_indices[:n]
             self.last_prev_keyframes_debug = {
                 "candidate_rows": [],
                 "selected_keyframe_ids": [int(x) for x in prev_keyframes_indices],

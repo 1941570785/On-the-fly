@@ -2089,7 +2089,13 @@ if __name__ == "__main__":
                 start_time = time.time()
                 # 【场景表示模块】获取与当前帧最匹配的历史关键帧（用于三角化和姿态估计）
                 prev_keyframes = scene_model.get_prev_keyframes(
-                    args.num_prev_keyframes_miniba_incr, True, desc_kpts
+                    args.num_prev_keyframes_miniba_incr,
+                    True,
+                    desc_kpts,
+                    exclude_pose_quarantined=(
+                        pose_risk_utility_admission_mode
+                        == "pose_quarantine_v1"
+                    ),
                 )
                 pose_only_refs = []
                 if runtime_gate is not None:
@@ -2423,6 +2429,10 @@ if __name__ == "__main__":
                         info["_pose_risk_utility_admission"] = dict(
                             pose_risk_utility_decision
                         )
+                        if pose_risk_utility_decision[
+                            "pose_reference_quarantined"
+                        ]:
+                            info["_pose_reference_quarantined"] = True
                     if (
                         runtime_gate is not None
                         or pose_initialization_risk_gate is not None
