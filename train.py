@@ -67,6 +67,10 @@ from scene.pose_render_posterior_risk import (
     augment_pose_render_payload_with_posterior_risk,
 )
 from scene.pose_initialization_risk import PoseInitializationRiskGate
+from scene.pose_risk_utility_admission import (
+    PoseRiskUtilityAdmissionGate,
+    pose_risk_candidate,
+)
 from scene.keyframe import pop_chosen_kfs_resolution_events
 
 if __name__ == "__main__":
@@ -152,10 +156,18 @@ if __name__ == "__main__":
             out.write_text(json.dumps(events, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         atexit.register(_flush_chosen_kfs_resolution_events)
 
+    pose_risk_utility_admission_mode = str(
+        getattr(args, "pose_risk_utility_admission_mode", "off") or "off"
+    ).strip().lower()
     pose_initialization_risk_gate = None
     pose_initialization_risk_mode = str(
         getattr(args, "pose_initialization_risk_mode", "off") or "off"
     ).strip().lower()
+    if (
+        pose_risk_utility_admission_mode != "off"
+        and pose_initialization_risk_mode == "off"
+    ):
+        pose_initialization_risk_mode = "observe_v1"
     if pose_initialization_risk_mode != "off":
         pose_initialization_risk_gate = PoseInitializationRiskGate(
             mode=pose_initialization_risk_mode,
@@ -183,6 +195,29 @@ if __name__ == "__main__":
         print(
             f"[pose_initialization_risk_mode={pose_initialization_risk_mode}] "
             "post-pose risk observer enabled."
+        )
+
+    pose_risk_utility_gate = None
+    if pose_risk_utility_admission_mode != "off":
+        pose_risk_utility_gate = PoseRiskUtilityAdmissionGate(
+            mode=pose_risk_utility_admission_mode,
+            utility_threshold=float(
+                getattr(args, "pose_risk_utility_threshold", 0.25)
+            ),
+            selectivity_reference=float(
+                getattr(args, "pose_risk_utility_selectivity_reference", 1.8)
+            ),
+        )
+        pose_risk_utility_trace_path = (
+            Path(args.model_path) / "pose_risk_utility_trace.json"
+        )
+        atexit.register(
+            pose_risk_utility_gate.flush,
+            pose_risk_utility_trace_path,
+        )
+        print(
+            f"[pose_risk_utility_admission_mode={pose_risk_utility_admission_mode}] "
+            "risk-utility joint admission enabled."
         )
 
     # 根据输入路径类型选择数据集加载器
@@ -619,6 +654,18 @@ if __name__ == "__main__":
                 int(current_pose_index), None
             )
         return state
+
+    def _pose_matrix_for_trace(value: Any) -> Any:
+        if value is None:
+            return None
+        if hasattr(value, "detach"):
+            value = value.detach().cpu()
+        if hasattr(value, "tolist"):
+            return value.tolist()
+        try:
+            return np.asarray(value).tolist()
+        except Exception:
+            return None
 
     def _restore_pose_match_state(
         curr_desc_kpts: Any,
@@ -2311,6 +2358,61 @@ if __name__ == "__main__":
                         info["_pose_initialization_risk"] = dict(
                             pose_initialization_risk_decision
                         )
+                        if pose_risk_utility_gate is not None:
+                            pose_initialization_risk_decision.update(
+                                {
+                                    "source_frame_id": int(
+                                        info.get(
+                                            "_paper_aligned_source_frame_id",
+                                            frameID,
+                                        )
+                                    ),
+                                    "image_name": str(info.get("name", "")),
+                                    "new_view_event_score": float(
+                                        viewpoint_coverage_event.get(
+                                            "new_view_event_score", 0.0
+                                        )
+                                        or 0.0
+                                    ),
+                                    "estimated_Rt": _pose_matrix_for_trace(Rt),
+                                    "gt_Rt": _pose_matrix_for_trace(info.get("gt_Rt")),
+                                }
+                            )
+                    pose_risk_utility_decision = None
+                    if pose_risk_utility_gate is not None:
+                        render_probe = None
+                        if pose_risk_candidate(pose_initialization_risk_decision):
+                            render_probe = scene_model.probe_pose_risk_utility(
+                                image=image,
+                                Rt=Rt,
+                                mask=info.get("mask"),
+                                downsample=int(
+                                    getattr(
+                                        args,
+                                        "pose_risk_utility_probe_downsample",
+                                        4,
+                                    )
+                                ),
+                            )
+                            render_probe["new_view_event_score"] = float(
+                                viewpoint_coverage_event.get(
+                                    "new_view_event_score", 0.0
+                                )
+                                or 0.0
+                            )
+                        pose_risk_utility_decision = (
+                            pose_risk_utility_gate.evaluate(
+                                frame_id=int(frameID),
+                                risk_event=pose_initialization_risk_decision,
+                                render_probe=render_probe,
+                                baseline_selected=bool(baseline_should_add_frame),
+                                is_test=bool(info.get("is_test", False)),
+                                is_bootstrap=False,
+                            )
+                        )
+                        info["_pose_risk_utility_admission"] = dict(
+                            pose_risk_utility_decision
+                        )
                     if (
                         runtime_gate is not None
                         or pose_initialization_risk_gate is not None
@@ -3229,13 +3331,21 @@ if __name__ == "__main__":
                                     runtime_gate.direct_density_control_events[-1][
                                         "prev_desc_updated_on_hold"
                                     ] = True
-                    if (
+                    pose_initialization_isolated = bool(
                         pose_initialization_risk_decision is not None
                         and pose_initialization_risk_decision["isolated"]
-                    ):
+                    )
+                    pose_risk_utility_isolated = bool(
+                        pose_risk_utility_decision is not None
+                        and pose_risk_utility_decision["isolated"]
+                    )
+                    if pose_initialization_isolated or pose_risk_utility_isolated:
                         direct_keyframe_finalized = False
                         should_add_keyframe = False
-                        info["_pose_initialization_risk_isolated"] = True
+                        if pose_initialization_isolated:
+                            info["_pose_initialization_risk_isolated"] = True
+                        if pose_risk_utility_isolated:
+                            info["_pose_risk_utility_isolated"] = True
                         if pose_initialization_risk_match_before is not None:
                             _restore_pose_match_state(
                                 desc_kpts,
@@ -3252,7 +3362,9 @@ if __name__ == "__main__":
                                 trace_ev["pose_initialization_risk_isolated"] = True
                                 trace_ev["admit_to_chain"] = False
                                 trace_ev["drop_reason"] = (
-                                    "pose_initialization_risk_isolated"
+                                    "pose_risk_utility_isolated"
+                                    if pose_risk_utility_isolated
+                                    else "pose_initialization_risk_isolated"
                                 )
                     if direct_keyframe_finalized:
                         if runtime_gate is not None and fin_dec is not None:
@@ -3308,6 +3420,57 @@ if __name__ == "__main__":
                             )
                         prev_keyframe = keyframe
                         increment_runtime(runtimes["Add"], start_time)
+
+                        if (
+                            pose_risk_utility_decision is not None
+                            and pose_risk_utility_decision["review"]
+                        ):
+                            start_time = time.time()
+                            pose_review_result = (
+                                scene_model.review_pose_risk_keyframe(
+                                    -1,
+                                    iterations=int(
+                                        getattr(
+                                            args,
+                                            "pose_risk_utility_review_iterations",
+                                            2,
+                                        )
+                                    ),
+                                    min_render_coverage=float(
+                                        getattr(
+                                            args,
+                                            "pose_risk_utility_review_min_coverage",
+                                            0.15,
+                                        )
+                                    ),
+                                    max_rotation_delta_deg=float(
+                                        getattr(
+                                            args,
+                                            "pose_risk_utility_review_max_rotation_deg",
+                                            1.5,
+                                        )
+                                    ),
+                                    max_translation_delta=float(
+                                        getattr(
+                                            args,
+                                            "pose_risk_utility_review_max_translation",
+                                            0.05,
+                                        )
+                                    ),
+                                )
+                            )
+                            pose_risk_utility_decision["pose_review"] = dict(
+                                pose_review_result
+                            )
+                            keyframe.info["_pose_risk_utility_admission"] = dict(
+                                pose_risk_utility_decision
+                            )
+                            if viewpoint_pose_history:
+                                viewpoint_pose_history[-1] = (
+                                    int(frameID),
+                                    keyframe.get_Rt().detach().cpu().clone(),
+                                )
+                            increment_runtime(runtimes["Opt"], start_time)
 
                         start_time = time.time()
                         scene_model.pose_render_pre_refine_keyframe(-1)

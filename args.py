@@ -187,6 +187,55 @@ def get_args():
         help='Minimum source-frame interval between two representation-isolation decisions.',
     )
     parser.add_argument(
+        '--pose_risk_utility_admission_mode',
+        type=str,
+        default='off',
+        choices=['off', 'observe_v1', 'active_v1'],
+        help='Joint post-pose admission using estimated pose risk and reduced-resolution rendering value.',
+    )
+    parser.add_argument(
+        '--pose_risk_utility_threshold',
+        type=float,
+        default=0.25,
+        help='Minimum representation utility for retaining a pose-risk candidate with pose-only review.',
+    )
+    parser.add_argument(
+        '--pose_risk_utility_selectivity_reference',
+        type=float,
+        default=1.8,
+        help='Residual-edge selectivity value mapped to full utility response.',
+    )
+    parser.add_argument(
+        '--pose_risk_utility_probe_downsample',
+        type=int,
+        default=4,
+        help='Spatial downsampling factor for the risk-candidate rendering probe.',
+    )
+    parser.add_argument(
+        '--pose_risk_utility_review_iterations',
+        type=int,
+        default=2,
+        help='Pose-only photometric review iterations for retained high-utility risk candidates.',
+    )
+    parser.add_argument(
+        '--pose_risk_utility_review_min_coverage',
+        type=float,
+        default=0.15,
+        help='Minimum established-Gaussian render coverage required for pose-only review.',
+    )
+    parser.add_argument(
+        '--pose_risk_utility_review_max_rotation_deg',
+        type=float,
+        default=1.5,
+        help='Maximum accepted rotation change from pose-only review, in degrees.',
+    )
+    parser.add_argument(
+        '--pose_risk_utility_review_max_translation',
+        type=float,
+        default=0.05,
+        help='Maximum accepted translation change from pose-only review.',
+    )
+    parser.add_argument(
         '--paper_aligned_tau_R_low',
         type=float,
         default=None,
