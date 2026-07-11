@@ -161,6 +161,32 @@ class PoseRiskUtilityAdmissionTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["review_admit"], 1)
         self.assertEqual(payload["config"]["mode"], "active_v1")
 
+    def test_trace_preserves_pose_identity_for_common_frame_evaluation(self):
+        gate = PoseRiskUtilityAdmissionGate(mode="active_v1")
+        event = risk_event(
+            image_name="000021.jpg",
+            source_frame_id=21,
+            estimated_Rt=[[1.0, 0.0], [0.0, 1.0]],
+            gt_Rt=[[1.0, 0.0], [0.0, 1.0]],
+        )
+        decision = gate.evaluate(
+            frame_id=21,
+            risk_event=event,
+            render_probe={
+                "coverage_deficit": 0.30,
+                "residual_selectivity": 2.0,
+                "new_view_event_score": 0.50,
+            },
+            baseline_selected=True,
+            is_test=False,
+            is_bootstrap=False,
+        )
+
+        self.assertEqual(decision["image_name"], "000021.jpg")
+        self.assertEqual(decision["source_frame_id"], 21)
+        self.assertEqual(decision["estimated_Rt"], event["estimated_Rt"])
+        self.assertEqual(decision["gt_Rt"], event["gt_Rt"])
+
 
 if __name__ == "__main__":
     unittest.main()

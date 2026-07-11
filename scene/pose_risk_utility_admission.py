@@ -154,6 +154,10 @@ class PoseRiskUtilityAdmissionGate:
 
         event = {
             "frame_id": int(frame_id),
+            "source_frame_id": int(risk_event.get("source_frame_id", frame_id)),
+            "image_name": str(risk_event.get("image_name", "")),
+            "estimated_Rt": risk_event.get("estimated_Rt"),
+            "gt_Rt": risk_event.get("gt_Rt"),
             "mode": self.mode,
             "decision": decision,
             "suggested_decision": suggested_decision,

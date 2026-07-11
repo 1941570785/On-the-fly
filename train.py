@@ -3462,6 +3462,9 @@ if __name__ == "__main__":
                             pose_risk_utility_decision["pose_review"] = dict(
                                 pose_review_result
                             )
+                            pose_risk_utility_decision["estimated_Rt"] = (
+                                _pose_matrix_for_trace(keyframe.get_Rt())
+                            )
                             keyframe.info["_pose_risk_utility_admission"] = dict(
                                 pose_risk_utility_decision
                             )

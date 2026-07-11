@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import re
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from tools.standard_pose_eval_report import (
+    fit_similarity_w2c,
+    pose_errors,
+    relative_pose_errors,
+)
+
+
+REFERENCE_DIRS = {
+    "bonsai": {
+        "baseline": Path(
+            "/data2/zxd/3D_Reconstruction/On_the_fly/results/MipNeRF360/bonsai"
+        ),
+        "v31": Path(
+            "/data2/zxd/3D_Reconstruction/On_the_fly_pose_render_coupling_v2/"
+            "results/BRANCH_EXPERIMENTS_20260703/"
+            "baseline_render_lock_intra_frame_v31_full9_20260706_135504/"
+            "bonsai/model"
+        ),
+    },
+    "forest1": {
+        "baseline": Path(
+            "/data2/zxd/3D_Reconstruction/On_the_fly/"
+            "results/StaticHikes/forest1/compatible"
+        ),
+        "v31": Path(
+            "/data2/zxd/3D_Reconstruction/On_the_fly_pose_render_coupling_v2/"
+            "results/BRANCH_EXPERIMENTS_20260703/"
+            "baseline_render_lock_intra_frame_v31_full9_20260706_135504/"
+            "forest1/model"
+        ),
+    },
+}
+
+QUALITY_METRICS = ("PSNR", "SSIM", "LPIPS")
+POSE_METRICS = ("APE_t", "APE_R_deg", "RPE_t", "RPE_R_deg")
+
+
+def canonical_frame_id(name: Any) -> str:
+    stem = Path(str(name or "")).stem
+    if stem.isdigit():
+        return str(int(stem))
+    return stem.lower()
+
+
+def _natural_key(value: str) -> list[Any]:
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", value)]
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    return value if isinstance(value, dict) else {}
+
+
+def _pose(value: Any) -> np.ndarray | None:
+    if value is None:
+        return None
+    try:
+        pose = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if pose.shape != (4, 4) or not np.isfinite(pose).all():
+        return None
+    return pose
+
+
+def metadata_trajectory(model_dir: Path) -> dict[str, dict[str, np.ndarray]]:
+    metadata = _read_json(model_dir / "metadata.json")
+    estimated: dict[str, np.ndarray] = {}
+    gt: dict[str, np.ndarray] = {}
+    for keyframe in metadata.get("keyframes", []):
+        if not isinstance(keyframe, dict):
+            continue
+        info = keyframe.get("info", {})
+        if not isinstance(info, dict):
+            continue
+        frame_id = canonical_frame_id(info.get("name"))
+        est_pose = _pose(keyframe.get("Rt"))
+        gt_pose = _pose(info.get("gt_Rt"))
+        if not frame_id or est_pose is None or gt_pose is None:
+            continue
+        estimated[frame_id] = est_pose
+        gt[frame_id] = gt_pose
+    return {"estimated": estimated, "gt": gt}
+
+
+def risk_trace_trajectory(model_dir: Path) -> dict[str, dict[str, np.ndarray]]:
+    trace = _read_json(model_dir / "pose_risk_utility_trace.json")
+    estimated: dict[str, np.ndarray] = {}
+    gt: dict[str, np.ndarray] = {}
+    for event in trace.get("events", []):
+        if not isinstance(event, dict) or not event.get("baseline_selected", False):
+            continue
+        frame_id = canonical_frame_id(event.get("image_name"))
+        est_pose = _pose(event.get("estimated_Rt"))
+        gt_pose = _pose(event.get("gt_Rt"))
+        if not frame_id or est_pose is None or gt_pose is None:
+            continue
+        estimated[frame_id] = est_pose
+        gt[frame_id] = gt_pose
+    return {"estimated": estimated, "gt": gt}
+
+
+def evaluate_three_way_pose(
+    trajectories: dict[str, dict[str, dict[str, np.ndarray]]],
+    *,
+    rpe_delta: int = 1,
+) -> dict[str, Any]:
+    if set(trajectories) != {"baseline", "v31", "new"}:
+        raise ValueError("Trajectories must contain baseline, v31, and new")
+    common = None
+    for trajectory in trajectories.values():
+        valid = set(trajectory["estimated"]) & set(trajectory["gt"])
+        common = valid if common is None else common & valid
+    common_ids = sorted(common or set(), key=_natural_key)
+    if len(common_ids) < 3:
+        raise ValueError("At least three common pose frames are required")
+
+    gt_source = trajectories["baseline"]["gt"]
+    gt = np.stack([gt_source[frame_id] for frame_id in common_ids])
+    output: dict[str, Any] = {
+        "common_frame_count": int(len(common_ids)),
+        "common_frame_ids": common_ids,
+        "rpe_delta": int(max(1, rpe_delta)),
+    }
+    for method, trajectory in trajectories.items():
+        estimated = np.stack(
+            [trajectory["estimated"][frame_id] for frame_id in common_ids]
+        )
+        similarity = fit_similarity_w2c(estimated, gt)
+        aligned = similarity.apply(estimated)
+        ape = pose_errors(aligned, gt)
+        rpe = relative_pose_errors(aligned, gt, delta=max(1, int(rpe_delta)))
+        output[method] = {
+            "ape_trans_mean": ape["trans_mean"],
+            "ape_trans_rmse": ape["trans_rmse"],
+            "ape_rot_deg_mean": ape["rot_deg_mean"],
+            "ape_rot_deg_median": ape["rot_deg_median"],
+            "rpe_trans_mean": rpe["trans_mean"],
+            "rpe_trans_rmse": rpe["trans_rmse"],
+            "rpe_rot_deg_mean": rpe["rot_deg_mean"],
+            "rpe_rot_deg_median": rpe["rot_deg_median"],
+            "alignment_scale": float(similarity.scale),
+        }
+    return output
+
+
+def _to_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def quality_rows(model_dir: Path) -> dict[str, dict[str, float]]:
+    path = model_dir / "frame_metrics.csv"
+    if not path.exists():
+        return {}
+    output: dict[str, dict[str, float]] = {}
+    with path.open(encoding="utf-8", newline="") as stream:
+        for row in csv.DictReader(stream):
+            frame_id = canonical_frame_id(
+                row.get("original_image_name")
+                or row.get("render_image_name")
+                or row.get("image_name")
+            )
+            values = {
+                "PSNR": _to_float(row.get("psnr", row.get("PSNR"))),
+                "SSIM": _to_float(row.get("ssim", row.get("SSIM"))),
+                "LPIPS": _to_float(row.get("lpips", row.get("LPIPS"))),
+            }
+            if frame_id and all(value is not None for value in values.values()):
+                output[frame_id] = {
+                    key: float(value) for key, value in values.items() if value is not None
+                }
+    return output
+
+
+def aligned_quality_means(
+    rows_by_method: dict[str, dict[str, dict[str, float]]]
+) -> dict[str, Any]:
+    common = None
+    for rows in rows_by_method.values():
+        common = set(rows) if common is None else common & set(rows)
+    common_ids = sorted(common or set(), key=_natural_key)
+    if not common_ids:
+        raise ValueError("No common rendered evaluation frames")
+    result: dict[str, Any] = {
+        "common_frame_count": int(len(common_ids)),
+        "common_frame_ids": common_ids,
+    }
+    for method, rows in rows_by_method.items():
+        result[method] = {
+            metric: float(np.mean([rows[frame_id][metric] for frame_id in common_ids]))
+            for metric in QUALITY_METRICS
+        }
+    return result
+
+
+def compare_scene(scene: str, new_model_dir: Path, *, rpe_delta: int = 1) -> list[dict[str, Any]]:
+    references = REFERENCE_DIRS[scene]
+    method_dirs = {
+        "baseline": references["baseline"],
+        "v31": references["v31"],
+        "new": new_model_dir,
+    }
+    trajectories = {
+        "baseline": metadata_trajectory(method_dirs["baseline"]),
+        "v31": metadata_trajectory(method_dirs["v31"]),
+        "new": risk_trace_trajectory(method_dirs["new"]),
+    }
+    pose = evaluate_three_way_pose(trajectories, rpe_delta=rpe_delta)
+    quality = aligned_quality_means(
+        {method: quality_rows(path) for method, path in method_dirs.items()}
+    )
+    metadata = {
+        method: _read_json(path / "metadata.json") for method, path in method_dirs.items()
+    }
+    utility_trace = _read_json(new_model_dir / "pose_risk_utility_trace.json")
+    utility_summary = utility_trace.get("summary", {})
+    if not isinstance(utility_summary, dict):
+        utility_summary = {}
+
+    rows: list[dict[str, Any]] = []
+    for method in ("baseline", "v31", "new"):
+        row = {
+            "scene": scene,
+            "method": method,
+            "quality_common_frames": quality["common_frame_count"],
+            "pose_common_frames": pose["common_frame_count"],
+            "PSNR": quality[method]["PSNR"],
+            "SSIM": quality[method]["SSIM"],
+            "LPIPS": quality[method]["LPIPS"],
+            "time": metadata[method].get("time", ""),
+            "num_keyframes": metadata[method].get("num keyframes", ""),
+            "APE_t": pose[method]["ape_trans_mean"],
+            "APE_R_deg": pose[method]["ape_rot_deg_mean"],
+            "RPE_t": pose[method]["rpe_trans_mean"],
+            "RPE_R_deg": pose[method]["rpe_rot_deg_mean"],
+            "risk_candidates": utility_summary.get("risk_candidates", 0)
+            if method == "new"
+            else 0,
+            "review_admit": utility_summary.get("review_admit", 0)
+            if method == "new"
+            else 0,
+            "isolate_low_utility": utility_summary.get("isolate_low_utility", 0)
+            if method == "new"
+            else 0,
+            "model_dir": str(method_dirs[method]),
+        }
+        rows.append(row)
+
+    baseline_row = rows[0]
+    v31_row = rows[1]
+    for row in rows:
+        for metric in (*QUALITY_METRICS, *POSE_METRICS, "time"):
+            row[f"delta_{metric}_to_baseline"] = _difference(
+                row.get(metric), baseline_row.get(metric)
+            )
+            row[f"delta_{metric}_to_v31"] = _difference(
+                row.get(metric), v31_row.get(metric)
+            )
+    return rows
+
+
+def _difference(value: Any, reference: Any) -> float | str:
+    left = _to_float(value)
+    right = _to_float(reference)
+    return left - right if left is not None and right is not None else ""
+
+
+def write_report(output_dir: Path, rows: list[dict[str, Any]]) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fields = list(rows[0]) if rows else []
+    with (output_dir / "three_way_comparison.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    (output_dir / "three_way_comparison.json").write_text(
+        json.dumps(rows, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    lines = [
+        "# V31 Risk-Utility Three-Way Comparison",
+        "",
+        "All quality and pose values use one common frame set per scene. APE/RPE translation units follow each dataset coordinate scale.",
+        "",
+        "| Scene | Method | Quality/Pose Frames | PSNR | SSIM | LPIPS | APE-t | APE-R (deg) | RPE-t | RPE-R (deg) | Time (s) | Review/Isolate |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        lines.append(
+            "| {scene} | {method} | {quality_common_frames}/{pose_common_frames} | "
+            "{PSNR:.4f} | {SSIM:.4f} | {LPIPS:.4f} | {APE_t:.5f} | "
+            "{APE_R_deg:.4f} | {RPE_t:.5f} | {RPE_R_deg:.4f} | {time} | "
+            "{review_admit}/{isolate_low_utility} |".format(**row)
+        )
+    (output_dir / "three_way_comparison.md").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--new_root", required=True)
+    parser.add_argument("--new_variant", default="V31_RU_active")
+    parser.add_argument("--out_dir", default="")
+    parser.add_argument("--rpe_delta", type=int, default=1)
+    parser.add_argument(
+        "--scenes", nargs="*", choices=sorted(REFERENCE_DIRS), default=[]
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    new_root = Path(args.new_root)
+    output_dir = Path(args.out_dir) if args.out_dir else new_root / "comparison"
+    scenes = list(args.scenes) if args.scenes else ["bonsai", "forest1"]
+    rows: list[dict[str, Any]] = []
+    for scene in scenes:
+        rows.extend(
+            compare_scene(
+                scene,
+                new_root / scene / args.new_variant / "model",
+                rpe_delta=max(1, int(args.rpe_delta)),
+            )
+        )
+    write_report(output_dir, rows)
+    print(output_dir / "three_way_comparison.md")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
