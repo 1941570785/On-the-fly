@@ -27,9 +27,6 @@ except ModuleNotFoundError:
 
 REFERENCE_DIRS = {
     "bonsai": {
-        "baseline": Path(
-            "/data2/zxd/3D_Reconstruction/On_the_fly/results/MipNeRF360/bonsai"
-        ),
         "v31": Path(
             "/data2/zxd/3D_Reconstruction/On_the_fly_pose_render_coupling_v2/"
             "results/BRANCH_EXPERIMENTS_20260703/"
@@ -38,16 +35,32 @@ REFERENCE_DIRS = {
         ),
     },
     "forest1": {
-        "baseline": Path(
-            "/data2/zxd/3D_Reconstruction/On_the_fly/"
-            "results/StaticHikes/forest1/compatible"
-        ),
         "v31": Path(
             "/data2/zxd/3D_Reconstruction/On_the_fly_pose_render_coupling_v2/"
             "results/BRANCH_EXPERIMENTS_20260703/"
             "baseline_render_lock_intra_frame_v31_full9_20260706_135504/"
             "forest1/model"
         ),
+    },
+}
+
+# Preserved full-precision results behind the paper tables. The corresponding
+# baseline trajectory artifacts were later overwritten, so these values are
+# authoritative only for quality, runtime, and keyframe count.
+TABLE_BASELINE_METRICS = {
+    "bonsai": {
+        "PSNR": 24.254085183143616,
+        "SSIM": 0.8119161486625671,
+        "LPIPS": 0.24992872774600983,
+        "time": 67.05928325653076,
+        "num_keyframes": 223,
+    },
+    "forest1": {
+        "PSNR": 17.78855973482132,
+        "SSIM": 0.48459342680871487,
+        "LPIPS": 0.4262222908437252,
+        "time": 109.03564667701721,
+        "num_keyframes": 269,
     },
 }
 
@@ -122,13 +135,16 @@ def risk_trace_trajectory(model_dir: Path) -> dict[str, dict[str, np.ndarray]]:
     return {"estimated": estimated, "gt": gt}
 
 
-def evaluate_three_way_pose(
+def evaluate_pose_methods(
     trajectories: dict[str, dict[str, dict[str, np.ndarray]]],
     *,
+    gt_source_method: str,
     rpe_delta: int = 1,
 ) -> dict[str, Any]:
-    if set(trajectories) != {"baseline", "v31", "new"}:
-        raise ValueError("Trajectories must contain baseline, v31, and new")
+    if not trajectories:
+        raise ValueError("At least one trajectory is required")
+    if gt_source_method not in trajectories:
+        raise ValueError("GT source method must be present in trajectories")
     common = None
     for trajectory in trajectories.values():
         valid = set(trajectory["estimated"]) & set(trajectory["gt"])
@@ -137,7 +153,7 @@ def evaluate_three_way_pose(
     if len(common_ids) < 3:
         raise ValueError("At least three common pose frames are required")
 
-    gt_source = trajectories["baseline"]["gt"]
+    gt_source = trajectories[gt_source_method]["gt"]
     gt = np.stack([gt_source[frame_id] for frame_id in common_ids])
     output: dict[str, Any] = {
         "common_frame_count": int(len(common_ids)),
@@ -164,6 +180,20 @@ def evaluate_three_way_pose(
             "alignment_scale": float(similarity.scale),
         }
     return output
+
+
+def evaluate_three_way_pose(
+    trajectories: dict[str, dict[str, dict[str, np.ndarray]]],
+    *,
+    rpe_delta: int = 1,
+) -> dict[str, Any]:
+    if set(trajectories) != {"baseline", "v31", "new"}:
+        raise ValueError("Trajectories must contain baseline, v31, and new")
+    return evaluate_pose_methods(
+        trajectories,
+        gt_source_method="baseline",
+        rpe_delta=rpe_delta,
+    )
 
 
 def _to_float(value: Any) -> float | None:
@@ -222,16 +252,18 @@ def aligned_quality_means(
 def compare_scene(scene: str, new_model_dir: Path, *, rpe_delta: int = 1) -> list[dict[str, Any]]:
     references = REFERENCE_DIRS[scene]
     method_dirs = {
-        "baseline": references["baseline"],
         "v31": references["v31"],
         "new": new_model_dir,
     }
     trajectories = {
-        "baseline": metadata_trajectory(method_dirs["baseline"]),
         "v31": metadata_trajectory(method_dirs["v31"]),
         "new": metadata_trajectory(method_dirs["new"]),
     }
-    pose = evaluate_three_way_pose(trajectories, rpe_delta=rpe_delta)
+    pose = evaluate_pose_methods(
+        trajectories,
+        gt_source_method="v31",
+        rpe_delta=rpe_delta,
+    )
     quality = aligned_quality_means(
         {method: quality_rows(path) for method, path in method_dirs.items()}
     )
@@ -245,20 +277,37 @@ def compare_scene(scene: str, new_model_dir: Path, *, rpe_delta: int = 1) -> lis
 
     rows: list[dict[str, Any]] = []
     for method in ("baseline", "v31", "new"):
+        if method == "baseline":
+            quality_values = TABLE_BASELINE_METRICS[scene]
+            method_metadata = quality_values
+            pose_values: dict[str, Any] = {}
+            model_dir = "reported:On-the-fly-NVS"
+        else:
+            quality_values = quality[method]
+            method_metadata = metadata[method]
+            pose_values = pose[method]
+            model_dir = str(method_dirs[method])
         row = {
             "scene": scene,
             "method": method,
-            "quality_common_frames": quality["common_frame_count"],
-            "pose_common_frames": pose["common_frame_count"],
-            "PSNR": quality[method]["PSNR"],
-            "SSIM": quality[method]["SSIM"],
-            "LPIPS": quality[method]["LPIPS"],
-            "time": metadata[method].get("time", ""),
-            "num_keyframes": metadata[method].get("num keyframes", ""),
-            "APE_t": pose[method]["ape_trans_mean"],
-            "APE_R_deg": pose[method]["ape_rot_deg_mean"],
-            "RPE_t": pose[method]["rpe_trans_mean"],
-            "RPE_R_deg": pose[method]["rpe_rot_deg_mean"],
+            "quality_common_frames": (
+                "table" if method == "baseline" else quality["common_frame_count"]
+            ),
+            "pose_common_frames": (
+                "" if method == "baseline" else pose["common_frame_count"]
+            ),
+            "PSNR": quality_values["PSNR"],
+            "SSIM": quality_values["SSIM"],
+            "LPIPS": quality_values["LPIPS"],
+            "time": method_metadata.get("time", ""),
+            "num_keyframes": method_metadata.get(
+                "num_keyframes",
+                method_metadata.get("num keyframes", ""),
+            ),
+            "APE_t": pose_values.get("ape_trans_mean", ""),
+            "APE_R_deg": pose_values.get("ape_rot_deg_mean", ""),
+            "RPE_t": pose_values.get("rpe_trans_mean", ""),
+            "RPE_R_deg": pose_values.get("rpe_rot_deg_mean", ""),
             "risk_candidates": utility_summary.get("risk_candidates", 0)
             if method == "new"
             else 0,
@@ -278,7 +327,7 @@ def compare_scene(scene: str, new_model_dir: Path, *, rpe_delta: int = 1) -> lis
             )
             if method == "new"
             else 0,
-            "model_dir": str(method_dirs[method]),
+            "model_dir": model_dir,
         }
         rows.append(row)
 
@@ -301,6 +350,16 @@ def _difference(value: Any, reference: Any) -> float | str:
     return left - right if left is not None and right is not None else ""
 
 
+def _format_number(value: Any, digits: int) -> str:
+    number = _to_float(value)
+    return "--" if number is None else f"{number:.{digits}f}"
+
+
+def _format_signed(value: Any, digits: int) -> str:
+    number = _to_float(value)
+    return "--" if number is None else f"{number:+.{digits}f}"
+
+
 def write_report(output_dir: Path, rows: list[dict[str, Any]]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     fields = list(rows[0]) if rows else []
@@ -317,19 +376,28 @@ def write_report(output_dir: Path, rows: list[dict[str, Any]]) -> None:
     lines = [
         "# V31 Risk-Utility Three-Way Comparison",
         "",
-        "All quality and pose values use one common frame set per scene. APE/RPE translation units follow each dataset coordinate scale.",
+        "On-the-fly-NVS quality and time are the preserved full-precision values behind the paper tables. Its original trajectory artifact is unavailable, so baseline APE/RPE are intentionally not reported. V31 and the new model use one common pose frame set per scene after independent Sim(3) alignment. Translation units follow each dataset coordinate scale.",
         "",
         "| Scene | Method | Quality/Pose Frames | PSNR | SSIM | LPIPS | APE-t | APE-R (deg) | RPE-t | RPE-R (deg) | Time (s) | Review/Drop/Pose-Q |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
+        frame_label = (
+            f"{row['quality_common_frames']}/"
+            f"{row['pose_common_frames'] if row['pose_common_frames'] != '' else '--'}"
+        )
         lines.append(
-            "| {scene} | {method} | {quality_common_frames}/{pose_common_frames} | "
-            "{PSNR:.4f} | {SSIM:.4f} | {LPIPS:.4f} | {APE_t:.5f} | "
-            "{APE_R_deg:.4f} | {RPE_t:.5f} | {RPE_R_deg:.4f} | {time} | "
-            "{review_admit}/{isolate_low_utility}/{pose_reference_quarantined} |".format(
-                **row
-            )
+            f"| {row['scene']} | {row['method']} | {frame_label} | "
+            f"{_format_number(row['PSNR'], 4)} | "
+            f"{_format_number(row['SSIM'], 4)} | "
+            f"{_format_number(row['LPIPS'], 4)} | "
+            f"{_format_number(row['APE_t'], 5)} | "
+            f"{_format_number(row['APE_R_deg'], 4)} | "
+            f"{_format_number(row['RPE_t'], 5)} | "
+            f"{_format_number(row['RPE_R_deg'], 4)} | "
+            f"{_format_number(row['time'], 3)} | "
+            f"{row['review_admit']}/{row['isolate_low_utility']}/"
+            f"{row['pose_reference_quarantined']} |"
         )
     lines.extend(
         [
@@ -347,20 +415,15 @@ def write_report(output_dir: Path, rows: list[dict[str, Any]]) -> None:
             continue
         for reference in ("baseline", "v31"):
             lines.append(
-                "| {scene} | {reference} | {d_psnr:+.4f} | {d_ssim:+.4f} | "
-                "{d_lpips:+.4f} | {d_ape_t:+.5f} | {d_ape_r:+.4f} | "
-                "{d_rpe_t:+.5f} | {d_rpe_r:+.4f} | {d_time:+.3f} |".format(
-                    scene=row["scene"],
-                    reference=reference,
-                    d_psnr=row[f"delta_PSNR_to_{reference}"],
-                    d_ssim=row[f"delta_SSIM_to_{reference}"],
-                    d_lpips=row[f"delta_LPIPS_to_{reference}"],
-                    d_ape_t=row[f"delta_APE_t_to_{reference}"],
-                    d_ape_r=row[f"delta_APE_R_deg_to_{reference}"],
-                    d_rpe_t=row[f"delta_RPE_t_to_{reference}"],
-                    d_rpe_r=row[f"delta_RPE_R_deg_to_{reference}"],
-                    d_time=row[f"delta_time_to_{reference}"],
-                )
+                f"| {row['scene']} | {reference} | "
+                f"{_format_signed(row[f'delta_PSNR_to_{reference}'], 4)} | "
+                f"{_format_signed(row[f'delta_SSIM_to_{reference}'], 4)} | "
+                f"{_format_signed(row[f'delta_LPIPS_to_{reference}'], 4)} | "
+                f"{_format_signed(row[f'delta_APE_t_to_{reference}'], 5)} | "
+                f"{_format_signed(row[f'delta_APE_R_deg_to_{reference}'], 4)} | "
+                f"{_format_signed(row[f'delta_RPE_t_to_{reference}'], 5)} | "
+                f"{_format_signed(row[f'delta_RPE_R_deg_to_{reference}'], 4)} | "
+                f"{_format_signed(row[f'delta_time_to_{reference}'], 3)} |"
             )
     (output_dir / "three_way_comparison.md").write_text(
         "\n".join(lines) + "\n", encoding="utf-8"

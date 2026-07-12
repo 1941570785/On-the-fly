@@ -5,7 +5,9 @@ from pathlib import Path
 import numpy as np
 
 from tools.compare_v31_risk_utility_results import (
+    TABLE_BASELINE_METRICS,
     canonical_frame_id,
+    evaluate_pose_methods,
     evaluate_three_way_pose,
 )
 from tools.run_v31_risk_utility_experiment import (
@@ -24,6 +26,20 @@ def w2c_at(x, y=0.0):
 
 
 class V31RiskUtilityRunnerTests(unittest.TestCase):
+    def test_table_baseline_metrics_match_preserved_on_the_fly_nvs_results(self):
+        self.assertAlmostEqual(
+            TABLE_BASELINE_METRICS["bonsai"]["PSNR"], 24.254085183143616
+        )
+        self.assertAlmostEqual(
+            TABLE_BASELINE_METRICS["forest1"]["PSNR"], 17.78855973482132
+        )
+        self.assertAlmostEqual(
+            TABLE_BASELINE_METRICS["bonsai"]["LPIPS"], 0.24992872774600983
+        )
+        self.assertAlmostEqual(
+            TABLE_BASELINE_METRICS["forest1"]["time"], 109.03564667701721
+        )
+
     def test_comparison_uses_final_metadata_for_all_pose_trajectories(self):
         source = Path("tools/compare_v31_risk_utility_results.py").read_text(
             encoding="utf-8"
@@ -121,6 +137,29 @@ class V31RiskUtilityRunnerTests(unittest.TestCase):
         self.assertAlmostEqual(result["baseline"]["ape_trans_mean"], 0.0)
         self.assertAlmostEqual(result["v31"]["rpe_trans_mean"], 0.0)
         self.assertGreater(result["new"]["ape_trans_mean"], 0.0)
+
+    def test_pose_evaluation_does_not_require_an_unmatched_baseline_trajectory(self):
+        gt = {
+            "1": w2c_at(0.0, 0.0),
+            "2": w2c_at(1.0, 0.0),
+            "3": w2c_at(1.0, 1.0),
+            "4": w2c_at(2.0, 1.0),
+        }
+        v31 = {key: pose.copy() for key, pose in gt.items()}
+        new = {key: pose.copy() for key, pose in gt.items()}
+        new["3"][0, 3] -= 0.2
+
+        result = evaluate_pose_methods(
+            {
+                "v31": {"estimated": v31, "gt": gt},
+                "new": {"estimated": new, "gt": gt},
+            },
+            gt_source_method="v31",
+        )
+
+        self.assertEqual(result["common_frame_count"], 4)
+        summary_keys = {"common_frame_count", "common_frame_ids", "rpe_delta"}
+        self.assertEqual(set(result) - summary_keys, {"v31", "new"})
         self.assertGreater(result["new"]["rpe_trans_mean"], 0.0)
         self.assertIn("ape_rot_deg_mean", result["new"])
         self.assertIn("rpe_rot_deg_mean", result["new"])

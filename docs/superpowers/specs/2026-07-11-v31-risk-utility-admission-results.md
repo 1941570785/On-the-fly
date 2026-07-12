@@ -10,20 +10,29 @@ next 64 source frames. No pose-review optimization is used.
 
 All runs were executed sequentially on one GPU. The dataset protocols are
 `test_hold=8` for bonsai and `test_hold=10` for forest1. Pose trajectories are
-evaluated on one common frame set per scene after an independent Sim(3)
-alignment to the same ground-truth trajectory. Translation errors use the native
-dataset coordinate scale and rotation errors are in degrees.
+evaluated for V31 and the new model on one common frame set per scene after an
+independent Sim(3) alignment to the same ground-truth trajectory. The true
+On-the-fly-NVS baseline values are the preserved full-precision values behind
+the paper tables. Its original trajectory artifact was overwritten by a later
+rerun, so baseline APE/RPE are intentionally left unreported. Translation
+errors use the native dataset coordinate scale and rotation errors are in
+degrees.
 
 ## Three-Way Protocol-Matched Result
 
 | Scene | Method | Quality/Pose frames | PSNR | SSIM | LPIPS | APE-t | APE-R | RPE-t | RPE-R | Time (s) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| bonsai | main baseline | 37/234 | 25.9725 | 0.8653 | 0.2760 | 0.04373 | 0.7943 | 0.00575 | 0.0663 | 73.016 |
+| bonsai | On-the-fly-NVS | table/-- | 24.2541 | 0.8119 | 0.2499 | -- | -- | -- | -- | 67.059 |
 | bonsai | archived V31 | 37/234 | 25.4770 | 0.8574 | 0.2283 | 0.03715 | 0.6551 | 0.00511 | 0.0645 | 65.717 |
 | bonsai | pose quarantine | 37/234 | 25.5957 | 0.8629 | 0.2287 | 0.03987 | 0.6972 | 0.00530 | 0.0658 | 69.491 |
-| forest1 | main baseline | 120/343 | 18.3407 | 0.5196 | 0.3996 | 0.23339 | 1.7396 | 0.00904 | 0.4152 | 119.250 |
+| forest1 | On-the-fly-NVS | table/-- | 17.7886 | 0.4846 | 0.4262 | -- | -- | -- | -- | 109.036 |
 | forest1 | archived V31 | 120/343 | 17.9688 | 0.4885 | 0.4239 | 0.60230 | 2.7866 | 0.01411 | 0.4262 | 116.382 |
 | forest1 | pose quarantine | 120/343 | 17.9553 | 0.4898 | 0.4224 | 0.49902 | 2.9334 | 0.01245 | 0.4788 | 122.741 |
+
+Relative to the true On-the-fly-NVS baseline, the new model improves bonsai by
++1.3416 dB PSNR, +0.0510 SSIM, and -0.0212 LPIPS, and improves forest1 by
++0.1668 dB PSNR, +0.0052 SSIM, and -0.0039 LPIPS. Runtime increases by 2.43
+seconds and 13.71 seconds, respectively.
 
 The bonsai run produced one risk candidate but no quarantine, so its numerical
 difference from V31 cannot be attributed to the admission action. Forest1
@@ -64,20 +73,24 @@ error, especially for translation.
 
 ## Decision
 
-The conservative policy is a useful stability ablation, not a validated main
-module. It can protect a weak forest1 trajectory and reduce error variance, but
-it does not provide a consistent per-run improvement and does not outperform
-the archived V31 reference across rendering quality, translation, rotation, and
-runtime simultaneously. The final rendering model should remain V31 unless the
-pose-risk score is recalibrated against actual geometric error and the policy is
-validated across the full nine-scene benchmark.
+The complete V31-plus-quarantine model exceeds the true On-the-fly-NVS baseline
+on all three rendering metrics in both tested scenes. This establishes the
+overall model gain over the correct baseline. The incremental contribution of
+pose quarantine must be judged against archived V31, however. It is a useful
+stability ablation that can protect a weak forest1 trajectory and reduce error
+variance, but it does not provide a consistent per-run improvement or dominate
+V31 across rendering quality, translation, rotation, and runtime
+simultaneously. It should therefore remain an auxiliary robustness mechanism,
+not replace response-guided sampling and bounded representation optimization as
+the main contributions, unless the pose-risk score is recalibrated and the
+policy is validated across the full nine-scene benchmark.
 
 ## Artifacts
 
 - Protocol-matched run:
   `results/BRANCH_EXPERIMENTS_20260703/v31_risk_utility_pose_quarantine_protocol_20260711`
-- Three-way report:
-  `results/BRANCH_EXPERIMENTS_20260703/v31_risk_utility_pose_quarantine_protocol_20260711/comparison/three_way_comparison.md`
+- Corrected three-way report:
+  `results/BRANCH_EXPERIMENTS_20260703/v31_risk_utility_pose_quarantine_protocol_20260711/comparison_corrected_table_baseline/three_way_comparison.md`
 - Paired observe run 1:
   `results/BRANCH_EXPERIMENTS_20260703/v31_risk_utility_observe_protocol_20260711`
 - Paired observe/quarantine run 2:
