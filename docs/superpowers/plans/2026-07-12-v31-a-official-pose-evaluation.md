@@ -116,6 +116,10 @@ class OfficialRunnerTest(unittest.TestCase):
     def test_gpu_guard_rejects_multiple_visible_devices(self):
         with self.assertRaises(ValueError):
             validate_single_gpu("0,1")
+
+    def test_all_variants_enable_official_reboot_policy(self):
+        for variant in ("baseline", "v31", "v31_a"):
+            self.assertIn("--enable_reboot", build_command(spec_for(variant)))
 ```
 
 - [ ] **Step 2: Run tests and verify RED**
@@ -126,7 +130,8 @@ Expected: import failure because the runner does not exist.
 
 - [ ] **Step 3: Implement scene and variant specifications**
 
-Use the nine padded source paths and exact holds. Baseline commands run in
+Use the nine padded source paths, exact holds, and the official
+`--enable_reboot` policy. Baseline commands run in
 `/data2/zxd/3D_Reconstruction/On_the_fly_main_true_baseline_20260703`.
 V31 and V31+A commands run in the current worktree. V31 disables both risk
 modes; V31+A uses the fixed parameters from the approved design.

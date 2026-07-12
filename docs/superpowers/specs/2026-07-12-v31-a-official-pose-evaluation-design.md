@@ -24,7 +24,9 @@ cooldown 64 frames, and zero pose-review iterations.
 
 All methods receive the same padded image streams in the same order. The
 holdout interval is 8 for MipNeRF360, 10 for StaticHikes, and 30 for TUM.
-Runs execute sequentially with exactly one visible CUDA device.
+All commands enable the official `--enable_reboot` policy used by
+`scripts/train_eval_all.py`. Runs execute sequentially with exactly one
+visible CUDA device.
 
 Reference trajectories are deliberately distinguished:
 
