@@ -23,6 +23,19 @@ class OfficialProtocolRunnerTest(unittest.TestCase):
         self.assertEqual(SCENES["forest1"].test_hold, 10)
         self.assertEqual(SCENES["desk"].test_hold, 30)
 
+    def test_all_variants_enable_official_reboot_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            specs = build_specs(
+                Path(tmp),
+                ["baseline", "v31", "v31_a"],
+                ["bonsai"],
+            )
+
+        for spec in specs:
+            with self.subTest(variant=spec.variant):
+                command = build_command(spec, python=Path("python"))
+                self.assertEqual(command.count("--enable_reboot"), 1)
+
     def test_a_command_preserves_v31_and_enables_quarantine_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             spec = build_specs(Path(tmp), ["v31_a"], ["bonsai"])[0]

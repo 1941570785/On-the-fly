@@ -151,6 +151,7 @@ def build_command(spec: ExperimentSpec, *, python: Path = DEFAULT_PYTHON) -> lis
         str(spec.model_dir),
         "--viewer_mode",
         "none",
+        "--enable_reboot",
         "--test_hold",
         str(spec.scene.test_hold),
         "--test_frequency",
