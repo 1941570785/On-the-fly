@@ -1345,6 +1345,25 @@ def resolve_coupled_innovation_config(args: Any) -> CoupledInnovationConfig:
         BASELINE_RENDER_LOCK_INTRA_FRAME_V50_PROFILE,
     }:
         pose_render_extra_optimization = "render_response_mask_conservative_v6"
+    v31_component_ablation = _str(
+        args,
+        "paper_aligned_v31_component_ablation",
+        "none",
+    )
+    if v31_component_ablation != "none":
+        if assimilation_profile != BASELINE_RENDER_LOCK_INTRA_FRAME_V31_PROFILE:
+            raise ValueError(
+                "paper_aligned_v31_component_ablation requires "
+                "baseline_render_lock_intra_frame_v31"
+            )
+        if v31_component_ablation == "disable_response_sampling":
+            pose_render_texture_sampling = "off"
+        elif v31_component_ablation == "disable_extra_optimization":
+            pose_render_extra_optimization = "off"
+        else:
+            raise ValueError(
+                f"Unknown V31 component ablation: {v31_component_ablation}"
+            )
     pose_render_update_gate = (
         "pose_confidence_soft_psnr_health_v1"
         if assimilation_profile

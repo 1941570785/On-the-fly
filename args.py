@@ -426,6 +426,17 @@ def get_args():
         help='Preset that keeps baseline render-frame selection while applying pose-risk-aware render assimilation.',
     )
     parser.add_argument(
+        '--paper_aligned_v31_component_ablation',
+        type=str,
+        default='none',
+        choices=[
+            'none',
+            'disable_response_sampling',
+            'disable_extra_optimization',
+        ],
+        help='Disable exactly one final V31 render component for controlled ablation.',
+    )
+    parser.add_argument(
         '--paper_aligned_render_frame_policy',
         type=str,
         default='off',
