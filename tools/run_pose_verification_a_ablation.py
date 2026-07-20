@@ -342,6 +342,33 @@ def _preflight(specs: list[ExperimentSpec], python: Path) -> None:
             raise FileNotFoundError(spec.scene.source)
 
 
+def _prewarm_caches(
+    specs: list[ExperimentSpec],
+    *,
+    python: Path,
+    gpu: str,
+    output_root: Path,
+) -> None:
+    sources = list(dict.fromkeys(str(spec.scene.source) for spec in specs))
+    command = [
+        str(python),
+        "tools/prewarm_model_caches.py",
+        *sources,
+    ]
+    environment = os.environ.copy()
+    environment["CUDA_VISIBLE_DEVICES"] = gpu
+    output_root.mkdir(parents=True, exist_ok=True)
+    with (output_root / "cache_prewarm.log").open("w", encoding="utf-8") as log:
+        subprocess.run(
+            command,
+            cwd=ROOT,
+            env=environment,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            check=True,
+        )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_root", type=Path, default=None)
@@ -350,6 +377,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--scenes", nargs="*", choices=tuple(SCENES), default=[])
     parser.add_argument("--gpus", nargs="*", default=[])
     parser.add_argument("--skip_existing", action="store_true")
+    parser.add_argument("--skip_cache_prewarm", action="store_true")
     parser.add_argument("--dry_run", action="store_true")
     return parser.parse_args(argv)
 
@@ -373,6 +401,15 @@ def main(argv: list[str] | None = None) -> int:
             print(" ".join(build_command(spec, python=args.python)))
         print(f"dry-run jobs={len(specs)} gpus={','.join(gpus)} output={output_root}")
         return 0
+
+    if not args.skip_cache_prewarm:
+        print(f"prewarming shared model caches on gpu{gpus[0]}", flush=True)
+        _prewarm_caches(
+            specs,
+            python=args.python,
+            gpu=gpus[0],
+            output_root=output_root,
+        )
 
     groups = distribute_specs(specs, gpus)
     rows: list[dict[str, Any]] = []

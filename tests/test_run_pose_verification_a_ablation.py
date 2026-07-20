@@ -9,6 +9,7 @@ from tools.run_pose_verification_a_ablation import (
     distribute_specs,
     validate_gpus,
 )
+from tools.prewarm_model_caches import target_image_size
 
 
 class PoseVerificationAblationRunnerTest(unittest.TestCase):
@@ -53,6 +54,10 @@ class PoseVerificationAblationRunnerTest(unittest.TestCase):
             validate_gpus(["0", "1", "2", "3"])
         with self.assertRaises(ValueError):
             validate_gpus(["1", "1"])
+
+    def test_cache_prewarm_uses_the_training_resolution_rule(self):
+        self.assertEqual(target_image_size(640, 480), (640, 480))
+        self.assertEqual(target_image_size(3000, 2000), (1500, 1000))
 
 
 if __name__ == "__main__":
