@@ -10,7 +10,7 @@ from typing import Any
 from paper_aligned_policy.viewpoint_coverage import rotation_degrees_between
 
 
-POSE_INITIALIZATION_RISK_MODES = {"off", "observe_v1", "isolate_v1"}
+POSE_INITIALIZATION_RISK_MODES = {"off", "observe_v1", "isolate_v1", "verify_v1"}
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -188,6 +188,11 @@ class PoseInitializationRiskGate:
             + 0.20 * temporal_degradation
         )
         threshold, threshold_debug = self._risk_threshold()
+        verification_floor = 0.005
+        verification_threshold = max(
+            verification_floor,
+            float(threshold_debug.get("adaptive_threshold", verification_floor)),
+        )
         warmed_up = len(self.risk_history) >= self.warmup
         multi_signal_risk = bool(
             pose_uncertainty >= 0.12
@@ -196,12 +201,24 @@ class PoseInitializationRiskGate:
         severe_pose_risk = pose_uncertainty >= 0.30
 
         eligible = bool(baseline_selected and not is_test and not is_bootstrap)
-        risk_trigger = bool(
-            self.mode == "isolate_v1"
-            and eligible
+        risk_evidence_trigger = bool(
+            eligible
             and warmed_up
             and risk_score >= threshold
             and (multi_signal_risk or severe_pose_risk)
+        )
+        risk_trigger = bool(self.mode == "isolate_v1" and risk_evidence_trigger)
+        verification_signal = bool(
+            pose_uncertainty >= 0.03
+            or state_support_gap >= 0.015
+            or temporal_degradation >= 0.05
+        )
+        verification_trigger = bool(
+            self.mode == "verify_v1"
+            and eligible
+            and warmed_up
+            and risk_score >= verification_threshold
+            and verification_signal
         )
         cooldown_active = bool(
             self.last_isolated_frame_id >= 0
@@ -220,6 +237,12 @@ class PoseInitializationRiskGate:
             decision = "off"
         elif self.mode == "observe_v1":
             decision = "observe"
+        elif self.mode == "verify_v1" and not warmed_up:
+            decision = "verify_warmup"
+        elif verification_trigger:
+            decision = "verify_candidate"
+        elif self.mode == "verify_v1":
+            decision = "verify_bypass"
         elif not warmed_up:
             decision = "warmup_admit"
         elif isolate:
@@ -236,6 +259,13 @@ class PoseInitializationRiskGate:
             "eligible": eligible,
             "isolated": isolate,
             "risk_trigger": risk_trigger,
+            "risk_evidence_trigger": risk_evidence_trigger,
+            "verification_trigger": verification_trigger,
+            "verification_signal": verification_signal,
+            "verification_risk_threshold": float(verification_threshold),
+            "verification_risk_floor": float(verification_floor),
+            "verification_attempted": False,
+            "verification_accepted": False,
             "cooldown_active": cooldown_active,
             "last_isolated_frame_id": int(self.last_isolated_frame_id),
             "baseline_selected": bool(baseline_selected),
@@ -269,6 +299,15 @@ class PoseInitializationRiskGate:
     def summary(self) -> dict[str, Any]:
         eligible_events = [event for event in self.events if event["eligible"]]
         isolated_events = [event for event in eligible_events if event["isolated"]]
+        verification_candidates = [
+            event for event in eligible_events if event.get("verification_trigger", False)
+        ]
+        verification_attempts = [
+            event for event in eligible_events if event.get("verification_attempted", False)
+        ]
+        verification_accepts = [
+            event for event in eligible_events if event.get("verification_accepted", False)
+        ]
         cooldown_events = [
             event
             for event in eligible_events
@@ -286,6 +325,12 @@ class PoseInitializationRiskGate:
             "isolated": int(len(isolated_events)),
             "cooldown_blocked": int(len(cooldown_events)),
             "isolated_ratio": float(len(isolated_events) / max(len(eligible_events), 1)),
+            "verification_candidates": int(len(verification_candidates)),
+            "verification_attempts": int(len(verification_attempts)),
+            "verification_accepted": int(len(verification_accepts)),
+            "verification_accept_rate": float(
+                len(verification_accepts) / max(len(verification_attempts), 1)
+            ),
             "risk_score_mean": mean("risk_score"),
             "pose_uncertainty_mean": mean("pose_uncertainty"),
             "state_support_gap_mean": mean("state_support_gap"),

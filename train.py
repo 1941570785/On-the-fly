@@ -2384,6 +2384,55 @@ if __name__ == "__main__":
                         info["_pose_initialization_risk"] = dict(
                             pose_initialization_risk_decision
                         )
+                        if pose_initialization_risk_mode == "verify_v1":
+                            Rt, pose_verification_debug = (
+                                pose_initializer.verify_incremental_pose(
+                                    Rt,
+                                    pose_initialization_risk_decision,
+                                    image_width=int(width),
+                                    image_height=int(height),
+                                    pose_history=list(viewpoint_pose_history),
+                                    mad_scale=float(
+                                        getattr(args, "pose_verification_mad_scale", 2.5)
+                                    ),
+                                    min_support=int(
+                                        getattr(args, "pose_verification_min_support", 24)
+                                    ),
+                                    min_relative_median_improvement=float(
+                                        getattr(args, "pose_verification_min_improvement", 0.02)
+                                    ),
+                                    max_p90_ratio=float(
+                                        getattr(args, "pose_verification_max_p90_ratio", 1.01)
+                                    ),
+                                    min_support_ratio=float(
+                                        getattr(args, "pose_verification_min_support_ratio", 0.80)
+                                    ),
+                                )
+                            )
+                            pose_verification_debug.update(
+                                {
+                                    "frame_id": int(frameID),
+                                    "image_name": str(info.get("image_name", info.get("name", ""))),
+                                    "gt_Rt": _pose_matrix_for_trace(info.get("Rt")),
+                                }
+                            )
+                            pose_initialization_risk_decision.update(
+                                {
+                                    "verification_attempted": bool(
+                                        pose_verification_debug.get("attempted", False)
+                                    ),
+                                    "verification_accepted": bool(
+                                        pose_verification_debug.get("accepted", False)
+                                    ),
+                                    "verification_reason": str(
+                                        pose_verification_debug.get("reason", "")
+                                    ),
+                                    "verification": pose_verification_debug,
+                                }
+                            )
+                            info["_pose_initialization_risk"] = dict(
+                                pose_initialization_risk_decision
+                            )
                         if pose_risk_utility_gate is not None:
                             pose_initialization_risk_decision.update(
                                 {

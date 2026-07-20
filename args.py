@@ -153,8 +153,8 @@ def get_args():
         '--pose_initialization_risk_mode',
         type=str,
         default='off',
-        choices=['off', 'observe_v1', 'isolate_v1'],
-        help='Post-pose A-module mode. observe_v1 records risk; isolate_v1 also blocks risky training keyframes from representation updates.',
+        choices=['off', 'observe_v1', 'isolate_v1', 'verify_v1'],
+        help='Post-pose A-module mode. verify_v1 robustly rechecks risky poses while preserving the baseline frame policy.',
     )
     parser.add_argument(
         '--pose_initialization_risk_absolute_threshold',
@@ -185,6 +185,36 @@ def get_args():
         type=int,
         default=12,
         help='Minimum source-frame interval between two representation-isolation decisions.',
+    )
+    parser.add_argument(
+        '--pose_verification_mad_scale',
+        type=float,
+        default=2.5,
+        help='MAD multiplier used to clean pose-verification correspondences.',
+    )
+    parser.add_argument(
+        '--pose_verification_min_support',
+        type=int,
+        default=24,
+        help='Target minimum 2D-3D support retained for a verification MiniBA.',
+    )
+    parser.add_argument(
+        '--pose_verification_min_improvement',
+        type=float,
+        default=0.02,
+        help='Minimum relative median reprojection improvement required to accept a verified pose.',
+    )
+    parser.add_argument(
+        '--pose_verification_max_p90_ratio',
+        type=float,
+        default=1.01,
+        help='Maximum post/pre p90 reprojection-error ratio for safe acceptance.',
+    )
+    parser.add_argument(
+        '--pose_verification_min_support_ratio',
+        type=float,
+        default=0.80,
+        help='Minimum post/pre valid correspondence ratio for safe acceptance.',
     )
     parser.add_argument(
         '--pose_risk_utility_admission_mode',
