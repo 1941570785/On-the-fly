@@ -46,16 +46,15 @@ class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
         )
 
     def test_positive_budget_maps_fraction_and_cap(self):
-        self.assertEqual(
-            budget_args(12),
-            [
-                "--paper_aligned_pose_render_extra_optimization_fraction",
-                "0.383333333333",
-                "--paper_aligned_pose_render_extra_optimization_max_extra",
-                "12",
-            ],
-        )
-        self.assertEqual(budget_args(8)[1], "0.25")
+        for budget in (2, 4, 6, 8, 10, 12, 16, 60):
+            with self.subTest(budget=budget):
+                args = budget_args(budget)
+                fraction = float(args[1])
+                cap = int(args[3])
+                realized = max(1, min(cap, round(30 * fraction)))
+
+                self.assertEqual(realized, budget)
+                self.assertEqual(cap, budget)
 
     def test_gpu_and_budget_validation_reject_invalid_values(self):
         self.assertEqual(validate_gpus(["5", "6", "7"]), ("5", "6", "7"))

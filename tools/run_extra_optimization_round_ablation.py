@@ -94,7 +94,7 @@ def budget_args(budget: int) -> list[str]:
         ]
     return [
         "--paper_aligned_pose_render_extra_optimization_fraction",
-        format(budget_fraction(value), ".12g"),
+        format(budget_fraction(value), ".17g"),
         "--paper_aligned_pose_render_extra_optimization_max_extra",
         str(value),
     ]
