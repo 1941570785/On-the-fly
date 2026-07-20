@@ -213,12 +213,14 @@ class PoseInitializationRiskGate:
             or state_support_gap >= 0.015
             or temporal_degradation >= 0.05
         )
-        verification_trigger = bool(
-            self.mode == "verify_v1"
-            and eligible
+        verification_candidate = bool(
+            eligible
             and warmed_up
             and risk_score >= verification_threshold
             and verification_signal
+        )
+        verification_trigger = bool(
+            self.mode == "verify_v1" and verification_candidate
         )
         cooldown_active = bool(
             self.last_isolated_frame_id >= 0
@@ -260,6 +262,7 @@ class PoseInitializationRiskGate:
             "isolated": isolate,
             "risk_trigger": risk_trigger,
             "risk_evidence_trigger": risk_evidence_trigger,
+            "verification_candidate": verification_candidate,
             "verification_trigger": verification_trigger,
             "verification_signal": verification_signal,
             "verification_risk_threshold": float(verification_threshold),
@@ -283,6 +286,16 @@ class PoseInitializationRiskGate:
             "absolute_support": float(absolute_support),
             "consensus_ratio": float(consensus_ratio),
             "stage_retention": float(stage_retention),
+            "match_count_total": int(match_count),
+            "num_2d3d_correspondences": int(correspondences),
+            "num_pnp_inliers": int(pnp_inliers),
+            "num_miniba_inliers": int(miniba_inliers),
+            "pnp_inlier_ratio": float(
+                pnp_inliers / max(float(correspondences), 1.0)
+            ),
+            "miniba_inlier_ratio": float(
+                miniba_inliers / max(float(correspondences), 1.0)
+            ),
             "grid_coverage": float(grid_coverage),
             "grid_entropy": float(grid_entropy),
             "anchor_health": float(anchor_health),
@@ -300,7 +313,9 @@ class PoseInitializationRiskGate:
         eligible_events = [event for event in self.events if event["eligible"]]
         isolated_events = [event for event in eligible_events if event["isolated"]]
         verification_candidates = [
-            event for event in eligible_events if event.get("verification_trigger", False)
+            event
+            for event in eligible_events
+            if event.get("verification_candidate", False)
         ]
         verification_attempts = [
             event for event in eligible_events if event.get("verification_attempted", False)

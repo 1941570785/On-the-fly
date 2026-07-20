@@ -2381,6 +2381,16 @@ if __name__ == "__main__":
                                 is_bootstrap=False,
                             )
                         )
+                        pose_initialization_risk_decision.update(
+                            {
+                                "image_name": str(
+                                    info.get("image_name", info.get("name", ""))
+                                ),
+                                "initial_estimated_Rt": _pose_matrix_for_trace(Rt),
+                                "estimated_Rt": _pose_matrix_for_trace(Rt),
+                                "gt_Rt": _pose_matrix_for_trace(info.get("Rt")),
+                            }
+                        )
                         info["_pose_initialization_risk"] = dict(
                             pose_initialization_risk_decision
                         )
@@ -2428,6 +2438,7 @@ if __name__ == "__main__":
                                         pose_verification_debug.get("reason", "")
                                     ),
                                     "verification": pose_verification_debug,
+                                    "estimated_Rt": _pose_matrix_for_trace(Rt),
                                 }
                             )
                             info["_pose_initialization_risk"] = dict(

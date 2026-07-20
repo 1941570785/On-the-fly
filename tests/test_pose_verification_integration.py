@@ -133,6 +133,42 @@ class PoseVerificationRiskIntegrationTests(unittest.TestCase):
         self.assertGreater(event["risk_score"], event["verification_risk_threshold"])
         self.assertTrue(event["verification_trigger"])
 
+    def test_observe_mode_records_the_same_candidate_without_running_verification(self):
+        gate = PoseInitializationRiskGate(
+            mode="observe_v1",
+            absolute_threshold=0.10,
+            adaptive_sigma=2.0,
+            warmup=3,
+        )
+        gate.risk_history.extend([0.0020, 0.0025, 0.0030, 0.0022])
+
+        event = gate.evaluate(
+            frame_id=20,
+            pose_debug={
+                "match_count_total": 420,
+                "num_2d3d_correspondences": 400,
+                "num_pnp_inliers": 250,
+                "num_miniba_inliers": 230,
+            },
+            viewpoint_scores={
+                "inlier_grid_coverage": 0.95,
+                "inlier_grid_entropy": 0.95,
+                "anchor_health_score": 0.90,
+                "selected_reference_count": 3,
+            },
+            min_num_inliers=100,
+            recent_pose_fail_rate=0.0,
+            current_Rt=_rt(2.0),
+            pose_history=[(18, _rt(0.0)), (19, _rt(1.0))],
+            baseline_selected=True,
+            is_test=False,
+            is_bootstrap=False,
+        )
+
+        self.assertTrue(event["verification_candidate"])
+        self.assertFalse(event["verification_trigger"])
+        self.assertEqual(event["decision"], "observe")
+
     def test_cli_accepts_verify_mode_and_pose_only_parameters(self):
         with tempfile.TemporaryDirectory() as td:
             argv = [
@@ -248,6 +284,8 @@ class PoseVerificationRiskIntegrationTests(unittest.TestCase):
 
         self.assertLess(risk_index, verification_index)
         self.assertLess(verification_index, keyframe_index)
+        self.assertIn('"initial_estimated_Rt": _pose_matrix_for_trace(Rt)', source)
+        self.assertIn('"gt_Rt": _pose_matrix_for_trace(info.get("Rt"))', source)
 
 
 if __name__ == "__main__":

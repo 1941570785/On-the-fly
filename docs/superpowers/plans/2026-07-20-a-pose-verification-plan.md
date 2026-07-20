@@ -30,15 +30,15 @@ Implement a small `poses/pose_verification.py` module containing pure tensor and
 scalar decision helpers. Keep CUDA-dependent solver calls outside the pure
 module.
 
-## Task 3: Reuse MiniBA for a Second Pose Candidate
+## Task 3: Reuse PnP-RANSAC and MiniBA for a Second Pose Candidate
 
 Extend the pose initializer's existing support cache with the corresponding 2D
 coordinates. Add a method that:
 
 - exits without work unless `verify_v1` produces a risk trigger;
 - cleans the cached correspondences;
-- pads/subsamples to the unchanged incremental MiniBA problem size;
-- starts from the initial pose and reruns MiniBA once;
+- reruns PnP-RANSAC on cleaned full-resolution correspondences;
+- starts from the PnP candidate and reruns MiniBA once;
 - computes pre/post diagnostics and safe-acceptance decision;
 - returns the accepted pose or the original pose exactly;
 - records solver time and detailed telemetry.
@@ -52,7 +52,7 @@ viewpoint telemetry after an accepted correction; do not call B or C from A.
 
 ## Task 5: Add the Three-Way Ablation Runner
 
-Build a runner with `Baseline`, `A-Observe`, and `A-Full`. Freeze all non-A
+Build a runner with `V31-Control`, `A-Observe`, and `A-Full`. Freeze all non-A
 arguments and support up to three explicitly assigned GPUs. Add a summarizer that
 joins official pose metrics, rendering metrics, risk traces, and A telemetry per
 scene and as dataset macro averages.
@@ -75,4 +75,5 @@ Run the three variants with the official protocol over:
 
 Use at most three GPUs concurrently. Report every scene separately, then the
 three dataset arithmetic means and nine-scene macro mean. Compare `A-Full` to
-both `Baseline` and `A-Observe`, with pose evidence leading and rendering/time as
+both `V31-Control` and `A-Observe`, with pose evidence leading and rendering/time
+as side-effect checks.

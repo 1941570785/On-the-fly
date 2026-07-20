@@ -33,13 +33,15 @@ sampling adapter in this design.
    anomaly.
 3. In `observe_v1`, the risk and initial-pose diagnostics are recorded but `T0`
    is returned unchanged.
-4. In `verify_v1`, a risk candidate triggers a second pose-only verification.
+4. Both `observe_v1` and `verify_v1` record the same risk-candidate decision;
+   only `verify_v1` executes the pose solver.
 5. Reprojection residuals under `T0` are robustly filtered using median/MAD.
    Spatial cells retain their best-supported correspondence so that filtering
    cannot collapse all support into one image region.
-6. The existing incremental MiniBA solver is rerun from `T0` on the cleaned
-   correspondences. Its built-in Huber weighting and MAD outlier mask remain the
-   only optimization robustifier.
+6. PnP-RANSAC is rerun on the cleaned, full-resolution correspondence set and
+   its candidate is polished by the existing incremental MiniBA solver. The
+   solver's built-in Huber weighting and MAD outlier mask remain the only
+   optimization robustifier.
 7. The refined pose `Tr` is accepted only when all safe-acceptance checks pass;
    otherwise A returns `T0` exactly.
 8. The accepted pose `TA` is passed through the existing pose field to B and C.
@@ -47,11 +49,12 @@ sampling adapter in this design.
 ## Risk Trigger
 
 `verify_v1` uses the same online median/MAD-calibrated risk score as the existing
-observer. Verification is eligible after warmup when the score exceeds the
-adaptive threshold and either multiple risk signals agree or pose uncertainty is
-severe. Unlike `isolate_v1`, the trigger does not remove the frame and has no
-cooldown: every eligible risky estimate may be checked, while the safe fallback
-prevents unsupported changes.
+observer. After warmup, a frame becomes a verification candidate when its score
+enters the adaptive upper tail and at least one pose, state-support, or temporal
+signal is non-trivial. This lower diagnostic tail is intentionally separate from
+the conservative hard-isolation threshold: A verifies questionable estimates
+without dropping them. It has no cooldown, and the safe fallback prevents
+unsupported changes.
 
 ## Robust Correspondence Selection
 
@@ -71,9 +74,10 @@ without adding a learned model or a scene-specific mask.
 The refined pose is accepted only if:
 
 - both poses and all diagnostics are finite;
-- enough cleaned correspondences support the second MiniBA;
-- the refined median reprojection error decreases by a minimum relative amount;
-- the refined high-percentile error does not increase;
+- enough cleaned correspondences support the second PnP/MiniBA pass;
+- both mean error and median error improve, with at least 2% relative median
+  reduction;
+- the refined p90 error stays within 1% of the initial p90;
 - the valid-support ratio does not collapse;
 - translation and rotation corrections stay below conservative limits derived
   from the current scene scale and recent motion.
@@ -85,10 +89,12 @@ improvement or the original baseline pose.
 
 ## Telemetry and Evidence
 
-Each frame records risk, trigger status, support counts, robust cutoff, spatial
-coverage, pre/post median and p90 reprojection errors, correction magnitudes,
-accept/reject reason, and A runtime. The trace also stores the initial and final
-pose matrices for direct GT evaluation.
+Each frame records the mode-independent candidate status, solver trigger,
+support counts and ratios, robust cutoff, spatial coverage, pre/post mean,
+median and p90 reprojection errors, correction magnitudes, accept/reject reason,
+and A runtime. The trace also stores the initial, final, and available dataset
+pose matrices for direct GT evaluation. PnP's RNG state is restored after the
+verification attempt so rejected checks do not perturb later baseline sampling.
 
 Primary A evidence:
 
