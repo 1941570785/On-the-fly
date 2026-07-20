@@ -84,7 +84,9 @@ class PoseVerificationAblationEvaluatorTest(unittest.TestCase):
         self.assertLess(result["accepted_final_translation_error_mean"], result["accepted_initial_translation_error_mean"])
         self.assertGreater(result["candidate_translation_enrichment"], 1.0)
         self.assertAlmostEqual(result["reprojection_mean_reduction"], 1.0)
+        self.assertAlmostEqual(result["accepted_reprojection_mean_reduction"], 1.0)
         self.assertAlmostEqual(result["runtime_seconds_total"], 0.02)
+        self.assertEqual(len(result["events"]), 4)
 
 
 if __name__ == "__main__":

@@ -5,10 +5,15 @@ import argparse
 import csv
 import json
 import math
+import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from tools.evaluate_official_pose_benchmark import (
     REFERENCE_ROOT,
@@ -172,6 +177,13 @@ def evaluate_a_trace(
                 "pre_p90": _numeric(verification.get("pre_reprojection_p90")),
                 "post_p90": _numeric(verification.get("post_reprojection_p90")),
                 "runtime": _numeric(verification.get("runtime_seconds")),
+                "relative_mean_improvement": _numeric(
+                    verification.get("relative_mean_improvement")
+                ),
+                "relative_median_improvement": _numeric(
+                    verification.get("relative_median_improvement")
+                ),
+                "support_ratio": _numeric(verification.get("support_ratio")),
                 "rotation_correction_deg": _numeric(verification.get("rotation_correction_deg")),
                 "translation_correction": _numeric(verification.get("translation_correction")),
             }
@@ -190,10 +202,14 @@ def evaluate_a_trace(
     candidate_rot = _mean([row["initial_rotation_error_deg"] for row in candidates])
     noncandidate_rot = _mean([row["initial_rotation_error_deg"] for row in noncandidates])
 
-    def reduction(before_key: str, after_key: str) -> float | None:
+    def reduction(
+        source: list[dict[str, Any]],
+        before_key: str,
+        after_key: str,
+    ) -> float | None:
         values = [
             float(row[before_key]) - float(row[after_key])
-            for row in attempts
+            for row in source
             if row[before_key] is not None and row[after_key] is not None
         ]
         return _mean(values)
@@ -206,6 +222,7 @@ def evaluate_a_trace(
         "rejected_count": len(rejected),
         "accept_rate": len(accepted) / max(len(attempts), 1),
         "candidate_frame_ids": [row["frame_id"] for row in candidates],
+        "events": rows,
         "risk_translation_spearman": _spearman(risks, initial_trans),
         "risk_rotation_spearman": _spearman(risks, initial_rot),
         "candidate_translation_error_mean": candidate_trans,
@@ -243,9 +260,29 @@ def evaluate_a_trace(
             for row in accepted
         ),
         "rejected_exact_fallback_count": sum(row["fallback_exact"] for row in rejected),
-        "reprojection_mean_reduction": reduction("pre_mean", "post_mean"),
-        "reprojection_median_reduction": reduction("pre_median", "post_median"),
-        "reprojection_p90_reduction": reduction("pre_p90", "post_p90"),
+        "reprojection_mean_reduction": reduction(attempts, "pre_mean", "post_mean"),
+        "reprojection_median_reduction": reduction(
+            attempts, "pre_median", "post_median"
+        ),
+        "reprojection_p90_reduction": reduction(attempts, "pre_p90", "post_p90"),
+        "accepted_reprojection_mean_reduction": reduction(
+            accepted, "pre_mean", "post_mean"
+        ),
+        "accepted_reprojection_median_reduction": reduction(
+            accepted, "pre_median", "post_median"
+        ),
+        "accepted_reprojection_p90_reduction": reduction(
+            accepted, "pre_p90", "post_p90"
+        ),
+        "accepted_relative_mean_improvement": _mean(
+            [row["relative_mean_improvement"] for row in accepted]
+        ),
+        "accepted_relative_median_improvement": _mean(
+            [row["relative_median_improvement"] for row in accepted]
+        ),
+        "accepted_support_ratio_mean": _mean(
+            [row["support_ratio"] for row in accepted]
+        ),
         "runtime_seconds_total": _sum([row["runtime"] for row in attempts]),
         "runtime_seconds_mean": _mean([row["runtime"] for row in attempts]),
         "translation_correction_mean": _mean(
@@ -295,6 +332,7 @@ def evaluate_run(
     render_rows: list[dict[str, Any]] = []
     delta_rows: list[dict[str, Any]] = []
     diagnostic_rows: list[dict[str, Any]] = []
+    event_rows: list[dict[str, Any]] = []
     for scene_name in scene_names:
         spec = SCENES[scene_name]
         reference = load_reference(spec, reference_root)
@@ -381,12 +419,12 @@ def evaluate_run(
                 **{
                     f"observe_{key}": value
                     for key, value in observe_diagnostic.items()
-                    if key != "candidate_frame_ids"
+                    if key not in {"candidate_frame_ids", "events"}
                 },
                 **{
                     f"full_{key}": value
                     for key, value in full_diagnostic.items()
-                    if key != "candidate_frame_ids"
+                    if key not in {"candidate_frame_ids", "events"}
                 },
                 "observe_candidate_frames": ";".join(
                     observe_diagnostic["candidate_frame_ids"]
@@ -394,6 +432,19 @@ def evaluate_run(
                 "full_candidate_frames": ";".join(full_diagnostic["candidate_frame_ids"]),
             }
         )
+        for method, diagnostic in (
+            ("a_observe", observe_diagnostic),
+            ("a_full", full_diagnostic),
+        ):
+            event_rows.extend(
+                {
+                    "dataset": spec.dataset,
+                    "scene": scene_name,
+                    "method": method,
+                    **event,
+                }
+                for event in diagnostic["events"]
+            )
 
     dataset_macro_rows: list[dict[str, Any]] = []
     for dataset in dict.fromkeys(row["dataset"] for row in render_rows):
@@ -426,10 +477,141 @@ def evaluate_run(
             }
         )
 
+    full_events = [row for row in event_rows if row["method"] == "a_full"]
+    full_candidates = [row for row in full_events if row["candidate"]]
+    full_noncandidates = [row for row in full_events if not row["candidate"]]
+    full_attempts = [row for row in full_events if row["attempted"]]
+    full_accepted = [row for row in full_events if row["accepted"]]
+    full_rejected = [row for row in full_attempts if not row["accepted"]]
+
+    def event_reduction(before: str, after: str) -> float | None:
+        return _mean(
+            [
+                float(row[before]) - float(row[after])
+                for row in full_accepted
+                if row[before] is not None and row[after] is not None
+            ]
+        )
+
+    scene_translation_enrichment = [
+        _numeric(row.get("full_candidate_translation_enrichment"))
+        for row in diagnostic_rows
+    ]
+    scene_translation_enrichment = [
+        value for value in scene_translation_enrichment if value is not None
+    ]
+    scene_rotation_enrichment = [
+        _numeric(row.get("full_candidate_rotation_enrichment"))
+        for row in diagnostic_rows
+    ]
+    scene_rotation_enrichment = [
+        value for value in scene_rotation_enrichment if value is not None
+    ]
+    accepted_translation_relative_improvements = [
+        (row["initial_translation_error"] - row["final_translation_error"])
+        / max(row["initial_translation_error"], 1e-12)
+        for row in full_accepted
+    ]
+    accepted_rotation_relative_improvements = [
+        (row["initial_rotation_error_deg"] - row["final_rotation_error_deg"])
+        / max(row["initial_rotation_error_deg"], 1e-12)
+        for row in full_accepted
+    ]
+    diagnostic_macro_rows = [
+        {
+            "evaluated_events": len(full_events),
+            "scenes_with_candidates": len(
+                {row["scene"] for row in full_candidates}
+            ),
+            "scenes_with_accepted_updates": len(
+                {row["scene"] for row in full_accepted}
+            ),
+            "candidate_count": len(full_candidates),
+            "attempt_count": len(full_attempts),
+            "accepted_count": len(full_accepted),
+            "rejected_count": len(full_rejected),
+            "accept_rate": len(full_accepted) / max(len(full_attempts), 1),
+            "rejected_exact_fallback_count": sum(
+                row["fallback_exact"] for row in full_rejected
+            ),
+            "scene_mean_risk_translation_spearman": _mean(
+                [
+                    _numeric(row.get("full_risk_translation_spearman"))
+                    for row in diagnostic_rows
+                ]
+            ),
+            "scene_mean_risk_rotation_spearman": _mean(
+                [
+                    _numeric(row.get("full_risk_rotation_spearman"))
+                    for row in diagnostic_rows
+                ]
+            ),
+            "scene_mean_candidate_translation_enrichment": _mean(
+                scene_translation_enrichment
+            ),
+            "scenes_translation_enrichment_above_one": sum(
+                value > 1.0 for value in scene_translation_enrichment
+            ),
+            "scene_mean_candidate_rotation_enrichment": _mean(
+                scene_rotation_enrichment
+            ),
+            "scenes_rotation_enrichment_above_one": sum(
+                value > 1.0 for value in scene_rotation_enrichment
+            ),
+            "accepted_translation_improved_count": sum(
+                row["final_translation_error"] < row["initial_translation_error"]
+                for row in full_accepted
+            ),
+            "accepted_rotation_improved_count": sum(
+                row["final_rotation_error_deg"] < row["initial_rotation_error_deg"]
+                for row in full_accepted
+            ),
+            "accepted_translation_relative_improvement_mean": _mean(
+                accepted_translation_relative_improvements
+            ),
+            "accepted_translation_relative_improvement_median": (
+                float(np.median(accepted_translation_relative_improvements))
+                if accepted_translation_relative_improvements
+                else None
+            ),
+            "accepted_rotation_relative_improvement_mean": _mean(
+                accepted_rotation_relative_improvements
+            ),
+            "accepted_rotation_relative_improvement_median": (
+                float(np.median(accepted_rotation_relative_improvements))
+                if accepted_rotation_relative_improvements
+                else None
+            ),
+            "accepted_reprojection_mean_reduction": event_reduction(
+                "pre_mean", "post_mean"
+            ),
+            "accepted_reprojection_median_reduction": event_reduction(
+                "pre_median", "post_median"
+            ),
+            "accepted_reprojection_p90_reduction": event_reduction(
+                "pre_p90", "post_p90"
+            ),
+            "accepted_relative_reprojection_mean_improvement": _mean(
+                [row["relative_mean_improvement"] for row in full_accepted]
+            ),
+            "accepted_relative_reprojection_median_improvement": _mean(
+                [row["relative_median_improvement"] for row in full_accepted]
+            ),
+            "runtime_seconds_total": _sum(
+                [row["runtime"] for row in full_attempts]
+            ),
+            "runtime_seconds_mean": _mean(
+                [row["runtime"] for row in full_attempts]
+            ),
+        }
+    ]
+
     _write_csv(output_dir / "pose_scene.csv", pose_rows)
     _write_csv(output_dir / "render_scene.csv", render_rows)
     _write_csv(output_dir / "full_minus_control.csv", delta_rows)
     _write_csv(output_dir / "a_diagnostics_scene.csv", diagnostic_rows)
+    _write_csv(output_dir / "a_events.csv", event_rows)
+    _write_csv(output_dir / "a_diagnostics_macro.csv", diagnostic_macro_rows)
     _write_csv(output_dir / "dataset_macro.csv", dataset_macro_rows)
     _write_csv(output_dir / "nine_scene_macro.csv", nine_scene_rows)
     (output_dir / "pose_verification_a_report.json").write_text(
