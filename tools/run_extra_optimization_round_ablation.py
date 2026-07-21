@@ -77,10 +77,8 @@ def validate_budgets(budgets: Sequence[int]) -> tuple[int, ...]:
 
 def validate_seeds(seeds: Sequence[int]) -> tuple[int, ...]:
     values = tuple(int(seed) for seed in seeds)
-    if not values or len(set(values)) != len(values):
-        raise ValueError("provide unique experiment seeds")
-    if any(value < 0 for value in values):
-        raise ValueError("experiment seeds must be non-negative")
+    if values != (0,):
+        raise ValueError("the final pose-verification-A branch uses built-in seed zero")
     return values
 
 
@@ -171,8 +169,6 @@ def build_command(
         "-1",
         *V31_PROFILE_ARGS,
         *A_MODULE_ARGS,
-        "--experiment_seed",
-        str(spec.seed),
         *budget_args(spec.budget),
     ]
 

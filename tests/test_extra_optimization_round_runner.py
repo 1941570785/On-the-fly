@@ -19,6 +19,7 @@ from tools.run_extra_optimization_round_ablation import (
     summarize,
     validate_budgets,
     validate_gpus,
+    validate_seeds,
 )
 from tools.run_pose_verification_a_ablation import SCENES
 
@@ -37,11 +38,10 @@ class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
 
     def test_zero_budget_disables_only_extra_optimization(self):
         with tempfile.TemporaryDirectory() as directory:
-            command = build_command(self.make_spec(Path(directory), budget=0, seed=1))
+            command = build_command(self.make_spec(Path(directory), budget=0, seed=0))
 
         self.assertIn("disable_extra_optimization", command)
-        self.assertIn("--experiment_seed", command)
-        self.assertEqual(command[command.index("--experiment_seed") + 1], "1")
+        self.assertNotIn("--experiment_seed", command)
         self.assertNotIn(
             "--paper_aligned_pose_render_extra_optimization_max_extra", command
         )
@@ -86,6 +86,9 @@ class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
         for invalid in ([], [0, 0], [-1, 2], [1, 2]):
             with self.subTest(budgets=invalid), self.assertRaises(ValueError):
                 validate_budgets(invalid)
+        for invalid in ([], [1], [0, 1]):
+            with self.subTest(seeds=invalid), self.assertRaises(ValueError):
+                validate_seeds(invalid)
 
     def test_default_sweep_has_all_nine_scenes_and_63_unique_jobs(self):
         self.assertEqual(tuple(ACTIVE_SCENES), tuple(SCENES))
@@ -108,7 +111,7 @@ class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
                 phase="sweep",
                 scene_names=("bonsai", "desk"),
                 budgets=(0, 2, 4, 8),
-                seeds=(0, 1, 2),
+                seeds=(0,),
             )
         queues = build_worker_queues(specs, ("5", "6", "7"))
         assignments = {
@@ -118,7 +121,7 @@ class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
         }
 
         for scene_name in ("bonsai", "desk"):
-            for seed in (0, 1, 2):
+            for seed in (0,):
                 gpu = assignments[(scene_name, seed)]
                 budgets = {
                     spec.budget
@@ -145,7 +148,7 @@ class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
 
     def test_summary_reports_requested_and_realized_iterations(self):
         with tempfile.TemporaryDirectory() as directory:
-            spec = self.make_spec(Path(directory), budget=8, seed=2)
+            spec = self.make_spec(Path(directory), budget=8, seed=0)
             spec.model_dir.mkdir(parents=True)
             (spec.model_dir / "metadata.json").write_text(
                 json.dumps(
