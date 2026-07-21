@@ -20,22 +20,27 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools.run_v31_a_official_pose_benchmark import (
-    A_MODULE_ARGS,
+from tools.run_pose_verification_a_ablation import (
+    A_SHARED_ARGS,
     DEFAULT_PYTHON,
     RESULTS_PARENT,
     SCENES,
     V31_PROFILE_ARGS,
     SceneSpec,
-    git_commit,
 )
+from tools.run_v31_a_official_pose_benchmark import git_commit
 
 
-DEFAULT_BUDGETS = (0, 2, 4, 6, 8, 10, 12, 16)
-DEFAULT_SEEDS = (0, 1, 2)
-ACTIVE_SCENES = ("bonsai", "counter", "garden", "desk", "xyz")
-INACTIVE_SCENES = ("forest1", "forest2", "university2", "long_office")
+DEFAULT_BUDGETS = (0, 2, 4, 8, 12, 16, 20)
+DEFAULT_SEEDS = (0,)
+ACTIVE_SCENES = tuple(SCENES)
+INACTIVE_SCENES: tuple[str, ...] = ()
 PHASES = ("sweep", "validation", "smoke")
+A_MODULE_ARGS = (
+    "--pose_initialization_risk_mode",
+    "verify_v1",
+    *A_SHARED_ARGS,
+)
 
 
 @dataclass(frozen=True)
@@ -54,8 +59,8 @@ class RoundSpec:
 
 def validate_gpus(gpus: Sequence[str]) -> tuple[str, ...]:
     values = tuple(str(gpu).strip() for gpu in gpus if str(gpu).strip())
-    if not values or len(values) > 3 or len(set(values)) != len(values):
-        raise ValueError("provide one to three unique GPU IDs")
+    if not values or len(values) > 6 or len(set(values)) != len(values):
+        raise ValueError("provide one to six unique GPU IDs")
     if any("," in value for value in values):
         raise ValueError("each GPU ID must identify exactly one physical GPU")
     return values

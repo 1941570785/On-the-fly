@@ -8,6 +8,7 @@ from pathlib import Path
 from tools.run_extra_optimization_round_ablation import (
     ACTIVE_SCENES,
     DEFAULT_BUDGETS,
+    DEFAULT_SEEDS,
     RoundSpec,
     budget_args,
     build_command,
@@ -19,7 +20,7 @@ from tools.run_extra_optimization_round_ablation import (
     validate_budgets,
     validate_gpus,
 )
-from tools.run_v31_a_official_pose_benchmark import SCENES
+from tools.run_pose_verification_a_ablation import SCENES
 
 
 class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
@@ -45,6 +46,23 @@ class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
             "--paper_aligned_pose_render_extra_optimization_max_extra", command
         )
 
+    def test_command_uses_latest_pose_verification_a(self):
+        with tempfile.TemporaryDirectory() as directory:
+            command = build_command(self.make_spec(Path(directory), budget=8))
+
+        self.assertEqual(
+            command[command.index("--pose_initialization_risk_mode") + 1],
+            "verify_v1",
+        )
+        self.assertEqual(
+            command[command.index("--pose_risk_utility_admission_mode") + 1],
+            "off",
+        )
+        self.assertEqual(
+            command[command.index("--pose_verification_min_support") + 1],
+            "24",
+        )
+
     def test_positive_budget_maps_fraction_and_cap(self):
         for budget in (2, 4, 6, 8, 10, 12, 16, 60):
             with self.subTest(budget=budget):
@@ -57,27 +75,31 @@ class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
                 self.assertEqual(cap, budget)
 
     def test_gpu_and_budget_validation_reject_invalid_values(self):
-        self.assertEqual(validate_gpus(["5", "6", "7"]), ("5", "6", "7"))
+        self.assertEqual(
+            validate_gpus(["0", "1", "2", "3", "4", "5"]),
+            ("0", "1", "2", "3", "4", "5"),
+        )
         self.assertEqual(validate_budgets([0, 2, 8]), (0, 2, 8))
-        for invalid in ([], ["0", "0"], ["0", "1", "2", "3"]):
+        for invalid in ([], ["0", "0"], ["0", "1", "2", "3", "4", "5", "6"]):
             with self.subTest(gpus=invalid), self.assertRaises(ValueError):
                 validate_gpus(invalid)
         for invalid in ([], [0, 0], [-1, 2], [1, 2]):
             with self.subTest(budgets=invalid), self.assertRaises(ValueError):
                 validate_budgets(invalid)
 
-    def test_sweep_has_120_unique_jobs(self):
+    def test_default_sweep_has_all_nine_scenes_and_63_unique_jobs(self):
+        self.assertEqual(tuple(ACTIVE_SCENES), tuple(SCENES))
         with tempfile.TemporaryDirectory() as directory:
             specs = build_specs(
                 output_root=Path(directory),
                 phase="sweep",
                 scene_names=ACTIVE_SCENES,
                 budgets=DEFAULT_BUDGETS,
-                seeds=(0, 1, 2),
+                seeds=DEFAULT_SEEDS,
             )
 
-        self.assertEqual(len(specs), 120)
-        self.assertEqual(len({spec.job_id for spec in specs}), 120)
+        self.assertEqual(len(specs), 63)
+        self.assertEqual(len({spec.job_id for spec in specs}), 63)
 
     def test_worker_queues_keep_paired_blocks_on_one_gpu(self):
         with tempfile.TemporaryDirectory() as directory:
