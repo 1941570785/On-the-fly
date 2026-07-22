@@ -12,6 +12,7 @@ from tools.evaluate_a_v2_baseline_pose_experiment import (
     POSE_FIELDS,
     _load_stage_trace,
     aggregate_repeat_rows,
+    aggregate_stage_rows,
     compute_fixed_alignment_stage_report,
     reference_scene_spec,
 )
@@ -30,6 +31,35 @@ def pose_c2w(x: float, y: float, z: float, rz_deg: float = 0.0) -> np.ndarray:
 
 
 class AV2BaselinePoseEvaluatorTests(unittest.TestCase):
+    def test_stage_aggregation_reports_acceptance_gt_precision_and_retention(self):
+        rows = [
+            {
+                "variant": "a_v2",
+                "trace_attempts": 10,
+                "trace_accepts": 3,
+                "accepted_count": 3,
+                "accepted_both_improved_count": 2,
+                "retained_count": 1,
+            },
+            {
+                "variant": "a_v2",
+                "trace_attempts": 20,
+                "trace_accepts": 2,
+                "accepted_count": 2,
+                "accepted_both_improved_count": 1,
+                "retained_count": 1,
+            },
+        ]
+
+        summary = aggregate_stage_rows(rows, group_fields=("variant",))
+
+        self.assertEqual(len(summary), 1)
+        self.assertEqual(summary[0]["trace_attempts"], 30)
+        self.assertEqual(summary[0]["accepted_count"], 5)
+        self.assertAlmostEqual(summary[0]["accept_rate"], 5.0 / 30.0)
+        self.assertAlmostEqual(summary[0]["accepted_both_improved_rate"], 3.0 / 5.0)
+        self.assertAlmostEqual(summary[0]["retention_rate"], 2.0 / 3.0)
+
     def test_stage_trace_keeps_all_ordered_frames_for_accepted_pose_diagnostics(self):
         identity = np.eye(4, dtype=np.float64).tolist()
         with tempfile.TemporaryDirectory() as directory:

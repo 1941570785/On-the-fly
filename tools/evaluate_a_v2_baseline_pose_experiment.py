@@ -258,6 +258,38 @@ def aggregate_repeat_rows(
     return output
 
 
+def aggregate_stage_rows(
+    rows: Sequence[dict[str, Any]],
+    *,
+    group_fields: Sequence[str],
+) -> list[dict[str, Any]]:
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[tuple(row[field] for field in group_fields)].append(row)
+    output: list[dict[str, Any]] = []
+    for key in sorted(groups, key=lambda values: tuple(str(value) for value in values)):
+        selected = groups[key]
+        summary = {field: value for field, value in zip(group_fields, key)}
+        summary["n"] = len(selected)
+        for field in (
+            "trace_attempts",
+            "trace_accepts",
+            "accepted_count",
+            "accepted_both_improved_count",
+            "retained_count",
+        ):
+            summary[field] = int(sum(int(row.get(field, 0) or 0) for row in selected))
+        attempts = int(summary["trace_attempts"])
+        accepted = int(summary["accepted_count"])
+        both_improved = int(summary["accepted_both_improved_count"])
+        retained = int(summary["retained_count"])
+        summary["accept_rate"] = accepted / max(attempts, 1)
+        summary["accepted_both_improved_rate"] = both_improved / max(accepted, 1)
+        summary["retention_rate"] = retained / max(both_improved, 1)
+        output.append(summary)
+    return output
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -455,9 +487,13 @@ def evaluate_experiment(
                         "scene": scene_name,
                         "stage_frame_scope": "all_trace_common_frames",
                         "accepted_count": stage["accepted_count"],
+                        "accepted_both_improved_count": stage[
+                            "accepted_both_improved_count"
+                        ],
                         "accepted_both_improved_rate": stage[
                             "accepted_both_improved_rate"
                         ],
+                        "retained_count": stage["retained_count"],
                         "retention_rate": stage["retention_rate"],
                         "alignment_fallback": stage["alignment_fallback"],
                         "trace_eligible": trace_summary.get("eligible", 0),
@@ -480,16 +516,32 @@ def evaluate_experiment(
                     stage_scene_rows.append(row)
 
     macro = _macro_rows(final_scene_rows)
+    scene_repeat_summary = aggregate_repeat_rows(
+        final_scene_rows,
+        group_fields=("dataset", "scene", "variant"),
+        metric_fields=POSE_FIELDS,
+    )
     repeat_summary = aggregate_repeat_rows(
         macro,
         group_fields=("dataset", "variant"),
         metric_fields=POSE_FIELDS,
     )
+    stage_variant_summary = aggregate_stage_rows(
+        stage_scene_rows,
+        group_fields=("variant",),
+    )
+    stage_scene_summary = aggregate_stage_rows(
+        stage_scene_rows,
+        group_fields=("dataset", "scene", "variant"),
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_csv(output_dir / "final_scene.csv", final_scene_rows)
+    _write_csv(output_dir / "final_scene_repeat_summary.csv", scene_repeat_summary)
     _write_csv(output_dir / "final_dataset_macro_by_repeat.csv", macro)
     _write_csv(output_dir / "final_dataset_repeat_summary.csv", repeat_summary)
     _write_csv(output_dir / "stage_scene.csv", stage_scene_rows)
+    _write_csv(output_dir / "stage_variant_summary.csv", stage_variant_summary)
+    _write_csv(output_dir / "stage_scene_summary.csv", stage_scene_summary)
     report = {
         "protocol": {
             "final_alignment": "per-scene Sim(3) on paper test views",
@@ -500,9 +552,12 @@ def evaluate_experiment(
             "stage_frames": "all ordered frames common to trace, final trajectory, and GT",
         },
         "final_scene": final_scene_rows,
+        "final_scene_repeat_summary": scene_repeat_summary,
         "final_dataset_macro_by_repeat": macro,
         "final_dataset_repeat_summary": repeat_summary,
         "stage_scene": stage_scene_rows,
+        "stage_variant_summary": stage_variant_summary,
+        "stage_scene_summary": stage_scene_summary,
         "stage_reports": stage_reports,
     }
     (output_dir / "report.json").write_text(
@@ -526,6 +581,20 @@ def evaluate_experiment(
             f"| {row['dataset']} | {row['variant']} | {row['n']} | "
             + " | ".join(values)
             + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "| Variant | Attempts | Accepted | Accept rate | Both GT improved | Retained |",
+            "|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in stage_variant_summary:
+        lines.append(
+            f"| {row['variant']} | {row['trace_attempts']} | {row['accepted_count']} | "
+            f"{float(row['accept_rate']):.4f} | "
+            f"{float(row['accepted_both_improved_rate']):.4f} | "
+            f"{float(row['retention_rate']):.4f} |"
         )
     (output_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return report

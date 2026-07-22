@@ -269,7 +269,23 @@ def _summary(
 
 
 def _write_manifest(output_root: Path, rows: Sequence[dict[str, Any]]) -> None:
-    ordered = list(rows)
+    existing: list[dict[str, Any]] = []
+    manifest_path = output_root / "manifest.json"
+    try:
+        value = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if isinstance(value, list):
+            existing = [row for row in value if isinstance(row, dict)]
+    except (OSError, json.JSONDecodeError):
+        pass
+    by_job_id: dict[str, dict[str, Any]] = {}
+    anonymous: list[dict[str, Any]] = []
+    for row in [*existing, *rows]:
+        job_id = str(row.get("job_id", "") or "")
+        if job_id:
+            by_job_id[job_id] = dict(row)
+        else:
+            anonymous.append(dict(row))
+    ordered = [*by_job_id.values(), *anonymous]
     _write_json_atomic(output_root / "manifest.json", ordered)
     if not ordered:
         return

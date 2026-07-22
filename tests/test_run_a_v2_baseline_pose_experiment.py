@@ -9,6 +9,7 @@ from tools.run_a_v2_baseline_pose_experiment import (
     SCENES,
     VARIANTS,
     _summary,
+    _write_manifest,
     build_command,
     build_specs,
     validate_single_gpu,
@@ -16,6 +17,24 @@ from tools.run_a_v2_baseline_pose_experiment import (
 
 
 class AV2BaselinePoseRunnerTests(unittest.TestCase):
+    def test_manifest_preserves_jobs_from_previous_batched_invocations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_root = Path(directory)
+            _write_manifest(
+                output_root,
+                [{"job_id": "repeat01:bonsai:a_off", "returncode": 0}],
+            )
+            _write_manifest(
+                output_root,
+                [{"job_id": "repeat02:bonsai:a_off", "returncode": 0}],
+            )
+            rows = json.loads((output_root / "manifest.json").read_text())
+
+        self.assertEqual(
+            [row["job_id"] for row in rows],
+            ["repeat01:bonsai:a_off", "repeat02:bonsai:a_off"],
+        )
+
     def test_summary_reads_the_trace_verification_accepted_key(self):
         with tempfile.TemporaryDirectory() as directory:
             spec = build_specs(
