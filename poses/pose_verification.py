@@ -71,6 +71,112 @@ def summarize_reprojection_errors(
     }
 
 
+def split_pose_verification_evidence(
+    corr_ref_ids: torch.Tensor,
+    uv: torch.Tensor,
+    valid_mask: torch.Tensor,
+    *,
+    width: int,
+    height: int,
+    min_solve_support: int = 4,
+    min_validation_support: int = 4,
+    grid_rows: int = 4,
+    grid_cols: int = 6,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    """Create disjoint solve and validation evidence for pose verification."""
+    if corr_ref_ids.ndim != 1:
+        raise ValueError("corr_ref_ids must have shape [N]")
+    if uv.shape != (corr_ref_ids.shape[0], 2):
+        raise ValueError("uv must have shape [N, 2]")
+    if valid_mask.shape != corr_ref_ids.shape:
+        raise ValueError("valid_mask must have shape [N]")
+
+    eligible = (
+        valid_mask.to(dtype=torch.bool)
+        & torch.isfinite(uv).all(dim=-1)
+        & torch.isfinite(corr_ref_ids.to(dtype=torch.float32))
+    )
+    solve = torch.zeros_like(eligible)
+    validation = torch.zeros_like(eligible)
+    min_solve = max(4, int(min_solve_support))
+    min_validation = max(4, int(min_validation_support))
+    eligible_indices = torch.where(eligible)[0]
+    unique_refs = torch.unique(corr_ref_ids[eligible]).detach().cpu().tolist()
+    strategy = "reference_holdout"
+    spatial_balance_fallback = False
+
+    if len(unique_refs) >= 2:
+        counts = {
+            int(ref_id): int((eligible & (corr_ref_ids == int(ref_id))).sum().item())
+            for ref_id in unique_refs
+        }
+        ordered_refs = sorted(counts, key=lambda ref_id: (-counts[ref_id], ref_id))
+        solve_refs = {ordered_refs[0]}
+        validation_refs: set[int] = set()
+        solve_count = counts[ordered_refs[0]]
+        validation_count = 0
+        for ref_id in ordered_refs[1:]:
+            if validation_count <= solve_count:
+                validation_refs.add(ref_id)
+                validation_count += counts[ref_id]
+            else:
+                solve_refs.add(ref_id)
+                solve_count += counts[ref_id]
+        for ref_id in solve_refs:
+            solve |= eligible & (corr_ref_ids == ref_id)
+        for ref_id in validation_refs:
+            validation |= eligible & (corr_ref_ids == ref_id)
+    elif len(unique_refs) == 1:
+        strategy = "single_reference_spatial_holdout"
+        rows = max(1, int(grid_rows))
+        cols = max(1, int(grid_cols))
+        safe_width = max(1, int(width))
+        safe_height = max(1, int(height))
+        x = torch.floor(uv[:, 0] * cols / safe_width).to(torch.long).clamp(0, cols - 1)
+        y = torch.floor(uv[:, 1] * rows / safe_height).to(torch.long).clamp(0, rows - 1)
+        validation = eligible & (((y * cols + x) % 2) == 1)
+        solve = eligible & ~validation
+        if int(solve.sum()) < min_solve or int(validation.sum()) < min_validation:
+            spatial_balance_fallback = True
+            solve.zero_()
+            validation.zero_()
+            validation[eligible_indices[1::2]] = True
+            solve[eligible_indices[0::2]] = True
+
+    solve_count = int(solve.sum().item())
+    validation_count = int(validation.sum().item())
+    disjoint = not bool((solve & validation).any())
+    complete = bool(torch.equal(solve | validation, eligible))
+    split_valid = bool(
+        solve_count >= min_solve
+        and validation_count >= min_validation
+        and disjoint
+        and complete
+    )
+    solve_reference_ids = sorted(
+        {int(value) for value in corr_ref_ids[solve].detach().cpu().tolist()}
+    )
+    validation_reference_ids = sorted(
+        {int(value) for value in corr_ref_ids[validation].detach().cpu().tolist()}
+    )
+    return solve, validation, {
+        "valid": split_valid,
+        "reason": "ready" if split_valid else "insufficient_independent_support",
+        "strategy": strategy,
+        "eligible_count": int(eligible.sum().item()),
+        "solve_count": solve_count,
+        "validation_count": validation_count,
+        "min_solve_support": min_solve,
+        "min_validation_support": min_validation,
+        "solve_reference_ids": solve_reference_ids,
+        "validation_reference_ids": validation_reference_ids,
+        "reference_count": len(unique_refs),
+        "spatial_balance_fallback": spatial_balance_fallback,
+        "disjoint": disjoint,
+        "complete": complete,
+    }
+
+
 def select_robust_correspondences(
     errors: torch.Tensor,
     uv: torch.Tensor,

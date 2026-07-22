@@ -9,6 +9,7 @@ from poses.pose_verification import (
     decide_pose_refinement,
     pose_correction_magnitude,
     select_robust_correspondences,
+    split_pose_verification_evidence,
     summarize_reprojection_errors,
 )
 
@@ -29,6 +30,86 @@ def _pose(*, tx: float = 0.0, rz_deg: float = 0.0) -> torch.Tensor:
 
 
 class PoseVerificationGeometryTests(unittest.TestCase):
+    def test_reference_holdout_keeps_complete_reference_groups_disjoint(self):
+        ref_ids = torch.tensor([10, 10, 10, 10, 20, 20, 20, 30, 30, 30])
+        uv = torch.stack(
+            [torch.arange(10, dtype=torch.float32), torch.zeros(10)], dim=-1
+        )
+
+        solve, validation, debug = split_pose_verification_evidence(
+            ref_ids,
+            uv,
+            torch.ones(10, dtype=torch.bool),
+            width=100,
+            height=80,
+            min_solve_support=4,
+            min_validation_support=3,
+        )
+
+        self.assertEqual(debug["strategy"], "reference_holdout")
+        self.assertTrue(debug["valid"])
+        self.assertFalse(bool((solve & validation).any()))
+        self.assertTrue(torch.equal(solve | validation, torch.ones(10, dtype=torch.bool)))
+        for ref_id in torch.unique(ref_ids):
+            group = ref_ids == ref_id
+            self.assertTrue(bool((solve[group].all() or validation[group].all())))
+        self.assertTrue(
+            set(debug["solve_reference_ids"]).isdisjoint(
+                set(debug["validation_reference_ids"])
+            )
+        )
+
+    def test_single_reference_uses_explicit_spatial_holdout(self):
+        uv = torch.tensor(
+            [
+                [10.0, 10.0],
+                [30.0, 10.0],
+                [50.0, 10.0],
+                [70.0, 10.0],
+                [10.0, 50.0],
+                [30.0, 50.0],
+                [50.0, 50.0],
+                [70.0, 50.0],
+            ]
+        )
+
+        solve, validation, debug = split_pose_verification_evidence(
+            torch.full((8,), 7, dtype=torch.long),
+            uv,
+            torch.ones(8, dtype=torch.bool),
+            width=80,
+            height=80,
+            min_solve_support=3,
+            min_validation_support=3,
+        )
+
+        self.assertEqual(debug["strategy"], "single_reference_spatial_holdout")
+        self.assertTrue(debug["valid"])
+        self.assertGreaterEqual(int(solve.sum()), 3)
+        self.assertGreaterEqual(int(validation.sum()), 3)
+        self.assertFalse(bool((solve & validation).any()))
+        self.assertTrue(torch.equal(solve | validation, torch.ones(8, dtype=torch.bool)))
+
+    def test_reference_holdout_reports_invalid_when_validation_is_too_small(self):
+        ref_ids = torch.tensor([10, 10, 10, 10, 10, 20])
+        uv = torch.stack(
+            [torch.arange(6, dtype=torch.float32), torch.zeros(6)], dim=-1
+        )
+
+        solve, validation, debug = split_pose_verification_evidence(
+            ref_ids,
+            uv,
+            torch.ones(6, dtype=torch.bool),
+            width=100,
+            height=80,
+            min_solve_support=4,
+            min_validation_support=2,
+        )
+
+        self.assertFalse(debug["valid"])
+        self.assertEqual(debug["reason"], "insufficient_independent_support")
+        self.assertFalse(bool((solve & validation).any()))
+
     def test_reprojection_uses_world_to_camera_pose_and_rejects_negative_depth(self):
         xyz = torch.tensor(
             [[0.0, 0.0, 1.0], [1.0, 0.0, 2.0], [0.0, 0.0, -1.0]],

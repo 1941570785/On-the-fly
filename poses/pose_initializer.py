@@ -27,6 +27,7 @@ from poses.pose_verification import (
     decide_pose_refinement,
     pose_correction_magnitude,
     select_robust_correspondences,
+    split_pose_verification_evidence,
     summarize_reprojection_errors,
 )
 
@@ -111,12 +112,14 @@ class PoseInitializer():
         pts3d: torch.Tensor,
         pts_conf: torch.Tensor,
         uvs: torch.Tensor,
+        corr_ref_ids: torch.Tensor,
     ) -> None:
         self.last_incremental_pose_support = {
             "match_indices": match_indices.detach().clone(),
             "pts3d": pts3d.detach().clone(),
             "pts_conf": pts_conf.detach().clone(),
             "uvs": uvs.detach().clone(),
+            "corr_ref_ids": corr_ref_ids.detach().clone(),
         }
 
     def _record_incremental_pose_candidates(
@@ -125,12 +128,14 @@ class PoseInitializer():
         pts3d: torch.Tensor,
         pts_conf: torch.Tensor,
         uvs: torch.Tensor,
+        corr_ref_ids: torch.Tensor,
     ) -> None:
         self.last_incremental_pose_candidates = {
             "match_indices": match_indices.detach().clone(),
             "pts3d": pts3d.detach().clone(),
             "pts_conf": pts_conf.detach().clone(),
             "uvs": uvs.detach().clone(),
+            "corr_ref_ids": corr_ref_ids.detach().clone(),
         }
 
     def build_problem(self,
@@ -383,6 +388,7 @@ class PoseInitializer():
             xyz,
             confs,
             uvs,
+            corr_ref_ids,
         )
 
         # Subsample the points if there are too many
@@ -438,10 +444,22 @@ class PoseInitializer():
             xyz_ba = xyz[selected_indices]
             uvs_ba = uvs[selected_indices]
             miniba_ref_ids_tensor = corr_ref_ids[selected_indices]
+            corr_ref_ids_ba = miniba_ref_ids_tensor
         elif len(xyz) < self.num_pts_miniba_incr:
             xyz_ba = torch.cat([xyz, torch.zeros(self.num_pts_miniba_incr - len(xyz), 3, device="cuda")], dim=0)
             uvs_ba = torch.cat([uvs, -torch.ones(self.num_pts_miniba_incr - len(uvs), 2, device="cuda")], dim=0)
             miniba_ref_ids_tensor = corr_ref_ids
+            corr_ref_ids_ba = torch.cat(
+                [
+                    corr_ref_ids,
+                    -torch.ones(
+                        self.num_pts_miniba_incr - len(corr_ref_ids),
+                        device=corr_ref_ids.device,
+                        dtype=corr_ref_ids.dtype,
+                    ),
+                ],
+                dim=0,
+            )
         miniba_ref_ids = sorted({int(x) for x in miniba_ref_ids_tensor.detach().cpu().tolist()})
         self.last_incremental_debug["miniba_ref_keyframe_ids"] = miniba_ref_ids
         self.last_incremental_debug["miniba_ref_source_frame_ids"] = [
@@ -477,6 +495,7 @@ class PoseInitializer():
                     support_pts3d,
                     support_conf,
                     uvs_ba[valid_ba],
+                    corr_ref_ids_ba[valid_ba],
                 )
             # Return the pose of the current frame
             self.last_incremental_debug["failure_reason"] = ""
@@ -530,6 +549,7 @@ class PoseInitializer():
         min_relative_median_improvement: float = 0.02,
         max_p90_ratio: float = 1.01,
         min_support_ratio: float = 0.80,
+        independent_validation: bool = False,
     ) -> tuple[torch.Tensor, dict[str, object]]:
         """Risk-triggered pose-only MiniBA verification with exact fallback."""
         started = time.perf_counter()
@@ -540,6 +560,7 @@ class PoseInitializer():
             "accepted": False,
             "reason": "risk_not_triggered",
             "risk_score": float(event.get("risk_score", 0.0) or 0.0),
+            "independent_validation": bool(independent_validation),
         }
         if not debug["triggered"]:
             debug["runtime_seconds"] = time.perf_counter() - started
@@ -554,6 +575,7 @@ class PoseInitializer():
         xyz = pose_evidence.get("pts3d")
         uvs = pose_evidence.get("uvs")
         confs = pose_evidence.get("pts_conf")
+        corr_ref_ids = pose_evidence.get("corr_ref_ids")
         debug["candidate_source"] = candidate_source
         if not all(isinstance(value, torch.Tensor) for value in (xyz, uvs, confs)):
             debug["reason"] = "pose_support_unavailable"
@@ -563,16 +585,79 @@ class PoseInitializer():
             debug["reason"] = "insufficient_pose_support"
             debug["runtime_seconds"] = time.perf_counter() - started
             return initial_Rt.clone(), debug
+        if independent_validation and (
+            not isinstance(corr_ref_ids, torch.Tensor)
+            or corr_ref_ids.shape != (len(xyz),)
+        ):
+            debug["reason"] = "reference_ids_unavailable"
+            debug["runtime_seconds"] = time.perf_counter() - started
+            return initial_Rt.clone(), debug
 
         pre_errors, pre_valid = compute_reprojection_errors(
             initial_Rt, xyz, uvs, focal=self.f, centre=self.centre
         )
         evaluation_mask = pre_valid & (pre_errors <= float(self.max_pnp_error))
-        pre_stats = summarize_reprojection_errors(pre_errors, evaluation_mask)
+        solve_input_mask = pre_valid
+        validation_mask = evaluation_mask
+        if independent_validation:
+            split_minimum = max(4, int(min_support) // 2)
+            solve_input_mask, validation_input_mask, split_debug = (
+                split_pose_verification_evidence(
+                    corr_ref_ids,
+                    uvs,
+                    evaluation_mask,
+                    width=image_width,
+                    height=image_height,
+                    min_solve_support=split_minimum,
+                    min_validation_support=split_minimum,
+                )
+            )
+            debug.update(
+                {
+                    "split_strategy": split_debug["strategy"],
+                    "split_valid": split_debug["valid"],
+                    "split_reason": split_debug["reason"],
+                    "solve_count": split_debug["solve_count"],
+                    "validation_count": split_debug["validation_count"],
+                    "solve_reference_ids": split_debug["solve_reference_ids"],
+                    "validation_reference_ids": split_debug[
+                        "validation_reference_ids"
+                    ],
+                    "split_reference_count": split_debug["reference_count"],
+                    "split_spatial_balance_fallback": split_debug[
+                        "spatial_balance_fallback"
+                    ],
+                }
+            )
+            if not bool(split_debug["valid"]):
+                debug["reason"] = str(split_debug["reason"])
+                debug["runtime_seconds"] = time.perf_counter() - started
+                return initial_Rt.clone(), debug
+            validation_mask, validation_cleaning = select_robust_correspondences(
+                pre_errors,
+                uvs,
+                validation_input_mask,
+                width=image_width,
+                height=image_height,
+                mad_scale=mad_scale,
+                max_cutoff=float(self.max_pnp_error),
+                min_support=split_minimum,
+            )
+            debug.update(
+                {
+                    f"validation_cleaning_{key}": value
+                    for key, value in validation_cleaning.items()
+                }
+            )
+            if int(validation_mask.sum().item()) < split_minimum:
+                debug["reason"] = "insufficient_independent_support"
+                debug["runtime_seconds"] = time.perf_counter() - started
+                return initial_Rt.clone(), debug
+        pre_stats = summarize_reprojection_errors(pre_errors, validation_mask)
         selected, cleaning = select_robust_correspondences(
             pre_errors,
             uvs,
-            pre_valid,
+            solve_input_mask,
             width=image_width,
             height=image_height,
             mad_scale=mad_scale,
@@ -666,7 +751,7 @@ class PoseInitializer():
             refined_Rt, xyz, uvs, focal=self.f, centre=self.centre
         )
         post_stats = summarize_reprojection_errors(
-            post_errors, post_valid & evaluation_mask
+            post_errors, post_valid & validation_mask
         )
         correction = pose_correction_magnitude(initial_Rt, refined_Rt)
         max_rotation, max_translation, history_debug = self._pose_verification_motion_limits(

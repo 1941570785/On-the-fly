@@ -274,6 +274,121 @@ class PoseVerificationRiskIntegrationTests(unittest.TestCase):
         self.assertEqual(debug["candidate_source"], "full_2d3d")
         self.assertLess(debug["post_reprojection_median"], debug["pre_reprojection_median"])
 
+    def test_pose_initializer_v2_solves_and_validates_on_disjoint_references(self):
+        initializer = PoseInitializer.__new__(PoseInitializer)
+        initializer.f = torch.tensor([100.0])
+        initializer.centre = torch.tensor([50.0, 50.0])
+        initializer.max_pnp_error = 10.0
+        initializer.num_pts_miniba_incr = 4
+        initializer.miniBA_incr = _FakeMiniBA(translation_x=0.01)
+        initializer.PnPRANSAC = _FakePnP(translation_x=0.01)
+        initializer.last_incremental_pose_support = {}
+        initializer.last_incremental_pose_candidates = {
+            "uvs": torch.tensor(
+                [
+                    [51.0, 50.0],
+                    [61.0, 50.0],
+                    [51.0, 60.0],
+                    [61.0, 60.0],
+                    [41.0, 50.0],
+                    [51.0, 40.0],
+                    [41.0, 40.0],
+                    [61.0, 40.0],
+                ]
+            ),
+            "pts3d": torch.tensor(
+                [
+                    [0.0, 0.0, 1.0],
+                    [0.1, 0.0, 1.0],
+                    [0.0, 0.1, 1.0],
+                    [0.1, 0.1, 1.0],
+                    [-0.1, 0.0, 1.0],
+                    [0.0, -0.1, 1.0],
+                    [-0.1, -0.1, 1.0],
+                    [0.1, -0.1, 1.0],
+                ]
+            ),
+            "pts_conf": torch.ones(8),
+            "match_indices": torch.arange(8),
+            "corr_ref_ids": torch.tensor([1, 1, 1, 1, 2, 2, 2, 2]),
+        }
+
+        verified, debug = initializer.verify_incremental_pose(
+            _rt(),
+            {"verification_trigger": True, "risk_score": 0.8},
+            image_width=100,
+            image_height=100,
+            pose_history=[(7, _rt()), (8, _rt()), (9, _rt())],
+            min_support=4,
+            min_relative_median_improvement=0.05,
+            independent_validation=True,
+        )
+
+        self.assertTrue(debug["accepted"])
+        self.assertEqual(debug["split_strategy"], "reference_holdout")
+        self.assertEqual(debug["solve_reference_ids"], [1])
+        self.assertEqual(debug["validation_reference_ids"], [2])
+        self.assertEqual(debug["solve_count"], 4)
+        self.assertEqual(debug["validation_count"], 4)
+        self.assertEqual(initializer.PnPRANSAC.last_count, 4)
+        self.assertAlmostEqual(float(verified[0, 3]), 0.01, places=5)
+        self.assertLess(
+            debug["post_reprojection_median"], debug["pre_reprojection_median"]
+        )
+
+    def test_pose_initializer_v2_falls_back_before_solver_without_holdout_support(self):
+        initializer = PoseInitializer.__new__(PoseInitializer)
+        initializer.f = torch.tensor([100.0])
+        initializer.centre = torch.tensor([50.0, 50.0])
+        initializer.max_pnp_error = 10.0
+        initializer.num_pts_miniba_incr = 4
+        initializer.miniBA_incr = _FakeMiniBA(translation_x=0.01)
+        initializer.PnPRANSAC = _FakePnP(translation_x=0.01)
+        initializer.last_incremental_pose_support = {}
+        initializer.last_incremental_pose_candidates = {
+            "uvs": torch.tensor(
+                [
+                    [51.0, 50.0],
+                    [61.0, 50.0],
+                    [51.0, 60.0],
+                    [61.0, 60.0],
+                    [41.0, 50.0],
+                    [51.0, 40.0],
+                ]
+            ),
+            "pts3d": torch.tensor(
+                [
+                    [0.0, 0.0, 1.0],
+                    [0.1, 0.0, 1.0],
+                    [0.0, 0.1, 1.0],
+                    [0.1, 0.1, 1.0],
+                    [-0.1, 0.0, 1.0],
+                    [0.0, -0.1, 1.0],
+                ]
+            ),
+            "pts_conf": torch.ones(6),
+            "match_indices": torch.arange(6),
+            "corr_ref_ids": torch.tensor([1, 1, 1, 1, 1, 2]),
+        }
+        initial = _rt()
+
+        verified, debug = initializer.verify_incremental_pose(
+            initial,
+            {"verification_trigger": True, "risk_score": 0.8},
+            image_width=100,
+            image_height=100,
+            pose_history=[(7, _rt()), (8, _rt()), (9, _rt())],
+            min_support=4,
+            independent_validation=True,
+        )
+
+        self.assertFalse(debug["accepted"])
+        self.assertEqual(debug["reason"], "insufficient_independent_support")
+        self.assertTrue(torch.equal(verified, initial))
+        self.assertNotEqual(verified.data_ptr(), initial.data_ptr())
+        self.assertEqual(initializer.PnPRANSAC.calls, 0)
+        self.assertEqual(initializer.miniBA_incr.calls, 0)
+
     def test_pose_initializer_bypass_is_exact_and_does_not_call_solver(self):
         initializer = PoseInitializer.__new__(PoseInitializer)
         initializer.miniBA_incr = _FakeMiniBA(translation_x=0.01)
