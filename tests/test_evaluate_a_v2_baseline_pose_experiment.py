@@ -1,6 +1,8 @@
+import json
 import math
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -8,6 +10,7 @@ import numpy as np
 
 from tools.evaluate_a_v2_baseline_pose_experiment import (
     POSE_FIELDS,
+    _load_stage_trace,
     aggregate_repeat_rows,
     compute_fixed_alignment_stage_report,
     reference_scene_spec,
@@ -27,6 +30,41 @@ def pose_c2w(x: float, y: float, z: float, rz_deg: float = 0.0) -> np.ndarray:
 
 
 class AV2BaselinePoseEvaluatorTests(unittest.TestCase):
+    def test_stage_trace_keeps_all_ordered_frames_for_accepted_pose_diagnostics(self):
+        identity = np.eye(4, dtype=np.float64).tolist()
+        with tempfile.TemporaryDirectory() as directory:
+            model_dir = Path(directory)
+            (model_dir / "pose_initialization_risk_trace.json").write_text(
+                json.dumps(
+                    {
+                        "events": [
+                            {
+                                "image_name": "000001.jpg",
+                                "initial_estimated_Rt": identity,
+                                "post_a_Rt": identity,
+                                "verification_accepted": True,
+                                "is_test": False,
+                            },
+                            {
+                                "image_name": "000009.jpg",
+                                "initial_estimated_Rt": identity,
+                                "post_a_Rt": identity,
+                                "verification_accepted": False,
+                                "is_test": True,
+                            },
+                        ],
+                        "summary": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            initial, post_a, accepted, _, stage_names = _load_stage_trace(model_dir)
+
+        self.assertEqual(stage_names, list(initial))
+        self.assertEqual(set(stage_names), set(post_a))
+        self.assertEqual(accepted, {stage_names[0]})
+
     def test_report_uses_the_trace_verification_accepted_key(self):
         root = Path(__file__).resolve().parents[1]
         source = (root / "tools" / "evaluate_a_v2_baseline_pose_experiment.py").read_text(

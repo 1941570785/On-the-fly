@@ -295,14 +295,21 @@ def _load_metadata(model_dir: Path) -> tuple[dict[str, np.ndarray], list[str]]:
 
 def _load_stage_trace(
     model_dir: Path,
-) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], set[str], dict[str, Any]]:
+) -> tuple[
+    dict[str, np.ndarray],
+    dict[str, np.ndarray],
+    set[str],
+    dict[str, Any],
+    list[str],
+]:
     path = model_dir / "pose_initialization_risk_trace.json"
     if not path.exists():
-        return {}, {}, set(), {}
+        return {}, {}, set(), {}, []
     trace = _read_json(path)
     initial: dict[str, np.ndarray] = {}
     post_a: dict[str, np.ndarray] = {}
     accepted: set[str] = set()
+    ordered_frame_ids: list[str] = []
     for event in trace.get("events", []):
         if not isinstance(event, dict):
             continue
@@ -321,11 +328,13 @@ def _load_stage_trace(
         )
         if not frame_id or initial_w2c is None or post_w2c is None:
             continue
+        if frame_id not in initial:
+            ordered_frame_ids.append(frame_id)
         initial[frame_id] = np.linalg.inv(initial_w2c)
         post_a[frame_id] = np.linalg.inv(post_w2c)
         if bool(event.get("verification_accepted", False)):
             accepted.add(frame_id)
-    return initial, post_a, accepted, trace.get("summary", {})
+    return initial, post_a, accepted, trace.get("summary", {}), ordered_frame_ids
 
 
 def _dataset_name(scene_name: str) -> str:
@@ -425,14 +434,16 @@ def evaluate_experiment(
                         "model_dir": str(model_dir),
                     }
                 )
-                initial, post_a, accepted, trace_summary = _load_stage_trace(model_dir)
+                initial, post_a, accepted, trace_summary, stage_names = _load_stage_trace(
+                    model_dir
+                )
                 if initial and post_a:
                     stage = compute_fixed_alignment_stage_report(
                         reference,
                         initial,
                         post_a,
                         final,
-                        evaluation_names,
+                        stage_names,
                         accepted_frame_ids=accepted,
                     )
                     report_key = f"repeat_{int(repeat):02d}/{variant}/{scene_name}"
@@ -442,6 +453,7 @@ def evaluate_experiment(
                         "variant": variant,
                         "dataset": _dataset_name(scene_name),
                         "scene": scene_name,
+                        "stage_frame_scope": "all_trace_common_frames",
                         "accepted_count": stage["accepted_count"],
                         "accepted_both_improved_rate": stage[
                             "accepted_both_improved_rate"
@@ -485,6 +497,7 @@ def evaluate_experiment(
             "translation": "100 x native unit",
             "rotation": "radians",
             "stage_alignment": "one Sim(3) fitted on initial poses not accepted by A",
+            "stage_frames": "all ordered frames common to trace, final trajectory, and GT",
         },
         "final_scene": final_scene_rows,
         "final_dataset_macro_by_repeat": macro,
