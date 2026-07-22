@@ -27,6 +27,17 @@ def pose_c2w(x: float, y: float, z: float, rz_deg: float = 0.0) -> np.ndarray:
 
 
 class AV2BaselinePoseEvaluatorTests(unittest.TestCase):
+    def test_report_uses_the_trace_verification_accepted_key(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "tools" / "evaluate_a_v2_baseline_pose_experiment.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            'trace_summary.get("verification_accepted", 0)',
+            source,
+        )
+
     def test_reference_loader_uses_official_pose_scene_specs(self):
         for scene in (
             "bonsai",

@@ -453,7 +453,7 @@ def evaluate_experiment(
                             "verification_candidates", 0
                         ),
                         "trace_attempts": trace_summary.get("verification_attempts", 0),
-                        "trace_accepts": trace_summary.get("verification_accepts", 0),
+                        "trace_accepts": trace_summary.get("verification_accepted", 0),
                     }
                     for stage_name, metrics in stage["stages"].items():
                         for field, value in metrics.items():
