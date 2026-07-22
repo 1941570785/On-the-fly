@@ -7,12 +7,17 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-from tools.run_pose_verification_a_ablation import (
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools.run_pose_verification_a_ablation import (  # noqa: E402
     A_SHARED_ARGS,
     DEFAULT_PYTHON,
     SCENES,
@@ -21,7 +26,6 @@ from tools.run_pose_verification_a_ablation import (
 )
 
 
-ROOT = Path(__file__).resolve().parents[1]
 RESULTS_PARENT = Path(
     "/data2/zxd/3D_Reconstruction/comparison_results/a_v2_baseline_pose_20260722"
 )

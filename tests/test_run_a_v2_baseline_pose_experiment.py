@@ -1,4 +1,6 @@
 import tempfile
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -12,6 +14,24 @@ from tools.run_a_v2_baseline_pose_experiment import (
 
 
 class AV2BaselinePoseRunnerTests(unittest.TestCase):
+    def test_direct_script_entrypoint_can_resolve_repo_modules(self):
+        root = Path(__file__).resolve().parents[1]
+        process = subprocess.run(
+            [
+                sys.executable,
+                str(root / "tools" / "run_a_v2_baseline_pose_experiment.py"),
+                "--help",
+            ],
+            cwd=root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("--gpu", process.stdout)
+
     def test_requires_exactly_one_physical_gpu_identifier(self):
         self.assertEqual(validate_single_gpu("7"), "7")
         with self.assertRaises(ValueError):
