@@ -205,6 +205,12 @@ def get_args():
         help='Minimum relative median reprojection improvement required to accept a verified pose.',
     )
     parser.add_argument(
+        '--pose_verification_v2_min_improvement',
+        type=float,
+        default=0.005,
+        help='Held-out median reprojection improvement required by verify_v2.',
+    )
+    parser.add_argument(
         '--pose_verification_max_p90_ratio',
         type=float,
         default=1.01,

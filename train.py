@@ -2409,7 +2409,17 @@ if __name__ == "__main__":
                                         getattr(args, "pose_verification_min_support", 24)
                                     ),
                                     min_relative_median_improvement=float(
-                                        getattr(args, "pose_verification_min_improvement", 0.02)
+                                        getattr(
+                                            args,
+                                            "pose_verification_v2_min_improvement",
+                                            0.005,
+                                        )
+                                        if pose_initialization_risk_mode == "verify_v2"
+                                        else getattr(
+                                            args,
+                                            "pose_verification_min_improvement",
+                                            0.02,
+                                        )
                                     ),
                                     max_p90_ratio=float(
                                         getattr(args, "pose_verification_max_p90_ratio", 1.01)

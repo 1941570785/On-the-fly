@@ -209,6 +209,7 @@ class PoseVerificationRiskIntegrationTests(unittest.TestCase):
                 args = get_args()
 
         self.assertEqual(args.pose_initialization_risk_mode, "verify_v2")
+        self.assertAlmostEqual(args.pose_verification_v2_min_improvement, 0.005)
 
     def test_pose_initializer_accepts_verified_candidate_and_records_diagnostics(self):
         initializer = PoseInitializer.__new__(PoseInitializer)
@@ -429,6 +430,7 @@ class PoseVerificationRiskIntegrationTests(unittest.TestCase):
             'independent_validation=(pose_initialization_risk_mode == "verify_v2")',
             source,
         )
+        self.assertIn('"pose_verification_v2_min_improvement"', source)
         self.assertIn('"post_a_Rt": _pose_matrix_for_trace(Rt)', source)
         self.assertIn('"a_stage_is_test": bool(info.get("is_test", False))', source)
 
