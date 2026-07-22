@@ -1,3 +1,4 @@
+import json
 import tempfile
 import subprocess
 import sys
@@ -7,6 +8,7 @@ from pathlib import Path
 from tools.run_a_v2_baseline_pose_experiment import (
     SCENES,
     VARIANTS,
+    _summary,
     build_command,
     build_specs,
     validate_single_gpu,
@@ -14,6 +16,32 @@ from tools.run_a_v2_baseline_pose_experiment import (
 
 
 class AV2BaselinePoseRunnerTests(unittest.TestCase):
+    def test_summary_reads_the_trace_verification_accepted_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spec = build_specs(
+                output_root=Path(directory),
+                variants=["a_v2"],
+                scene_names=["bonsai"],
+                repeats=[1],
+            )[0]
+            spec.model_dir.mkdir(parents=True)
+            (spec.model_dir / "pose_initialization_risk_trace.json").write_text(
+                json.dumps(
+                    {
+                        "summary": {
+                            "verification_attempts": 37,
+                            "verification_accepted": 3,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            summary = _summary(spec, gpu="6", returncode=0)
+
+        self.assertEqual(summary["a_attempts"], 37)
+        self.assertEqual(summary["a_accepts"], 3)
+
     def test_direct_script_entrypoint_can_resolve_repo_modules(self):
         root = Path(__file__).resolve().parents[1]
         process = subprocess.run(

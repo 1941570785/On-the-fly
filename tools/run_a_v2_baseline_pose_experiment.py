@@ -262,7 +262,7 @@ def _summary(
         "a_eligible": trace_summary.get("eligible", 0),
         "a_candidates": trace_summary.get("verification_candidates", 0),
         "a_attempts": trace_summary.get("verification_attempts", 0),
-        "a_accepts": trace_summary.get("verification_accepts", 0),
+        "a_accepts": trace_summary.get("verification_accepted", 0),
         "model_dir": str(spec.model_dir),
         "log_path": str(spec.run_dir / "train.log"),
     }
