@@ -269,6 +269,52 @@ class PoseInitializationRiskGateTests(unittest.TestCase):
         self.assertFalse(nonbaseline_decision["isolated"])
         self.assertEqual(nonbaseline_decision["decision"], "bypass_not_selected")
 
+    def test_verify_v2_can_check_test_pose_without_changing_verify_v1_contract(self):
+        weak = {
+            "match_count_total": 500,
+            "num_2d3d_correspondences": 480,
+            "num_pnp_inliers": 70,
+            "num_miniba_inliers": 45,
+        }
+        weak_viewpoint = {
+            "inlier_grid_coverage": 0.25,
+            "inlier_grid_entropy": 0.35,
+            "anchor_health_score": 0.20,
+            "selected_reference_count": 2,
+        }
+        kwargs = {
+            "frame_id": 10,
+            "pose_debug": weak,
+            "viewpoint_scores": weak_viewpoint,
+            "min_num_inliers": 100,
+            "recent_pose_fail_rate": 0.60,
+            "current_Rt": _rt(35.0),
+            "pose_history": [(8, _rt(0.0)), (9, _rt(1.0))],
+            "baseline_selected": True,
+            "is_test": True,
+            "is_bootstrap": False,
+        }
+
+        current = PoseInitializationRiskGate(
+            mode="verify_v1", absolute_threshold=0.10, adaptive_sigma=0.0, warmup=0
+        ).evaluate(**kwargs)
+        revised = PoseInitializationRiskGate(
+            mode="verify_v2", absolute_threshold=0.10, adaptive_sigma=0.0, warmup=0
+        ).evaluate(**kwargs)
+        bootstrap = PoseInitializationRiskGate(
+            mode="verify_v2", absolute_threshold=0.10, adaptive_sigma=0.0, warmup=0
+        ).evaluate(**{**kwargs, "is_bootstrap": True})
+
+        self.assertFalse(current["eligible"])
+        self.assertFalse(current["verification_trigger"])
+        self.assertEqual(current["decision"], "bypass_test")
+        self.assertTrue(revised["eligible"])
+        self.assertTrue(revised["verification_trigger"])
+        self.assertEqual(revised["decision"], "verify_candidate")
+        self.assertFalse(bootstrap["eligible"])
+        self.assertFalse(bootstrap["verification_trigger"])
+        self.assertEqual(bootstrap["decision"], "bypass_bootstrap")
+
     def test_flush_writes_reproducible_summary_and_events(self):
         gate = PoseInitializationRiskGate(mode="observe_v1", warmup=0)
         gate.evaluate(

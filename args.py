@@ -153,8 +153,8 @@ def get_args():
         '--pose_initialization_risk_mode',
         type=str,
         default='off',
-        choices=['off', 'observe_v1', 'isolate_v1', 'verify_v1'],
-        help='Post-pose A-module mode. verify_v1 robustly rechecks risky poses while preserving the baseline frame policy.',
+        choices=['off', 'observe_v1', 'isolate_v1', 'verify_v1', 'verify_v2'],
+        help='Post-pose A-module mode. verify_v2 independently validates risky training and pose-only test frames.',
     )
     parser.add_argument(
         '--pose_initialization_risk_absolute_threshold',

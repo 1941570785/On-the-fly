@@ -194,6 +194,22 @@ class PoseVerificationRiskIntegrationTests(unittest.TestCase):
         self.assertEqual(args.pose_verification_min_support, 32)
         self.assertAlmostEqual(args.pose_verification_min_improvement, 0.08)
 
+    def test_cli_accepts_independently_validated_verify_v2_mode(self):
+        with tempfile.TemporaryDirectory() as td:
+            argv = [
+                "train.py",
+                "-s",
+                td,
+                "-m",
+                str(Path(td) / "out"),
+                "--pose_initialization_risk_mode",
+                "verify_v2",
+            ]
+            with patch.object(sys, "argv", argv):
+                args = get_args()
+
+        self.assertEqual(args.pose_initialization_risk_mode, "verify_v2")
+
     def test_pose_initializer_accepts_verified_candidate_and_records_diagnostics(self):
         initializer = PoseInitializer.__new__(PoseInitializer)
         initializer.f = torch.tensor([100.0])

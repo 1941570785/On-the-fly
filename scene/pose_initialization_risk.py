@@ -10,7 +10,13 @@ from typing import Any
 from paper_aligned_policy.viewpoint_coverage import rotation_degrees_between
 
 
-POSE_INITIALIZATION_RISK_MODES = {"off", "observe_v1", "isolate_v1", "verify_v1"}
+POSE_INITIALIZATION_RISK_MODES = {
+    "off",
+    "observe_v1",
+    "isolate_v1",
+    "verify_v1",
+    "verify_v2",
+}
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -200,7 +206,13 @@ class PoseInitializationRiskGate:
         )
         severe_pose_risk = pose_uncertainty >= 0.30
 
-        eligible = bool(baseline_selected and not is_test and not is_bootstrap)
+        verification_mode = self.mode in {"verify_v1", "verify_v2"}
+        test_pose_only_verification = bool(is_test and self.mode == "verify_v2")
+        eligible = bool(
+            baseline_selected
+            and not is_bootstrap
+            and (not is_test or test_pose_only_verification)
+        )
         risk_evidence_trigger = bool(
             eligible
             and warmed_up
@@ -219,9 +231,7 @@ class PoseInitializationRiskGate:
             and risk_score >= verification_threshold
             and verification_signal
         )
-        verification_trigger = bool(
-            self.mode == "verify_v1" and verification_candidate
-        )
+        verification_trigger = bool(verification_mode and verification_candidate)
         cooldown_active = bool(
             self.last_isolated_frame_id >= 0
             and int(frame_id) - self.last_isolated_frame_id < self.cooldown_frames
@@ -231,7 +241,7 @@ class PoseInitializationRiskGate:
             self.last_isolated_frame_id = int(frame_id)
         if not baseline_selected:
             decision = "bypass_not_selected"
-        elif is_test:
+        elif is_test and not test_pose_only_verification:
             decision = "bypass_test"
         elif is_bootstrap:
             decision = "bypass_bootstrap"
@@ -239,11 +249,11 @@ class PoseInitializationRiskGate:
             decision = "off"
         elif self.mode == "observe_v1":
             decision = "observe"
-        elif self.mode == "verify_v1" and not warmed_up:
+        elif verification_mode and not warmed_up:
             decision = "verify_warmup"
         elif verification_trigger:
             decision = "verify_candidate"
-        elif self.mode == "verify_v1":
+        elif verification_mode:
             decision = "verify_bypass"
         elif not warmed_up:
             decision = "warmup_admit"
@@ -273,6 +283,7 @@ class PoseInitializationRiskGate:
             "last_isolated_frame_id": int(self.last_isolated_frame_id),
             "baseline_selected": bool(baseline_selected),
             "is_test": bool(is_test),
+            "test_pose_only_verification": test_pose_only_verification,
             "is_bootstrap": bool(is_bootstrap),
             "pose_uncertainty": float(pose_uncertainty),
             "state_support_gap": float(state_support_gap),
