@@ -140,6 +140,8 @@ def build_command(
         "--pose_initialization_risk_mode",
         VARIANTS[spec.variant],
         *A_SHARED_ARGS,
+        "--pose_verification_v2_min_improvement",
+        "0.0",
         *K16_ARGS,
     ]
 

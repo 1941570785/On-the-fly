@@ -207,7 +207,7 @@ def get_args():
     parser.add_argument(
         '--pose_verification_v2_min_improvement',
         type=float,
-        default=0.005,
+        default=0.0,
         help='Held-out median reprojection improvement required by verify_v2.',
     )
     parser.add_argument(

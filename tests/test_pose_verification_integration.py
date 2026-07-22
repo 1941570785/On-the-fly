@@ -209,7 +209,7 @@ class PoseVerificationRiskIntegrationTests(unittest.TestCase):
                 args = get_args()
 
         self.assertEqual(args.pose_initialization_risk_mode, "verify_v2")
-        self.assertAlmostEqual(args.pose_verification_v2_min_improvement, 0.005)
+        self.assertAlmostEqual(args.pose_verification_v2_min_improvement, 0.0)
 
     def test_pose_initializer_accepts_verified_candidate_and_records_diagnostics(self):
         initializer = PoseInitializer.__new__(PoseInitializer)

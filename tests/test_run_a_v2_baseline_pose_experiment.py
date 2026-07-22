@@ -72,6 +72,10 @@ class AV2BaselinePoseRunnerTests(unittest.TestCase):
             self.assertEqual(command[mode_index], mode)
             self.assertIn("baseline_render_lock_intra_frame_v31", command)
             self.assertIn("--pose_risk_utility_admission_mode", command)
+            v2_threshold_index = command.index(
+                "--pose_verification_v2_min_improvement"
+            ) + 1
+            self.assertEqual(command[v2_threshold_index], "0.0")
             self.assertIn("--paper_aligned_pose_render_extra_optimization_max_extra", command)
             budget_index = command.index(
                 "--paper_aligned_pose_render_extra_optimization_max_extra"

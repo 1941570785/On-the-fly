@@ -2412,7 +2412,7 @@ if __name__ == "__main__":
                                         getattr(
                                             args,
                                             "pose_verification_v2_min_improvement",
-                                            0.005,
+                                            0.0,
                                         )
                                         if pose_initialization_risk_mode == "verify_v2"
                                         else getattr(
