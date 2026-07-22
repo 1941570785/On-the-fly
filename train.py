@@ -2394,7 +2394,7 @@ if __name__ == "__main__":
                         info["_pose_initialization_risk"] = dict(
                             pose_initialization_risk_decision
                         )
-                        if pose_initialization_risk_mode == "verify_v1":
+                        if pose_initialization_risk_mode in {"verify_v1", "verify_v2"}:
                             Rt, pose_verification_debug = (
                                 pose_initializer.verify_incremental_pose(
                                     Rt,
@@ -2417,6 +2417,7 @@ if __name__ == "__main__":
                                     min_support_ratio=float(
                                         getattr(args, "pose_verification_min_support_ratio", 0.80)
                                     ),
+                                    independent_validation=(pose_initialization_risk_mode == "verify_v2"),
                                 )
                             )
                             pose_verification_debug.update(
@@ -2438,6 +2439,8 @@ if __name__ == "__main__":
                                         pose_verification_debug.get("reason", "")
                                     ),
                                     "verification": pose_verification_debug,
+                                    "post_a_Rt": _pose_matrix_for_trace(Rt),
+                                    "a_stage_is_test": bool(info.get("is_test", False)),
                                     "estimated_Rt": _pose_matrix_for_trace(Rt),
                                 }
                             )

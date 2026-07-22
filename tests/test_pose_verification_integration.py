@@ -418,6 +418,20 @@ class PoseVerificationRiskIntegrationTests(unittest.TestCase):
         self.assertIn('"initial_estimated_Rt": _pose_matrix_for_trace(Rt)', source)
         self.assertIn('"gt_Rt": _pose_matrix_for_trace(info.get("Rt"))', source)
 
+    def test_train_routes_verify_v2_to_independent_validation_and_stage_trace(self):
+        source = Path("train.py").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'pose_initialization_risk_mode in {"verify_v1", "verify_v2"}',
+            source,
+        )
+        self.assertIn(
+            'independent_validation=(pose_initialization_risk_mode == "verify_v2")',
+            source,
+        )
+        self.assertIn('"post_a_Rt": _pose_matrix_for_trace(Rt)', source)
+        self.assertIn('"a_stage_is_test": bool(info.get("is_test", False))', source)
+
 
 if __name__ == "__main__":
     unittest.main()
