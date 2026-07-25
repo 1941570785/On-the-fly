@@ -35,6 +35,17 @@ def get_args():
                         help="Minimum median keypoint displacement for a new keyframe to be added. Relative to the image width")
     parser.add_argument('--start_at', type=int, default=0,
                         help="Number of frames to skip from the dataset.")
+    parser.add_argument(
+        '--experiment_seed',
+        type=int,
+        default=0,
+        help="Random seed used by paired reconstruction experiments.",
+    )
+    parser.add_argument(
+        '--experiment_deterministic',
+        action='store_true',
+        help="Use deterministic library settings for controlled experiments.",
+    )
     
     # 球谐阶数（颜色表达）
     parser.add_argument('--sh_degree', default=3)
@@ -211,10 +222,188 @@ def get_args():
         help='Held-out median reprojection improvement required by verify_v2.',
     )
     parser.add_argument(
+        '--pose_verification_candidate_mode',
+        type=str,
+        default='single_v2',
+        choices=[
+            'single_v2',
+            'balanced_step_v21',
+            'balanced_epipolar_v22',
+            'multihypothesis_v23',
+            'multiview_relative_v24',
+        ],
+        help='Internal verification candidate strategy; single_v2 preserves the existing solver.',
+    )
+    parser.add_argument(
+        '--pose_verification_registration_sampling_mode',
+        type=str,
+        default='off',
+        choices=['off', 'frame_deterministic_v1'],
+        help='Optionally isolate pose registration sampling from the shared training RNG.',
+    )
+    parser.add_argument(
+        '--pose_direct_retry_mode',
+        type=str,
+        default='off',
+        choices=['off', 'pose_safe_v18'],
+        help='Optional locked pose-safe v18 retry and multi-hypothesis policy.',
+    )
+    parser.add_argument(
+        '--pose_verification_registration_solver_mode',
+        type=str,
+        default='baseline_cuda_v1',
+        choices=['baseline_cuda_v1', 'deterministic_opencv_v2'],
+        help='PnP implementation used by the A registration stage.',
+    )
+    parser.add_argument(
+        '--pose_verification_async_pose_protection_mode',
+        type=str,
+        default='off',
+        choices=['off', 'fixed_joint_budget_v1'],
+        help='Optionally protect verified poses from schedule-dependent asynchronous updates.',
+    )
+    parser.add_argument(
         '--pose_verification_max_p90_ratio',
         type=float,
         default=1.01,
         help='Maximum post/pre p90 reprojection-error ratio for safe acceptance.',
+    )
+    parser.add_argument(
+        '--pose_verification_max_temporal_score_ratio',
+        type=float,
+        default=float('inf'),
+        help='Maximum candidate/initial causal motion-consistency score ratio.',
+    )
+    parser.add_argument(
+        '--pose_verification_geometry_anchor_mode',
+        type=str,
+        default='off',
+        choices=['off', 'freeze_v1'],
+        help='Use the verified pose as the persistent geometry reference.',
+    )
+    parser.add_argument(
+        '--pose_verification_reference_geometry_mode',
+        type=str,
+        default='off',
+        choices=[
+            'off',
+            'frozen_first_valid_v1',
+            'frozen_verification_only_v2',
+            'guarded_frozen_v3',
+            'guarded_frozen_live_pose_v4',
+            'guarded_frozen_homogeneous_v5',
+            'frozen_global_support_guard_v6',
+        ],
+        help='Use an immutable first-valid sparse geometry snapshot for pose verification.',
+    )
+    parser.add_argument(
+        '--pose_verification_frozen_min_match_support',
+        type=int,
+        default=24,
+        help='Minimum current-frame matches required before using frozen reference geometry.',
+    )
+    parser.add_argument(
+        '--pose_verification_frozen_min_live_ratio',
+        type=float,
+        default=0.50,
+        help='Minimum frozen/live matched-support ratio for guarded reference geometry.',
+    )
+    parser.add_argument(
+        '--pose_verification_frozen_min_reference_count',
+        type=int,
+        default=2,
+        help='Minimum guarded frozen references required for a homogeneous frame subset.',
+    )
+    parser.add_argument(
+        '--pose_verification_frozen_min_total_support',
+        type=int,
+        default=48,
+        help='Minimum total matched support required for a homogeneous frozen frame subset.',
+    )
+    parser.add_argument(
+        '--pose_verification_anchor_reference_mode',
+        type=str,
+        default='off',
+        choices=['off', 'stable_anchor_v1'],
+        help='Expand only risk-triggered A verification with causal stable anchor references.',
+    )
+    parser.add_argument(
+        '--pose_verification_anchor_pool_size',
+        type=int,
+        default=48,
+        help='Maximum uniformly sampled stable-anchor candidates scored per verification.',
+    )
+    parser.add_argument(
+        '--pose_verification_anchor_max_refs',
+        type=int,
+        default=4,
+        help='Maximum additional stable references used by an A verification candidate.',
+    )
+    parser.add_argument(
+        '--pose_verification_anchor_min_age_frames',
+        type=int,
+        default=48,
+        help='Minimum causal source-frame age of an A verification anchor.',
+    )
+    parser.add_argument(
+        '--pose_verification_anchor_min_support_count',
+        type=int,
+        default=400,
+        help='Minimum sparse 3D support required from an A verification anchor.',
+    )
+    parser.add_argument(
+        '--pose_verification_anchor_max_risk_score',
+        type=float,
+        default=0.08,
+        help='Maximum recorded pose-risk score allowed for an A verification anchor.',
+    )
+    parser.add_argument(
+        '--pose_verification_anchor_min_match_score',
+        type=float,
+        default=180.0,
+        help='Minimum descriptor-match support required from an A verification anchor.',
+    )
+    parser.add_argument(
+        '--pose_verification_anchor_min_source_separation',
+        type=int,
+        default=24,
+        help='Minimum temporal separation between selected A verification anchors.',
+    )
+    parser.add_argument(
+        '--pose_verification_anchor_candidate_scope',
+        type=str,
+        default='combined_v1',
+        choices=['combined_v1', 'anchor_only_v1'],
+        help='Generate A candidates from stable anchors alone when at least two are available.',
+    )
+    parser.add_argument(
+        '--pose_verification_anchor_pre_error_scale',
+        type=float,
+        default=4.0,
+        help='Pre-solve reprojection tolerance multiplier for stable-anchor evidence only.',
+    )
+    parser.add_argument(
+        '--pose_verification_reference_policy',
+        type=str,
+        default='off',
+        choices=[
+            'off',
+            'conservative_quarantine_v1',
+            'conservative_high_risk_v2',
+        ],
+        help='Optionally exclude high-risk A poses only from future pose references.',
+    )
+    parser.add_argument(
+        '--pose_verification_reference_risk_threshold',
+        type=float,
+        default=0.12,
+        help='Minimum A risk score for conservative reference quarantine.',
+    )
+    parser.add_argument(
+        '--pose_verification_reference_cooldown_frames',
+        type=int,
+        default=20,
+        help='Minimum source-frame interval between A reference quarantines.',
     )
     parser.add_argument(
         '--pose_verification_min_support_ratio',
@@ -223,10 +412,144 @@ def get_args():
         help='Minimum post/pre valid correspondence ratio for safe acceptance.',
     )
     parser.add_argument(
+        '--pose_delayed_verification_mode',
+        type=str,
+        default='off',
+        choices=[
+            'off',
+            'final_resection_v1',
+            'final_resection_v2_global_observe',
+            'final_resection_v2_global',
+        ],
+        help='Optional end-of-stream A review using mature 3D points and held-out references.',
+    )
+    parser.add_argument(
+        '--pose_delayed_verification_solve_refs',
+        type=int,
+        default=8,
+        help='Number of non-test references used to generate each delayed pose candidate.',
+    )
+    parser.add_argument(
+        '--pose_delayed_verification_validation_refs',
+        type=int,
+        default=6,
+        help='Disjoint non-test references reserved for delayed candidate validation.',
+    )
+    parser.add_argument(
+        '--pose_delayed_verification_min_point_count',
+        type=int,
+        default=16,
+        help='Minimum mature 3D points required for a delayed pose reference.',
+    )
+    parser.add_argument(
+        '--pose_delayed_verification_min_improvement',
+        type=float,
+        default=0.03,
+        help='Minimum held-out median reprojection improvement for delayed acceptance.',
+    )
+    parser.add_argument(
+        '--pose_delayed_verification_max_mean_ratio',
+        type=float,
+        default=0.99,
+        help='Maximum delayed post/pre mean reprojection-error ratio.',
+    )
+    parser.add_argument(
+        '--pose_delayed_verification_max_translation',
+        type=float,
+        default=0.10,
+        help='Maximum accepted delayed translation correction in reconstruction units.',
+    )
+    parser.add_argument(
+        '--pose_delayed_verification_max_rotation_deg',
+        type=float,
+        default=3.0,
+        help='Maximum accepted delayed rotation correction in degrees.',
+    )
+    parser.add_argument(
+        '--pose_delayed_verification_global_pool',
+        type=int,
+        default=32,
+        help='Maximum sampled nonlocal references scored for global delayed review.',
+    )
+    parser.add_argument(
+        '--pose_delayed_verification_global_min_distance',
+        type=int,
+        default=20,
+        help='Minimum keyframe-index distance for a nonlocal delayed reference.',
+    )
+    parser.add_argument(
+        '--pose_verification_photometric_review',
+        action='store_true',
+        help='Run bounded held-out photometric pose review for verify_v2 candidates.',
+    )
+    parser.add_argument(
+        '--pose_verification_photometric_iterations',
+        type=int,
+        default=2,
+        help='Pose-only optimization steps for the verify_v2 photometric candidate.',
+    )
+    parser.add_argument(
+        '--pose_verification_photometric_min_coverage',
+        type=float,
+        default=0.15,
+        help='Minimum historical-Gaussian coverage for photometric pose review.',
+    )
+    parser.add_argument(
+        '--pose_verification_photometric_min_relative_improvement',
+        type=float,
+        default=0.002,
+        help='Minimum held-out relative loss improvement for photometric acceptance.',
+    )
+    parser.add_argument(
+        '--pose_verification_photometric_min_support_ratio',
+        type=float,
+        default=0.95,
+        help='Minimum retained held-out support ratio for photometric acceptance.',
+    )
+    parser.add_argument(
+        '--pose_verification_photometric_max_rotation_deg',
+        type=float,
+        default=0.5,
+        help='Maximum photometric correction rotation in degrees.',
+    )
+    parser.add_argument(
+        '--pose_verification_photometric_max_translation',
+        type=float,
+        default=0.01,
+        help='Maximum photometric correction translation in scene units.',
+    )
+    parser.add_argument(
+        '--pose_verification_photometric_scope',
+        type=str,
+        default='all',
+        choices=['all', 'test_only'],
+        help='Apply photometric verification to all verify_v2 candidates or only held-out test candidates.',
+    )
+    parser.add_argument(
+        '--pose_verification_photometric_seed',
+        type=str,
+        default='post_geometry',
+        choices=['post_geometry', 'raw'],
+        help='Start photometric review from verify_v2 output or the unmodified incremental pose.',
+    )
+    parser.add_argument(
+        '--pose_verification_photometric_lr_scale',
+        type=float,
+        default=1.0,
+        help='Temporary pose-only learning-rate multiplier during bounded photometric review.',
+    )
+    parser.add_argument(
         '--pose_risk_utility_admission_mode',
         type=str,
         default='off',
-        choices=['off', 'observe_v1', 'active_v1', 'pose_quarantine_v1'],
+        choices=[
+            'off',
+            'observe_v1',
+            'active_v1',
+            'pose_quarantine_v1',
+            'pose_quarantine_utility_v1',
+            'pose_quarantine_severe_v1',
+        ],
         help='Joint post-pose admission using estimated pose risk and reduced-resolution rendering value.',
     )
     parser.add_argument(
@@ -278,6 +601,16 @@ def get_args():
         help='Pose-only photometric review iterations for retained high-utility risk candidates.',
     )
     parser.add_argument(
+        '--pose_risk_utility_use_verification_candidates',
+        action='store_true',
+        help='Route warmed-up verify_v2 candidates through the bounded photometric pose review.',
+    )
+    parser.add_argument(
+        '--pose_risk_utility_review_test_candidates',
+        action='store_true',
+        help='Allow pose-only photometric review for selected test candidates.',
+    )
+    parser.add_argument(
         '--pose_risk_utility_review_min_coverage',
         type=float,
         default=0.15,
@@ -294,6 +627,12 @@ def get_args():
         type=float,
         default=0.05,
         help='Maximum accepted translation change from pose-only review.',
+    )
+    parser.add_argument(
+        '--pose_risk_utility_review_min_relative_improvement',
+        type=float,
+        default=0.0,
+        help='Minimum relative photometric-loss improvement required to retain a reviewed pose.',
     )
     parser.add_argument(
         '--paper_aligned_tau_R_low',

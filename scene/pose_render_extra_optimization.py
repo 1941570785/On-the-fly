@@ -9,6 +9,7 @@ POSE_SAFE_DIRECT_DENSITY_MODE = "pose_safe_streaming_memory_v1"
 EXTRA_OPTIMIZATION_MODE = "pose_confidence_v1"
 EXTRA_OPTIMIZATION_RENDER_RESPONSE_MODE = "pose_confidence_render_response_v2"
 EXTRA_OPTIMIZATION_RENDER_ONLY_RESPONSE_MODE = "render_response_v3"
+EXTRA_REFINEMENT_STATE_KEY = "_paper_aligned_pose_render_extra_refinement_state"
 EXTRA_OPTIMIZATION_RENDER_ONLY_RESPONSE_SOFT_MODE = "render_response_v4"
 EXTRA_OPTIMIZATION_RENDER_ONLY_RESPONSE_RESCUE_MODE = "render_response_v5"
 EXTRA_OPTIMIZATION_RENDER_ONLY_RESPONSE_MASK_CONSERVATIVE_MODE = (
@@ -66,6 +67,47 @@ def _pose_render_response_info(keyframe_info: dict[str, Any] | None) -> dict[str
     return response if isinstance(response, dict) else {}
 
 
+def updated_render_response(
+    previous: dict[str, Any] | None,
+    latest_rgb_mse: float,
+    *,
+    history_size: int = 4,
+    representation_coverage_deficit: float = 0.0,
+    representation_gap_selectivity: float = 0.0,
+) -> dict[str, Any]:
+    latest = float(latest_rgb_mse)
+    response = previous if isinstance(previous, dict) else {}
+    observations = int(response.get("observations", 0) or 0) + 1
+    first = _as_float(response.get("first_rgb_mse", latest), latest)
+    best = min(_as_float(response.get("best_rgb_mse", latest), latest), latest)
+    recent = response.get("recent_rgb_mse", [])
+    if not isinstance(recent, (list, tuple)):
+        recent = []
+    bounded_history_size = max(1, int(history_size))
+    previous_count = bounded_history_size - 1
+    recent_values = [
+        _as_float(value, latest)
+        for value in (list(recent)[-previous_count:] if previous_count else [])
+    ]
+    recent_values.append(latest)
+    denom = max(abs(first), 1e-8)
+    return {
+        "observations": observations,
+        "first_rgb_mse": first,
+        "latest_rgb_mse": latest,
+        "best_rgb_mse": best,
+        "relative_improvement": (first - latest) / denom,
+        "best_relative_improvement": (first - best) / denom,
+        "recent_rgb_mse": recent_values,
+        "representation_coverage_deficit": float(
+            representation_coverage_deficit
+        ),
+        "representation_gap_selectivity": float(
+            representation_gap_selectivity
+        ),
+    }
+
+
 def pose_render_extra_optimization_decision(
     *,
     mode: str | None,
@@ -102,7 +144,15 @@ def pose_render_extra_optimization_decision(
         "render_response_improvement": 0.0,
         "render_response_scale": 0.0,
         "coverage_deficit": 0.0,
+        "projection_coverage_deficit": 0.0,
+        "representation_coverage_deficit": 0.0,
+        "representation_gap_selectivity": 0.0,
         "min_coverage_deficit": 0.08,
+        "max_coverage_deficit": 0.35,
+        "min_render_response_observations": 4,
+        "max_render_response_rebound_ratio": 0.01,
+        "render_response_rebound_ratio": 0.0,
+        "render_response_recent_decreases": 0,
         "min_scene_coverage_deficit": 0.10,
         "min_sampling_applied_ratio": 0.15,
         "min_scene_pressure_events": 20,
@@ -136,6 +186,14 @@ def pose_render_extra_optimization_decision(
         return debug
 
     if mode_name in EXTRA_OPTIMIZATION_RENDER_ONLY_RESPONSE_MODES:
+        if mode_name == EXTRA_OPTIMIZATION_RENDER_ONLY_RESPONSE_MODE:
+            refinement_state = info.get(EXTRA_REFINEMENT_STATE_KEY, None)
+            if isinstance(refinement_state, dict) and (
+                bool(refinement_state.get("attempted", False))
+                or str(refinement_state.get("state", "")).upper() == "DONE"
+            ):
+                debug["reason"] = "refinement_already_finalized"
+                return debug
         if mode_name == EXTRA_OPTIMIZATION_RENDER_ONLY_RESPONSE_SOFT_MODE:
             debug["min_coverage_deficit"] = 0.075
             debug["min_scene_coverage_deficit"] = 0.075
@@ -169,16 +227,41 @@ def pose_render_extra_optimization_decision(
                 debug["reason"] = "mask_blocked_scene_bypass"
                 return debug
         coverage = info.get(POSE_RENDER_TEXTURE_COVERAGE_INFO_KEY, None)
-        coverage_deficit = 0.0
+        projection_coverage_deficit = 0.0
         if isinstance(coverage, dict):
-            coverage_deficit = _as_float(
+            projection_coverage_deficit = _as_float(
                 coverage.get("coverage_deficit", coverage.get("deficit", 0.0)),
                 0.0,
             )
+        response = _pose_render_response_info(keyframe_info)
+        representation_coverage_deficit = (
+            _as_float(response.get("representation_coverage_deficit", 0.0), 0.0)
+            if mode_name == EXTRA_OPTIMIZATION_RENDER_ONLY_RESPONSE_MODE
+            else 0.0
+        )
+        representation_gap_selectivity = _as_float(
+            response.get("representation_gap_selectivity", 0.0),
+            0.0,
+        )
+        coverage_deficit = max(
+            projection_coverage_deficit,
+            representation_coverage_deficit,
+        )
         debug["coverage_deficit"] = coverage_deficit
+        debug["projection_coverage_deficit"] = projection_coverage_deficit
+        debug["representation_coverage_deficit"] = (
+            representation_coverage_deficit
+        )
+        debug["representation_gap_selectivity"] = representation_gap_selectivity
         min_coverage_deficit = float(debug["min_coverage_deficit"])
         if coverage_deficit < min_coverage_deficit:
             debug["reason"] = "coverage_sufficient"
+            return debug
+        if (
+            mode_name == EXTRA_OPTIMIZATION_RENDER_ONLY_RESPONSE_MODE
+            and coverage_deficit > float(debug["max_coverage_deficit"])
+        ):
+            debug["reason"] = "coverage_gap_too_large"
             return debug
         scene_guard = (
             info.get(
@@ -244,7 +327,6 @@ def pose_render_extra_optimization_decision(
                 debug["reason"] = "scene_response_warming_up"
                 return debug
 
-        response = _pose_render_response_info(keyframe_info)
         observations = int(_as_float(response.get("observations", 0), 0.0))
         improvement = _as_float(response.get("relative_improvement", 0.0), 0.0)
         first_rgb_mse = _as_float(response.get("first_rgb_mse", 0.0), 0.0)
@@ -258,7 +340,12 @@ def pose_render_extra_optimization_decision(
                 "confidence": 1.0,
             }
         )
-        if observations < 2:
+        min_observations = (
+            int(debug["min_render_response_observations"])
+            if mode_name == EXTRA_OPTIMIZATION_RENDER_ONLY_RESPONSE_MODE
+            else 2
+        )
+        if observations < min_observations:
             debug["reason"] = "render_response_pending"
             return debug
         if first_rgb_mse > 0.0 and latest_rgb_mse > first_rgb_mse * 1.02:
@@ -267,6 +354,31 @@ def pose_render_extra_optimization_decision(
         if improvement < 0.03:
             debug["reason"] = "render_response_low"
             return debug
+        if mode_name == EXTRA_OPTIMIZATION_RENDER_ONLY_RESPONSE_MODE:
+            recent_values = response.get("recent_rgb_mse", None)
+            if isinstance(recent_values, (list, tuple)) and len(recent_values) >= 4:
+                recent = [_as_float(value, 0.0) for value in recent_values[-4:]]
+                decreases = sum(
+                    1 for previous, current in zip(recent, recent[1:]) if current < previous
+                )
+                best_rgb_mse = _as_float(
+                    response.get("best_rgb_mse", min(recent)),
+                    min(recent),
+                )
+                rebound_ratio = max(
+                    0.0,
+                    (latest_rgb_mse - best_rgb_mse)
+                    / max(abs(best_rgb_mse), 1e-8),
+                )
+                debug["render_response_recent_decreases"] = decreases
+                debug["render_response_rebound_ratio"] = rebound_ratio
+                if (
+                    decreases < 2
+                    or rebound_ratio
+                    > float(debug["max_render_response_rebound_ratio"])
+                ):
+                    debug["reason"] = "render_response_unstable"
+                    return debug
         response_scale = max(0.35, min(improvement / 0.12, 1.0))
         if mode_name != EXTRA_OPTIMIZATION_RENDER_ONLY_RESPONSE_MODE:
             render_response_micro_max_extra = int(debug["render_response_micro_max_extra"])

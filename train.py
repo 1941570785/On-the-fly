@@ -31,8 +31,19 @@ from threading import Thread
 from dataloaders.image_dataset import ImageDataset
 from dataloaders.stream_dataset import StreamDataset
 from poses.feature_detector import Detector
+from poses.delayed_pose_verification import (
+    merge_global_reference_groups,
+    select_delayed_reference_groups,
+)
 from poses.matcher import Matcher
 from poses.pose_initializer import PoseInitializer
+from poses.pose_verification import (
+    decide_failed_verification_reference_quarantine,
+    deterministic_pose_sampling_seed,
+    rank_stable_pose_anchor_records,
+    resolve_stable_pose_anchor_probe_references,
+    sample_stable_pose_anchor_candidates,
+)
 from poses.triangulator import Triangulator
 from scene.dense_extractor import DenseExtractor
 from scene.keyframe import Keyframe
@@ -69,9 +80,195 @@ from scene.pose_render_posterior_risk import (
 from scene.pose_initialization_risk import PoseInitializationRiskGate
 from scene.pose_risk_utility_admission import (
     PoseRiskUtilityAdmissionGate,
-    pose_risk_candidate,
+    pose_reference_quarantine_enabled,
+    pose_review_candidate,
 )
 from scene.keyframe import pop_chosen_kfs_resolution_events
+from experiment_reproducibility import configure_experiment_reproducibility
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+@torch.no_grad()
+def run_delayed_pose_verification(
+    scene_model: SceneModel,
+    pose_initializer: PoseInitializer,
+    args: Any,
+) -> dict[str, Any]:
+    mode = str(getattr(args, "pose_delayed_verification_mode", "off") or "off")
+    if mode == "off":
+        return {"mode": "off", "attempted": 0, "accepted": 0}
+    supported = {
+        "final_resection_v1",
+        "final_resection_v2_global_observe",
+        "final_resection_v2_global",
+    }
+    if mode not in supported:
+        raise ValueError(f"unsupported delayed pose verification mode: {mode}")
+    use_global_references = mode.startswith("final_resection_v2_global")
+    apply_updates = mode != "final_resection_v2_global_observe"
+
+    started = time.perf_counter()
+    scene_model.join_optimization_thread()
+    events: list[dict[str, Any]] = []
+    accepted_updates: list[tuple[int, torch.Tensor]] = []
+    keyframes = list(scene_model.keyframes)
+    for position, target in enumerate(keyframes):
+        solve_refs, validation_refs = select_delayed_reference_groups(
+            keyframes,
+            position,
+            solve_count=int(args.pose_delayed_verification_solve_refs),
+            validation_count=int(args.pose_delayed_verification_validation_refs),
+            min_point_count=int(args.pose_delayed_verification_min_point_count),
+        )
+        global_reference_scores: list[dict[str, Any]] = []
+        if use_global_references:
+            min_distance = int(args.pose_delayed_verification_global_min_distance)
+            candidates = [
+                (candidate_position, candidate)
+                for candidate_position, candidate in enumerate(keyframes)
+                if candidate_position != position
+                and abs(candidate_position - position) >= min_distance
+                and not bool(candidate.is_test)
+                and int(candidate.desc_kpts.has_pt3d.sum().item())
+                >= int(args.pose_delayed_verification_min_point_count)
+                and not bool(
+                    candidate.info.get("_pose_reference_quarantined", False)
+                    or candidate.info.get("_pose_initialization_risk", {}).get(
+                        "isolated", False
+                    )
+                )
+            ]
+            pool_size = max(1, int(args.pose_delayed_verification_global_pool))
+            if len(candidates) > pool_size:
+                sampled = np.linspace(
+                    0,
+                    len(candidates) - 1,
+                    num=pool_size,
+                    dtype=np.int64,
+                )
+                candidates = [candidates[int(sample)] for sample in sampled]
+            ranked_global: list[tuple[float, Any]] = []
+            for candidate_position, candidate in candidates:
+                try:
+                    score = float(
+                        scene_model.matcher.evaluate_match(
+                            candidate.desc_kpts,
+                            target.desc_kpts,
+                        )
+                    )
+                except Exception:
+                    score = -1.0
+                ranked_global.append((score, candidate))
+                global_reference_scores.append(
+                    {
+                        "keyframe_id": int(candidate.index),
+                        "position": int(candidate_position),
+                        "distance": abs(candidate_position - position),
+                        "score": score,
+                    }
+                )
+            ranked_global.sort(key=lambda item: item[0], reverse=True)
+            solve_refs, validation_refs = merge_global_reference_groups(
+                solve_refs,
+                validation_refs,
+                [item[1] for item in ranked_global if item[0] >= 0.0],
+                solve_count=int(args.pose_delayed_verification_solve_refs),
+                validation_count=int(
+                    args.pose_delayed_verification_validation_refs
+                ),
+            )
+        initial_Rt = target.get_Rt().detach().clone()
+        try:
+            selected_Rt, debug = pose_initializer.verify_delayed_incremental_pose(
+                initial_Rt,
+                solve_refs,
+                validation_refs,
+                target.desc_kpts,
+                index=int(target.index),
+                curr_img=target.image_pyr[0],
+                min_support=int(args.pose_verification_min_support),
+                min_relative_improvement=float(
+                    args.pose_delayed_verification_min_improvement
+                ),
+                max_mean_ratio=float(args.pose_delayed_verification_max_mean_ratio),
+                max_p90_ratio=float(args.pose_verification_max_p90_ratio),
+                max_translation=float(
+                    args.pose_delayed_verification_max_translation
+                ),
+                max_rotation_deg=float(
+                    args.pose_delayed_verification_max_rotation_deg
+                ),
+            )
+        except Exception as exc:
+            selected_Rt = initial_Rt
+            debug = {
+                "attempted": False,
+                "accepted": False,
+                "reason": "delayed_verification_exception",
+                "exception_type": type(exc).__name__,
+                "exception": str(exc),
+            }
+        accepted = bool(debug.get("accepted", False))
+        if accepted:
+            accepted_updates.append((position, selected_Rt.detach().clone()))
+        events.append(
+            {
+                "position": int(position),
+                "keyframe_id": int(target.index),
+                "image_name": str(target.info.get("name", "")),
+                "is_test": bool(target.is_test),
+                "global_reference_scores": global_reference_scores,
+                **_json_safe(debug),
+            }
+        )
+
+    if apply_updates:
+        for position, selected_Rt in accepted_updates:
+            target = scene_model.keyframes[position]
+            target.set_Rt(selected_Rt)
+            if hasattr(scene_model, "valid_Rt_cache"):
+                scene_model.valid_Rt_cache[position] = False
+            if hasattr(scene_model, "approx_cam_centres"):
+                scene_model.approx_cam_centres[position] = target.approx_centre
+
+    summary = {
+        "mode": mode,
+        "keyframes": len(keyframes),
+        "attempted": sum(bool(event.get("attempted", False)) for event in events),
+        "accepted": len(accepted_updates),
+        "applied": len(accepted_updates) if apply_updates else 0,
+        "accepted_test": sum(
+            bool(event.get("accepted", False)) and bool(event.get("is_test", False))
+            for event in events
+        ),
+        "runtime_seconds": time.perf_counter() - started,
+    }
+    output = Path(args.model_path) / "delayed_pose_verification_trace.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps({"summary": summary, "events": events}, indent=2),
+        encoding="utf-8",
+    )
+    print(
+        "[pose_delayed_verification] "
+        f"attempted={summary['attempted']} accepted={summary['accepted']} "
+        f"applied={summary['applied']} "
+        f"accepted_test={summary['accepted_test']} "
+        f"runtime={summary['runtime_seconds']:.2f}s"
+    )
+    return summary
+
 
 if __name__ == "__main__":
     """
@@ -83,14 +280,21 @@ if __name__ == "__main__":
     3. 增量重建阶段：逐帧处理，提取特征、匹配、估计姿态、初始化高斯、优化
     4. 保存阶段：保存重建结果和评估指标
     """
-    # ========== 初始化阶段 ==========
-    # 固定随机种子，保证实验结果可复现
-    torch.random.manual_seed(0)
-    torch.cuda.manual_seed(0)
-    np.random.seed(0)
-
     # 解析命令行参数（数据路径、训练超参、可视化选项等）
     args = get_args()
+
+    # ========== 初始化阶段 ==========
+    # 固定随机种子，保证配对实验可复现
+    experiment_seed = int(getattr(args, "experiment_seed", 0) or 0)
+    if bool(getattr(args, "experiment_deterministic", False)):
+        configure_experiment_reproducibility(
+            experiment_seed,
+            deterministic=True,
+        )
+    else:
+        torch.random.manual_seed(experiment_seed)
+        torch.cuda.manual_seed(experiment_seed)
+        np.random.seed(experiment_seed)
 
     risk_mode = getattr(args, "risk_admission_mode", "off") or "off"
     profile_mode = str(
@@ -163,6 +367,33 @@ if __name__ == "__main__":
     pose_initialization_risk_mode = str(
         getattr(args, "pose_initialization_risk_mode", "off") or "off"
     ).strip().lower()
+    pose_verification_registration_sampling_mode = str(
+        getattr(
+            args,
+            "pose_verification_registration_sampling_mode",
+            "off",
+        )
+        or "off"
+    ).strip().lower()
+    pose_registration_solver_mode = str(
+        getattr(
+            args,
+            "pose_verification_registration_solver_mode",
+            "baseline_cuda_v1",
+        )
+        or "baseline_cuda_v1"
+    ).strip().lower()
+    pose_verification_reference_policy = str(
+        getattr(args, "pose_verification_reference_policy", "off") or "off"
+    ).strip().lower()
+    pose_verification_reference_guard_enabled = bool(
+        pose_verification_reference_policy
+        in {
+            "conservative_quarantine_v1",
+            "conservative_high_risk_v2",
+        }
+    )
+    last_pose_verification_reference_quarantine_frame_id = -1
     if (
         pose_risk_utility_admission_mode != "off"
         and pose_initialization_risk_mode == "off"
@@ -225,6 +456,20 @@ if __name__ == "__main__":
                     args,
                     "pose_risk_utility_quarantine_cooldown_frames",
                     64,
+                )
+            ),
+            use_verification_candidates=bool(
+                getattr(
+                    args,
+                    "pose_risk_utility_use_verification_candidates",
+                    False,
+                )
+            ),
+            review_test_candidates=bool(
+                getattr(
+                    args,
+                    "pose_risk_utility_review_test_candidates",
+                    False,
                 )
             ),
         )
@@ -1305,7 +1550,21 @@ if __name__ == "__main__":
                     prev_keyframes_src,
                 )
                 Rt_src = pose_initializer.initialize_incremental(
-                    prev_keyframes_src, source_desc, n_keyframes, bool(source_info.get("is_test", False)), source_image
+                    prev_keyframes_src,
+                    source_desc,
+                    n_keyframes,
+                    bool(source_info.get("is_test", False)),
+                    source_image,
+                    sampling_seed=(
+                        deterministic_pose_sampling_seed(
+                            source_frame_id,
+                            stream=0,
+                        )
+                        if pose_verification_registration_sampling_mode
+                        == "frame_deterministic_v1"
+                        else None
+                    ),
+                    registration_solver_mode=pose_registration_solver_mode,
                 )
             except Exception as exc:
                 recovery_trace["failure_stage"] = "source_resolution"
@@ -1449,6 +1708,20 @@ if __name__ == "__main__":
         runtime_action = ""
         baseline_should_add_frame = False
         pose_safe_tracking_only = False
+        pose_registration_sampling_seed = None
+        pose_verification_sampling_seed = None
+        if (
+            pose_verification_registration_sampling_mode
+            == "frame_deterministic_v1"
+        ):
+            pose_registration_sampling_seed = deterministic_pose_sampling_seed(
+                frameID,
+                stream=0,
+            )
+            pose_verification_sampling_seed = deterministic_pose_sampling_seed(
+                frameID,
+                stream=1,
+            )
 
         # ========== 网页端交互控制 ==========
         if args.viewer_mode == "web":
@@ -2102,10 +2375,10 @@ if __name__ == "__main__":
                     args.num_prev_keyframes_miniba_incr,
                     True,
                     desc_kpts,
-                    exclude_pose_quarantined=(
+                    exclude_pose_quarantined=pose_reference_quarantine_enabled(
                         pose_risk_utility_admission_mode
-                        == "pose_quarantine_v1"
-                    ),
+                    )
+                    or pose_verification_reference_guard_enabled,
                 )
                 pose_only_refs = []
                 if runtime_gate is not None:
@@ -2160,7 +2433,13 @@ if __name__ == "__main__":
                     initial_match_state = pose_safe_pose_match_before
 
                     Rt_baseline = pose_initializer.initialize_incremental(
-                        list(prev_keyframes), desc_kpts, n_keyframes, info["is_test"], image
+                        list(prev_keyframes),
+                        desc_kpts,
+                        n_keyframes,
+                        info["is_test"],
+                        image,
+                        sampling_seed=pose_registration_sampling_seed,
+                        registration_solver_mode=pose_registration_solver_mode,
                     )
                     baseline_debug = copy.deepcopy(
                         getattr(pose_initializer, "last_incremental_debug", {}) or {}
@@ -2185,7 +2464,13 @@ if __name__ == "__main__":
                         )
                         _restore_torch_rng_state(pose_safe_pose_rng_before)
                         Rt_memory = pose_initializer.initialize_incremental(
-                            prev_keyframes_for_pose, desc_kpts, n_keyframes, info["is_test"], image
+                            prev_keyframes_for_pose,
+                            desc_kpts,
+                            n_keyframes,
+                            info["is_test"],
+                            image,
+                            sampling_seed=pose_registration_sampling_seed,
+                            registration_solver_mode=pose_registration_solver_mode,
                         )
                         memory_debug = copy.deepcopy(
                             getattr(pose_initializer, "last_incremental_debug", {}) or {}
@@ -2265,7 +2550,13 @@ if __name__ == "__main__":
                         )
                 else:
                     Rt = pose_initializer.initialize_incremental(
-                        prev_keyframes_for_pose, desc_kpts, n_keyframes, info["is_test"], image
+                        prev_keyframes_for_pose,
+                        desc_kpts,
+                        n_keyframes,
+                        info["is_test"],
+                        image,
+                        sampling_seed=pose_registration_sampling_seed,
+                        registration_solver_mode=pose_registration_solver_mode,
                     )
                 if runtime_gate is not None:
                     _append_chosen_reference_trace(frameID, frameID, prev_keyframes_for_pose)
@@ -2381,14 +2672,353 @@ if __name__ == "__main__":
                                 is_bootstrap=False,
                             )
                         )
+                        pose_verification_anchor_evidence = None
+                        pose_verification_anchor_debug: dict[str, Any] = {
+                            "mode": str(
+                                getattr(
+                                    args,
+                                    "pose_verification_anchor_reference_mode",
+                                    "off",
+                                )
+                            ),
+                            "attempted": False,
+                            "selected_reference_ids": [],
+                        }
+                        if (
+                            pose_initialization_risk_mode == "verify_v2"
+                            and bool(
+                                pose_initialization_risk_decision.get(
+                                    "verification_trigger",
+                                    False,
+                                )
+                            )
+                            and pose_verification_anchor_debug["mode"]
+                            == "stable_anchor_v1"
+                        ):
+                            base_reference_ids = {
+                                int(keyframe.index)
+                                for keyframe in prev_keyframes_for_pose
+                            }
+                            anchor_records: list[dict[str, Any]] = []
+                            for keyframe in scene_model.keyframes:
+                                keyframe_risk = dict(
+                                    keyframe.info.get(
+                                        "_pose_initialization_risk",
+                                        {},
+                                    )
+                                    or {}
+                                )
+                                anchor_records.append(
+                                    {
+                                        "keyframe": keyframe,
+                                        "keyframe_id": int(keyframe.index),
+                                        "source_frame_id": int(
+                                            keyframe.info.get(
+                                                "_paper_aligned_source_frame_id",
+                                                keyframe.index,
+                                            )
+                                        ),
+                                        "support_count": int(
+                                            keyframe.desc_kpts.has_pt3d.sum().item()
+                                        ),
+                                        "risk_score": float(
+                                            keyframe_risk.get(
+                                                "risk_score",
+                                                0.0,
+                                            )
+                                            or 0.0
+                                        ),
+                                        "isolated": bool(
+                                            keyframe_risk.get("isolated", False)
+                                        ),
+                                        "quarantined": bool(
+                                            keyframe.info.get(
+                                                "_pose_reference_quarantined",
+                                                False,
+                                            )
+                                        ),
+                                    }
+                                )
+                            anchor_pool, anchor_pool_debug = (
+                                sample_stable_pose_anchor_candidates(
+                                    anchor_records,
+                                    base_reference_ids=base_reference_ids,
+                                    current_frame_id=int(frameID),
+                                    min_age_frames=int(
+                                        args.pose_verification_anchor_min_age_frames
+                                    ),
+                                    min_support_count=int(
+                                        args.pose_verification_anchor_min_support_count
+                                    ),
+                                    max_risk_score=float(
+                                        args.pose_verification_anchor_max_risk_score
+                                    ),
+                                    max_pool_size=int(
+                                        args.pose_verification_anchor_pool_size
+                                    ),
+                                )
+                            )
+                            for record in anchor_pool:
+                                score = scene_model.matcher.evaluate_match(
+                                    record["keyframe"].desc_kpts,
+                                    desc_kpts,
+                                )
+                                record["match_score"] = float(
+                                    score.item()
+                                    if isinstance(score, torch.Tensor)
+                                    else score
+                                )
+                            selected_anchor_records, anchor_rank_debug = (
+                                rank_stable_pose_anchor_records(
+                                    anchor_pool,
+                                    max_references=int(
+                                        args.pose_verification_anchor_max_refs
+                                    ),
+                                    min_match_score=float(
+                                        args.pose_verification_anchor_min_match_score
+                                    ),
+                                    min_source_separation=int(
+                                        args.pose_verification_anchor_min_source_separation
+                                    ),
+                                )
+                            )
+                            anchor_references = [
+                                record["keyframe"]
+                                for record in selected_anchor_records
+                            ]
+                            pose_verification_anchor_debug.update(
+                                {
+                                    "attempted": bool(anchor_references),
+                                    "pool": anchor_pool_debug,
+                                    "ranking": anchor_rank_debug,
+                                    "selected_reference_ids": [
+                                        int(record["keyframe_id"])
+                                        for record in selected_anchor_records
+                                    ],
+                                    "selected_source_frame_ids": [
+                                        int(record["source_frame_id"])
+                                        for record in selected_anchor_records
+                                    ],
+                                    "selected_match_scores": [
+                                        float(record["match_score"])
+                                        for record in selected_anchor_records
+                                    ],
+                                }
+                            )
+                            if anchor_references:
+                                (
+                                    probe_references,
+                                    probe_scope_debug,
+                                ) = resolve_stable_pose_anchor_probe_references(
+                                    list(prev_keyframes_for_pose),
+                                    anchor_references,
+                                    candidate_scope=str(
+                                        args.pose_verification_anchor_candidate_scope
+                                    ),
+                                )
+                                pose_verification_anchor_debug[
+                                    "candidate_scope"
+                                ] = probe_scope_debug
+                                baseline_match_state = _snapshot_pose_match_state(
+                                    desc_kpts,
+                                    probe_references,
+                                    n_keyframes,
+                                )
+                                baseline_rng_state = _snapshot_torch_rng_state()
+                                baseline_debug_state = copy.deepcopy(
+                                    pose_initializer.last_incremental_debug
+                                )
+                                baseline_support_state = _clone_pose_support(
+                                    pose_initializer.last_incremental_pose_support
+                                )
+                                baseline_candidate_state = _clone_pose_support(
+                                    pose_initializer.last_incremental_pose_candidates
+                                )
+                                baseline_last_pnp = getattr(
+                                    pose_initializer,
+                                    "_last_pnp_Rt",
+                                    None,
+                                )
+                                if isinstance(baseline_last_pnp, torch.Tensor):
+                                    baseline_last_pnp = (
+                                        baseline_last_pnp.detach().clone()
+                                    )
+                                try:
+                                    anchor_probe_Rt = (
+                                        pose_initializer.initialize_incremental(
+                                            probe_references,
+                                            desc_kpts,
+                                            n_keyframes,
+                                            info["is_test"],
+                                            image,
+                                            sampling_seed=pose_verification_sampling_seed,
+                                            registration_solver_mode=pose_registration_solver_mode,
+                                        )
+                                    )
+                                    anchor_probe_candidates = _clone_pose_support(
+                                        pose_initializer.last_incremental_pose_candidates
+                                    )
+                                    pose_verification_anchor_debug.update(
+                                        {
+                                            "probe_success": (
+                                                anchor_probe_Rt is not None
+                                            ),
+                                            "probe_correspondence_count": int(
+                                                len(
+                                                    anchor_probe_candidates.get(
+                                                        "pts3d",
+                                                        [],
+                                                    )
+                                                )
+                                            ),
+                                        }
+                                    )
+                                    if (
+                                        anchor_probe_Rt is not None
+                                        and anchor_probe_candidates
+                                    ):
+                                        pose_verification_anchor_evidence = (
+                                            anchor_probe_candidates
+                                        )
+                                except Exception as error:
+                                    pose_verification_anchor_debug.update(
+                                        {
+                                            "probe_success": False,
+                                            "probe_error": type(error).__name__,
+                                        }
+                                    )
+                                finally:
+                                    _restore_pose_match_state(
+                                        desc_kpts,
+                                        probe_references,
+                                        n_keyframes,
+                                        baseline_match_state,
+                                    )
+                                    _restore_torch_rng_state(
+                                        baseline_rng_state
+                                    )
+                                    pose_initializer.last_incremental_debug = (
+                                        baseline_debug_state
+                                    )
+                                    pose_initializer.last_incremental_pose_support = (
+                                        baseline_support_state
+                                    )
+                                    pose_initializer.last_incremental_pose_candidates = (
+                                        baseline_candidate_state
+                                    )
+                                    if baseline_last_pnp is not None:
+                                        pose_initializer._last_pnp_Rt = (
+                                            baseline_last_pnp
+                                        )
                         pose_initialization_risk_decision.update(
                             {
                                 "image_name": str(
                                     info.get("image_name", info.get("name", ""))
                                 ),
+                                "pnp_candidate_Rt": pose_debug_incr.get(
+                                    "pnp_candidate_Rt"
+                                ),
+                                "miniba_candidate_Rt": pose_debug_incr.get(
+                                    "miniba_candidate_Rt"
+                                ),
                                 "initial_estimated_Rt": _pose_matrix_for_trace(Rt),
                                 "estimated_Rt": _pose_matrix_for_trace(Rt),
                                 "gt_Rt": _pose_matrix_for_trace(info.get("Rt")),
+                                "reference_geometry_mode_by_ref": list(
+                                    pose_debug_incr.get(
+                                        "reference_geometry_mode_by_ref",
+                                        [],
+                                    )
+                                    or []
+                                ),
+                                "reference_geometry_guard_by_ref": list(
+                                    pose_debug_incr.get(
+                                        "reference_geometry_guard_by_ref",
+                                        [],
+                                    )
+                                    or []
+                                ),
+                                "guarded_frozen_reference_count": int(
+                                    pose_debug_incr.get(
+                                        "guarded_frozen_reference_count",
+                                        0,
+                                    )
+                                    or 0
+                                ),
+                                "guarded_live_fallback_count": int(
+                                    pose_debug_incr.get(
+                                        "guarded_live_fallback_count",
+                                        0,
+                                    )
+                                    or 0
+                                ),
+                                "guarded_frame_geometry_policy": str(
+                                    pose_debug_incr.get(
+                                        "guarded_frame_geometry_policy",
+                                        "per_reference",
+                                    )
+                                    or "per_reference"
+                                ),
+                                "guarded_frame_geometry_debug": dict(
+                                    pose_debug_incr.get(
+                                        "guarded_frame_geometry_debug",
+                                        {},
+                                    )
+                                    or {}
+                                ),
+                                "pose_direct_retry_mode": str(
+                                    pose_debug_incr.get(
+                                        "pose_direct_retry_mode",
+                                        "off",
+                                    )
+                                    or "off"
+                                ),
+                                "direct_pose_retry_applied": bool(
+                                    pose_debug_incr.get(
+                                        "direct_pose_retry_applied",
+                                        False,
+                                    )
+                                ),
+                                "direct_pose_retry_success": bool(
+                                    pose_debug_incr.get(
+                                        "direct_pose_retry_success",
+                                        False,
+                                    )
+                                ),
+                                "direct_pose_retry_attempts": int(
+                                    pose_debug_incr.get(
+                                        "direct_pose_retry_attempts",
+                                        0,
+                                    )
+                                    or 0
+                                ),
+                                "direct_pose_multi_hypothesis_applied": bool(
+                                    pose_debug_incr.get(
+                                        "direct_pose_multi_hypothesis_applied",
+                                        False,
+                                    )
+                                ),
+                                "direct_pose_multi_hypothesis_attempts": int(
+                                    pose_debug_incr.get(
+                                        "direct_pose_multi_hypothesis_attempts",
+                                        0,
+                                    )
+                                    or 0
+                                ),
+                                "direct_pose_miniba_residual": float(
+                                    pose_debug_incr.get(
+                                        "direct_pose_miniba_residual",
+                                        0.0,
+                                    )
+                                    or 0.0
+                                ),
+                                "direct_pose_candidate_score": float(
+                                    pose_debug_incr.get(
+                                        "direct_pose_candidate_score",
+                                        0.0,
+                                    )
+                                    or 0.0
+                                ),
                             }
                         )
                         info["_pose_initialization_risk"] = dict(
@@ -2428,6 +3058,29 @@ if __name__ == "__main__":
                                         getattr(args, "pose_verification_min_support_ratio", 0.80)
                                     ),
                                     independent_validation=(pose_initialization_risk_mode == "verify_v2"),
+                                    candidate_mode=str(
+                                        getattr(
+                                            args,
+                                            "pose_verification_candidate_mode",
+                                            "single_v2",
+                                        )
+                                    ),
+                                    max_temporal_score_ratio=float(
+                                        getattr(
+                                            args,
+                                            "pose_verification_max_temporal_score_ratio",
+                                            float("inf"),
+                                        )
+                                    ),
+                                    pose_evidence_override=pose_verification_anchor_evidence,
+                                    pose_evidence_pre_error_scale=(
+                                        float(
+                                            args.pose_verification_anchor_pre_error_scale
+                                        )
+                                        if pose_verification_anchor_evidence
+                                        else 1.0
+                                    ),
+                                    sampling_seed=pose_verification_sampling_seed,
                                 )
                             )
                             pose_verification_debug.update(
@@ -2435,6 +3088,7 @@ if __name__ == "__main__":
                                     "frame_id": int(frameID),
                                     "image_name": str(info.get("image_name", info.get("name", ""))),
                                     "gt_Rt": _pose_matrix_for_trace(info.get("Rt")),
+                                    "anchor_reference_expansion": pose_verification_anchor_debug,
                                 }
                             )
                             pose_initialization_risk_decision.update(
@@ -2452,6 +3106,39 @@ if __name__ == "__main__":
                                     "post_a_Rt": _pose_matrix_for_trace(Rt),
                                     "a_stage_is_test": bool(info.get("is_test", False)),
                                     "estimated_Rt": _pose_matrix_for_trace(Rt),
+                                }
+                            )
+                            pose_verification_reference_guard = (
+                                decide_failed_verification_reference_quarantine(
+                                    pose_initialization_risk_decision,
+                                    policy=pose_verification_reference_policy,
+                                    risk_threshold=float(
+                                        args.pose_verification_reference_risk_threshold
+                                    ),
+                                    frame_id=int(frameID),
+                                    last_quarantine_frame_id=int(
+                                        last_pose_verification_reference_quarantine_frame_id
+                                    ),
+                                    cooldown_frames=int(
+                                        args.pose_verification_reference_cooldown_frames
+                                    ),
+                                )
+                            )
+                            if pose_verification_reference_guard["quarantine"]:
+                                info["_pose_reference_quarantined"] = True
+                                last_pose_verification_reference_quarantine_frame_id = (
+                                    int(frameID)
+                                )
+                            pose_initialization_risk_decision.update(
+                                {
+                                    "verification_reference_quarantined": bool(
+                                        pose_verification_reference_guard[
+                                            "quarantine"
+                                        ]
+                                    ),
+                                    "verification_reference_guard": dict(
+                                        pose_verification_reference_guard
+                                    ),
                                 }
                             )
                             info["_pose_initialization_risk"] = dict(
@@ -2480,7 +3167,16 @@ if __name__ == "__main__":
                     pose_risk_utility_decision = None
                     if pose_risk_utility_gate is not None:
                         render_probe = None
-                        if pose_risk_candidate(pose_initialization_risk_decision):
+                        if pose_review_candidate(
+                            pose_initialization_risk_decision,
+                            use_verification_candidates=bool(
+                                getattr(
+                                    args,
+                                    "pose_risk_utility_use_verification_candidates",
+                                    False,
+                                )
+                            ),
+                        ):
                             render_probe = scene_model.probe_pose_risk_utility(
                                 image=image,
                                 Rt=Rt,
@@ -3524,9 +4220,161 @@ if __name__ == "__main__":
                         prev_keyframe = keyframe
                         increment_runtime(runtimes["Add"], start_time)
 
+                        pose_verification_photometric_seed = str(
+                            getattr(
+                                args,
+                                "pose_verification_photometric_seed",
+                                "post_geometry",
+                            )
+                            or "post_geometry"
+                        ).strip().lower()
+                        pose_verification_photometric_candidate = bool(
+                            pose_initialization_risk_decision is not None
+                            and (
+                                (
+                                    pose_verification_photometric_seed
+                                    == "post_geometry"
+                                    and pose_initialization_risk_mode == "verify_v2"
+                                    and pose_initialization_risk_decision.get(
+                                        "verification_trigger", False
+                                    )
+                                )
+                                or (
+                                    pose_verification_photometric_seed == "raw"
+                                    and pose_initialization_risk_mode == "observe_v1"
+                                    and pose_initialization_risk_decision.get(
+                                        "verification_candidate", False
+                                    )
+                                )
+                            )
+                        )
+                        pose_verification_photometric_requested = bool(
+                            getattr(
+                                args,
+                                "pose_verification_photometric_review",
+                                False,
+                            )
+                            and pose_verification_photometric_candidate
+                            and (
+                                str(
+                                    getattr(
+                                        args,
+                                        "pose_verification_photometric_scope",
+                                        "all",
+                                    )
+                                )
+                                != "test_only"
+                                or bool(info.get("is_test", False))
+                            )
+                        )
+                        if pose_verification_photometric_requested:
+                            start_time = time.time()
+                            geometric_verification_accepted = bool(
+                                pose_initialization_risk_decision.get(
+                                    "verification_accepted", False
+                                )
+                            )
+                            pose_review_result = (
+                                scene_model.review_pose_risk_keyframe(
+                                    -1,
+                                    iterations=int(
+                                        getattr(
+                                            args,
+                                            "pose_verification_photometric_iterations",
+                                            2,
+                                        )
+                                    ),
+                                    min_render_coverage=float(
+                                        getattr(
+                                            args,
+                                            "pose_verification_photometric_min_coverage",
+                                            0.15,
+                                        )
+                                    ),
+                                    max_rotation_delta_deg=float(
+                                        getattr(
+                                            args,
+                                            "pose_verification_photometric_max_rotation_deg",
+                                            0.5,
+                                        )
+                                    ),
+                                    max_translation_delta=float(
+                                        getattr(
+                                            args,
+                                            "pose_verification_photometric_max_translation",
+                                            0.01,
+                                        )
+                                    ),
+                                    min_relative_loss_improvement=float(
+                                        getattr(
+                                            args,
+                                            "pose_verification_photometric_min_relative_improvement",
+                                            0.002,
+                                        )
+                                    ),
+                                    min_validation_support_ratio=float(
+                                        getattr(
+                                            args,
+                                            "pose_verification_photometric_min_support_ratio",
+                                            0.95,
+                                        )
+                                    ),
+                                    learning_rate_scale=float(
+                                        getattr(
+                                            args,
+                                            "pose_verification_photometric_lr_scale",
+                                            1.0,
+                                        )
+                                    ),
+                                    trace_key="_pose_verification_photometric_review",
+                                )
+                            )
+                            Rt = keyframe.get_Rt().detach().clone()
+                            photometric_verification_accepted = bool(
+                                pose_review_result.get("accepted", False)
+                            )
+                            pose_initialization_risk_decision.update(
+                                {
+                                    "geometric_verification_accepted": (
+                                        geometric_verification_accepted
+                                    ),
+                                    "photometric_verification_attempted": bool(
+                                        pose_review_result.get("applied", False)
+                                    ),
+                                    "photometric_verification_accepted": (
+                                        photometric_verification_accepted
+                                    ),
+                                    "photometric_verification_reason": str(
+                                        pose_review_result.get("reason", "")
+                                    ),
+                                    "photometric_verification": dict(
+                                        pose_review_result
+                                    ),
+                                    "photometric_verification_seed": (
+                                        pose_verification_photometric_seed
+                                    ),
+                                    "a_final_verification_accepted": bool(
+                                        geometric_verification_accepted
+                                        or photometric_verification_accepted
+                                    ),
+                                    "post_a_Rt": _pose_matrix_for_trace(Rt),
+                                    "estimated_Rt": _pose_matrix_for_trace(Rt),
+                                }
+                            )
+                            keyframe.info["_pose_initialization_risk"] = dict(
+                                pose_initialization_risk_decision
+                            )
+                            if viewpoint_pose_history:
+                                viewpoint_pose_history[-1] = (
+                                    int(frameID),
+                                    Rt.detach().cpu().clone(),
+                                )
+                            increment_runtime(runtimes["Opt"], start_time)
+
                         if (
                             pose_risk_utility_decision is not None
                             and pose_risk_utility_decision["review"]
+                            and not pose_verification_photometric_requested
                         ):
                             start_time = time.time()
                             pose_review_result = (
@@ -3558,6 +4406,13 @@ if __name__ == "__main__":
                                             args,
                                             "pose_risk_utility_review_max_translation",
                                             0.05,
+                                        )
+                                    ),
+                                    min_relative_loss_improvement=float(
+                                        getattr(
+                                            args,
+                                            "pose_risk_utility_review_min_relative_improvement",
+                                            0.0,
                                         )
                                     ),
                                 )
@@ -3679,6 +4534,11 @@ if __name__ == "__main__":
             ]
             pbar.set_postfix_str(",".join(bar_postfix), refresh=False)
 
+    delayed_pose_summary = run_delayed_pose_verification(
+        scene_model,
+        pose_initializer,
+        args,
+    )
     reconstruction_time = time.time() - reconstruction_start_time
     if runtime_gate is not None:
         runtime_gate.flush_trace()

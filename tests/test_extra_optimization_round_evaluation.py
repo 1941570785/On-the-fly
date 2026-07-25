@@ -8,6 +8,7 @@ from tools.evaluate_extra_optimization_round_ablation import (
     evaluate_rows,
     pair_against_zero,
     paired_budget_summary,
+    scene_stratified_bootstrap,
     scene_summary,
     select_budget,
 )
@@ -63,6 +64,21 @@ class ExtraOptimizationRoundEvaluationTests(unittest.TestCase):
         self.assertGreater(summary[8]["PSNR_gain_mean"], 0.0)
         self.assertGreater(summary[8]["LPIPS_gain_mean"], 0.0)
 
+    def test_bootstrap_preserves_repeat_uncertainty_for_one_scene(self):
+        low, high = scene_stratified_bootstrap(
+            [
+                {"scene": "forest1", "gain": -0.2},
+                {"scene": "forest1", "gain": 0.0},
+                {"scene": "forest1", "gain": 0.2},
+            ],
+            "gain",
+            replicates=2_000,
+            seed=7,
+        )
+
+        self.assertLess(low, 0.0)
+        self.assertGreater(high, 0.0)
+
     def test_selection_chooses_smallest_statistically_equivalent_budget(self):
         rows = self.synthetic_rows()
         scenes = ("bonsai", "desk")
@@ -79,6 +95,28 @@ class ExtraOptimizationRoundEvaluationTests(unittest.TestCase):
         self.assertEqual(selection["selected_budget"], 4)
         evidence = {item["budget"]: item for item in selection["candidates"]}
         self.assertTrue(evidence[4]["equivalent"])
+
+    def test_selection_excludes_budget_above_ten_percent_time_overhead(self):
+        rows = self.synthetic_rows()
+        for row in rows:
+            if row["budget"] == 8:
+                row["PSNR"] += 0.10
+                row["time"] = 12.0
+        scenes = ("bonsai", "desk")
+        curve = active_macro_summary(scene_summary(rows), active_scenes=scenes)
+
+        selection = select_budget(
+            rows,
+            curve,
+            active_scenes=scenes,
+            bootstrap_replicates=200,
+        )
+
+        self.assertEqual(selection["unconstrained_max_psnr_budget"], 8)
+        self.assertEqual(selection["max_psnr_budget"], 4)
+        evidence = {item["budget"]: item for item in selection["candidates"]}
+        self.assertFalse(evidence[8]["within_time_budget"])
+        self.assertGreater(evidence[8]["paired_time_overhead_ratio"], 0.10)
 
     def test_evaluate_rows_writes_required_artifacts(self):
         with tempfile.TemporaryDirectory() as directory:

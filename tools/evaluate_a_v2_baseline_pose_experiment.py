@@ -44,6 +44,10 @@ from tools.run_a_v2_baseline_pose_experiment import (  # noqa: E402
 
 POSE_FIELDS = ("T_APE", "R_APE", "T_RPE", "R_RPE")
 REFERENCE_ROOT = Path("/data2/zxd/3D_Reconstruction/On_the_fly/datasets")
+OFFICIAL_NUMERIC_REFERENCE_ROOT = Path(
+    "/data2/zxd/3D_Reconstruction/comparison_results/"
+    "protocol_references_20260724/official_pose_reference_numeric"
+)
 EVALUATION_SCENE_DIRS = {
     "bonsai": REFERENCE_ROOT / "MipNeRF360/bonsai",
     "counter": REFERENCE_ROOT / "MipNeRF360/counter",
@@ -61,6 +65,13 @@ def reference_scene_spec(scene_name: str) -> Any:
     if scene_name not in POSE_REFERENCE_SCENES:
         raise ValueError(f"unknown pose-reference scene: {scene_name}")
     return POSE_REFERENCE_SCENES[scene_name]
+
+
+def reference_root_for_scene(scene_name: str) -> Path:
+    spec = reference_scene_spec(scene_name)
+    if spec.dataset == "TUM":
+        return REFERENCE_ROOT
+    return OFFICIAL_NUMERIC_REFERENCE_ROOT
 
 
 def _canonical_pose_map(values: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
@@ -364,7 +375,10 @@ def _load_stage_trace(
             ordered_frame_ids.append(frame_id)
         initial[frame_id] = np.linalg.inv(initial_w2c)
         post_a[frame_id] = np.linalg.inv(post_w2c)
-        if bool(event.get("verification_accepted", False)):
+        if bool(
+            event.get("verification_accepted", False)
+            or event.get("photometric_verification_accepted", False)
+        ):
             accepted.add(frame_id)
     return initial, post_a, accepted, trace.get("summary", {}), ordered_frame_ids
 
@@ -445,7 +459,10 @@ def evaluate_experiment(
                 if not (model_dir / "metadata.json").exists():
                     continue
                 final, metadata_test_names = _load_metadata(model_dir)
-                reference_w2c = load_reference(reference_scene_spec(scene_name))
+                reference_w2c = load_reference(
+                    reference_scene_spec(scene_name),
+                    reference_root_for_scene(scene_name),
+                )
                 reference = _invert_pose_map(reference_w2c)
                 evaluation_names = _evaluation_names(scene_name, metadata_test_names)
                 final_metrics = compute_paper_pose_metrics(

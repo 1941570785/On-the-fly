@@ -33,6 +33,31 @@ VARIANTS: dict[str, str] = {
     "a_off": "off",
     "a_current": "verify_v1",
     "a_v2": "verify_v2",
+    "a_v21": "verify_v2",
+    "a_v21_strict": "verify_v2",
+    "a_v22_epipolar": "verify_v2",
+    "a_v21_sensitive": "verify_v2",
+    "a_v21_sensitive_g005": "verify_v2",
+    "a_v23_multihypothesis": "verify_v2",
+    "a_v24_multiview": "verify_v2",
+    "a_v25_anchor_freeze": "verify_v2",
+    "a_v26_frozen_sparse": "verify_v2",
+    "a_v27_frozen_verification": "verify_v2",
+    "a_v28_stable_anchor": "verify_v2",
+    "a_v29_reference_guard": "verify_v2",
+    "a_v210_high_risk_reference_guard": "verify_v2",
+    "a_v211_trigger_aligned_reference_guard": "verify_v2",
+    "a_v212_temporal_safe_reference_guard": "verify_v2",
+    "a_v213_deterministic_pose_sampling": "verify_v2",
+    "a_v214_deterministic_opencv_registration": "verify_v2",
+    "a_v215_fixed_async_pose_budget": "verify_v2",
+    "a_v216_combined_reference_support": "verify_v2",
+    "a_v217_coherent_frozen_geometry": "verify_v2",
+    "a_v218_guarded_frozen_geometry": "verify_v2",
+    "a_v219_guarded_frozen_live_pose": "verify_v2",
+    "a_v220_homogeneous_frozen_geometry": "verify_v2",
+    "a_v221_frozen_global_support_guard": "verify_v2",
+    "a_v222_pose_safe_v18": "observe_v1",
 }
 K16_ARGS = (
     "--paper_aligned_pose_render_extra_optimization_fraction",
@@ -122,7 +147,7 @@ def build_command(
     *,
     python: Path = DEFAULT_PYTHON,
 ) -> list[str]:
-    return [
+    command = [
         str(python),
         "train.py",
         "-s",
@@ -141,9 +166,287 @@ def build_command(
         VARIANTS[spec.variant],
         *A_SHARED_ARGS,
         "--pose_verification_v2_min_improvement",
-        "0.0",
+        (
+            "0.005"
+            if spec.variant == "a_v21_sensitive_g005"
+            else (
+                "0.02"
+                if spec.variant
+                in {
+                    "a_v21_strict",
+                    "a_v22_epipolar",
+                    "a_v21_sensitive",
+                    "a_v23_multihypothesis",
+                    "a_v24_multiview",
+                    "a_v25_anchor_freeze",
+                    "a_v26_frozen_sparse",
+                    "a_v27_frozen_verification",
+                    "a_v28_stable_anchor",
+                    "a_v29_reference_guard",
+                    "a_v210_high_risk_reference_guard",
+                    "a_v211_trigger_aligned_reference_guard",
+                    "a_v212_temporal_safe_reference_guard",
+                    "a_v213_deterministic_pose_sampling",
+                    "a_v214_deterministic_opencv_registration",
+                    "a_v215_fixed_async_pose_budget",
+                    "a_v216_combined_reference_support",
+                    "a_v217_coherent_frozen_geometry",
+                    "a_v218_guarded_frozen_geometry",
+                    "a_v219_guarded_frozen_live_pose",
+                    "a_v220_homogeneous_frozen_geometry",
+                    "a_v221_frozen_global_support_guard",
+                }
+                else "0.0"
+            )
+        ),
         *K16_ARGS,
     ]
+    if spec.variant == "a_v22_epipolar":
+        command.extend(
+            [
+                "--pose_verification_candidate_mode",
+                "balanced_epipolar_v22",
+            ]
+        )
+    elif spec.variant == "a_v23_multihypothesis":
+        command.extend(
+            [
+                "--pose_verification_candidate_mode",
+                "multihypothesis_v23",
+            ]
+        )
+    elif spec.variant == "a_v24_multiview":
+        command.extend(
+            [
+                "--pose_verification_candidate_mode",
+                "multiview_relative_v24",
+                "--pose_verification_max_temporal_score_ratio",
+                "0.90",
+            ]
+        )
+    elif spec.variant in {
+        "a_v21",
+        "a_v21_strict",
+        "a_v21_sensitive",
+        "a_v21_sensitive_g005",
+        "a_v25_anchor_freeze",
+        "a_v26_frozen_sparse",
+        "a_v27_frozen_verification",
+        "a_v28_stable_anchor",
+        "a_v29_reference_guard",
+        "a_v210_high_risk_reference_guard",
+        "a_v211_trigger_aligned_reference_guard",
+        "a_v212_temporal_safe_reference_guard",
+        "a_v213_deterministic_pose_sampling",
+        "a_v214_deterministic_opencv_registration",
+        "a_v215_fixed_async_pose_budget",
+        "a_v216_combined_reference_support",
+        "a_v217_coherent_frozen_geometry",
+        "a_v218_guarded_frozen_geometry",
+        "a_v219_guarded_frozen_live_pose",
+        "a_v220_homogeneous_frozen_geometry",
+        "a_v221_frozen_global_support_guard",
+    }:
+        command.extend(
+            [
+                "--pose_verification_candidate_mode",
+                "balanced_step_v21",
+            ]
+        )
+    if spec.variant in {"a_v21_sensitive", "a_v21_sensitive_g005"}:
+        command.extend(
+            [
+                "--pose_initialization_risk_adaptive_sigma",
+                "0.0",
+            ]
+        )
+    if spec.variant == "a_v25_anchor_freeze":
+        command.extend(
+            [
+                "--pose_verification_geometry_anchor_mode",
+                "freeze_v1",
+            ]
+        )
+    if spec.variant == "a_v26_frozen_sparse":
+        command.extend(
+            [
+                "--pose_verification_reference_geometry_mode",
+                "frozen_first_valid_v1",
+            ]
+        )
+    if spec.variant == "a_v217_coherent_frozen_geometry":
+        command.extend(
+            [
+                "--pose_verification_geometry_anchor_mode",
+                "freeze_v1",
+                "--pose_verification_reference_geometry_mode",
+                "frozen_first_valid_v1",
+            ]
+        )
+    if spec.variant == "a_v218_guarded_frozen_geometry":
+        command.extend(
+            [
+                "--pose_verification_reference_geometry_mode",
+                "guarded_frozen_v3",
+                "--pose_verification_frozen_min_match_support",
+                "24",
+                "--pose_verification_frozen_min_live_ratio",
+                "0.50",
+            ]
+        )
+    if spec.variant == "a_v219_guarded_frozen_live_pose":
+        command.extend(
+            [
+                "--pose_verification_reference_geometry_mode",
+                "guarded_frozen_live_pose_v4",
+                "--pose_verification_frozen_min_match_support",
+                "24",
+                "--pose_verification_frozen_min_live_ratio",
+                "0.50",
+            ]
+        )
+    if spec.variant == "a_v220_homogeneous_frozen_geometry":
+        command.extend(
+            [
+                "--pose_verification_reference_geometry_mode",
+                "guarded_frozen_homogeneous_v5",
+                "--pose_verification_frozen_min_match_support",
+                "24",
+                "--pose_verification_frozen_min_live_ratio",
+                "0.50",
+                "--pose_verification_frozen_min_reference_count",
+                "2",
+                "--pose_verification_frozen_min_total_support",
+                "48",
+            ]
+        )
+    if spec.variant == "a_v221_frozen_global_support_guard":
+        command.extend(
+            [
+                "--pose_verification_reference_geometry_mode",
+                "frozen_global_support_guard_v6",
+                "--pose_verification_frozen_min_total_support",
+                "24",
+            ]
+        )
+    if spec.variant == "a_v222_pose_safe_v18":
+        command.extend(
+            [
+                "--pose_direct_retry_mode",
+                "pose_safe_v18",
+            ]
+        )
+    if spec.variant == "a_v27_frozen_verification":
+        command.extend(
+            [
+                "--pose_verification_reference_geometry_mode",
+                "frozen_verification_only_v2",
+            ]
+        )
+    if spec.variant in {
+        "a_v28_stable_anchor",
+        "a_v29_reference_guard",
+        "a_v210_high_risk_reference_guard",
+        "a_v211_trigger_aligned_reference_guard",
+        "a_v212_temporal_safe_reference_guard",
+        "a_v213_deterministic_pose_sampling",
+        "a_v214_deterministic_opencv_registration",
+        "a_v215_fixed_async_pose_budget",
+        "a_v216_combined_reference_support",
+    }:
+        command.extend(
+            [
+                "--pose_verification_anchor_reference_mode",
+                "stable_anchor_v1",
+                "--pose_verification_anchor_candidate_scope",
+                (
+                    "combined_v1"
+                    if spec.variant == "a_v216_combined_reference_support"
+                    else "anchor_only_v1"
+                ),
+                "--pose_verification_reference_geometry_mode",
+                "frozen_verification_only_v2",
+                "--pose_verification_anchor_pre_error_scale",
+                "4.0",
+            ]
+        )
+    if spec.variant in {
+        "a_v29_reference_guard",
+        "a_v210_high_risk_reference_guard",
+        "a_v211_trigger_aligned_reference_guard",
+        "a_v212_temporal_safe_reference_guard",
+        "a_v213_deterministic_pose_sampling",
+        "a_v214_deterministic_opencv_registration",
+        "a_v215_fixed_async_pose_budget",
+        "a_v216_combined_reference_support",
+    }:
+        command.extend(
+            [
+                "--pose_verification_reference_policy",
+                (
+                    "conservative_high_risk_v2"
+                    if spec.variant
+                    in {
+                        "a_v210_high_risk_reference_guard",
+                        "a_v211_trigger_aligned_reference_guard",
+                        "a_v212_temporal_safe_reference_guard",
+                        "a_v213_deterministic_pose_sampling",
+                        "a_v214_deterministic_opencv_registration",
+                        "a_v215_fixed_async_pose_budget",
+                        "a_v216_combined_reference_support",
+                    }
+                    else "conservative_quarantine_v1"
+                ),
+                "--pose_verification_reference_risk_threshold",
+                (
+                    "0.10"
+                    if spec.variant
+                    in {
+                        "a_v211_trigger_aligned_reference_guard",
+                        "a_v212_temporal_safe_reference_guard",
+                        "a_v213_deterministic_pose_sampling",
+                        "a_v214_deterministic_opencv_registration",
+                        "a_v215_fixed_async_pose_budget",
+                        "a_v216_combined_reference_support",
+                    }
+                    else "0.12"
+                ),
+                "--pose_verification_reference_cooldown_frames",
+                "20",
+            ]
+        )
+    if spec.variant == "a_v212_temporal_safe_reference_guard":
+        command.extend(
+            [
+                "--pose_verification_max_temporal_score_ratio",
+                "1.0",
+            ]
+        )
+    if spec.variant in {
+        "a_v213_deterministic_pose_sampling",
+        "a_v214_deterministic_opencv_registration",
+    }:
+        command.extend(
+            [
+                "--pose_verification_registration_sampling_mode",
+                "frame_deterministic_v1",
+            ]
+        )
+    if spec.variant == "a_v214_deterministic_opencv_registration":
+        command.extend(
+            [
+                "--pose_verification_registration_solver_mode",
+                "deterministic_opencv_v2",
+            ]
+        )
+    if spec.variant == "a_v215_fixed_async_pose_budget":
+        command.extend(
+            [
+                "--pose_verification_async_pose_protection_mode",
+                "fixed_joint_budget_v1",
+            ]
+        )
+    return command
 
 
 def _git_commit() -> str:
@@ -373,10 +676,17 @@ def run_one(
     return row
 
 
-def preflight(specs: Sequence[ExperimentSpec], python: Path, gpu: str) -> dict[str, Any]:
+def preflight(
+    specs: Sequence[ExperimentSpec],
+    python: Path,
+    gpu: str,
+    *,
+    allow_dirty: bool = False,
+) -> dict[str, Any]:
     if not python.is_file():
         raise FileNotFoundError(python)
-    if _git_dirty():
+    repo_dirty = _git_dirty()
+    if repo_dirty and not allow_dirty:
         raise RuntimeError("experiment repository must be clean before launch")
     for spec in specs:
         if not spec.scene.source.is_dir():
@@ -388,6 +698,7 @@ def preflight(specs: Sequence[ExperimentSpec], python: Path, gpu: str) -> dict[s
     return {
         "repo": str(ROOT),
         "repo_commit": _git_commit(),
+        "repo_dirty": bool(repo_dirty),
         "python": str(python),
         "gpu": matches[0],
         "job_count": len(specs),
@@ -404,6 +715,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--repeats", nargs="*", type=int, default=[])
     parser.add_argument("--skip_existing", action="store_true")
     parser.add_argument("--dry_run", action="store_true")
+    parser.add_argument("--allow_dirty", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -421,7 +733,12 @@ def main(argv: list[str] | None = None) -> int:
         scene_names=scene_names,
         repeats=repeats,
     )
-    context = preflight(specs, args.python, gpu)
+    context = preflight(
+        specs,
+        args.python,
+        gpu,
+        allow_dirty=bool(args.allow_dirty),
+    )
     context.update(
         {
             "output_root": str(output_root),

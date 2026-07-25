@@ -214,12 +214,21 @@ def scene_stratified_bootstrap(
     if not groups:
         raise ValueError("cannot bootstrap empty rows")
     scenes = sorted(groups)
-    scene_means = np.asarray(
-        [statistics.fmean(groups[scene]) for scene in scenes], dtype=np.float64
-    )
+    scene_values = {
+        scene: np.asarray(groups[scene], dtype=np.float64) for scene in scenes
+    }
     rng = np.random.default_rng(seed)
-    samples = rng.integers(0, len(scenes), size=(replicates, len(scenes)))
-    estimates = scene_means[samples].mean(axis=1)
+    estimates = np.empty(replicates, dtype=np.float64)
+    for replicate in range(replicates):
+        sampled_scene_indices = rng.integers(0, len(scenes), size=len(scenes))
+        sampled_scene_means = []
+        for scene_index in sampled_scene_indices:
+            values = scene_values[scenes[int(scene_index)]]
+            sampled_values = values[
+                rng.integers(0, len(values), size=len(values))
+            ]
+            sampled_scene_means.append(float(sampled_values.mean()))
+        estimates[replicate] = statistics.fmean(sampled_scene_means)
     low, high = np.quantile(estimates, [0.025, 0.975])
     return float(low), float(high)
 
@@ -299,18 +308,52 @@ def select_budget(
     active_scenes: Sequence[str] = ACTIVE_SCENES,
     bootstrap_replicates: int = 10_000,
     tolerance_db: float = 0.02,
+    max_time_overhead_ratio: float = 0.10,
 ) -> dict[str, Any]:
     if not curve_rows:
         raise ValueError("empty round curve")
     curve = {int(row["budget"]): row for row in curve_rows}
-    maximum_row = max(
+    unconstrained_maximum_row = max(
         curve_rows,
+        key=lambda row: (float(row["PSNR_macro"]), -int(row["budget"])),
+    )
+    active = set(active_scenes)
+    indexed = {
+        (str(row["scene"]), int(row["seed"]), int(row["budget"])): row
+        for row in rows
+        if str(row["scene"]) in active
+    }
+    paired_time_overhead: dict[int, float] = {0: 0.0}
+    for budget in sorted(value for value in curve if value != 0):
+        ratios = []
+        for (scene, seed, row_budget), row in indexed.items():
+            if row_budget != budget:
+                continue
+            baseline = indexed.get((scene, seed, 0))
+            if baseline is None:
+                raise ValueError(f"missing zero-budget pair for {(scene, seed, budget)}")
+            baseline_time = float(baseline["time"])
+            ratios.append(float(row["time"]) / max(baseline_time, 1e-8) - 1.0)
+        if not ratios:
+            raise ValueError(f"missing paired time rows for budget {budget}")
+        paired_time_overhead[budget] = statistics.fmean(ratios)
+
+    feasible_rows = [
+        row
+        for row in curve_rows
+        if paired_time_overhead[int(row["budget"])]
+        <= float(max_time_overhead_ratio) + 1e-12
+    ]
+    if not feasible_rows:
+        raise ValueError("no budget satisfies the time-overhead constraint")
+    maximum_row = max(
+        feasible_rows,
         key=lambda row: (float(row["PSNR_macro"]), -int(row["budget"])),
     )
     maximum_budget = int(maximum_row["budget"])
     maximum_psnr = float(maximum_row["PSNR_macro"])
     candidates: list[dict[str, Any]] = []
-    for budget in sorted(value for value in curve if value <= maximum_budget):
+    for budget in sorted(curve):
         row = curve[budget]
         gap = maximum_psnr - float(row["PSNR_macro"])
         if budget == maximum_budget:
@@ -333,7 +376,16 @@ def select_budget(
         ssim_not_worse = float(row["SSIM_macro"]) >= float(maximum_row["SSIM_macro"])
         lpips_not_worse = float(row["LPIPS_macro"]) <= float(maximum_row["LPIPS_macro"])
         not_both_degrade = ssim_not_worse or lpips_not_worse
-        equivalent = within_tolerance and ci_overlaps_zero and not_both_degrade
+        time_overhead_ratio = paired_time_overhead[budget]
+        within_time_budget = (
+            time_overhead_ratio <= float(max_time_overhead_ratio) + 1e-12
+        )
+        equivalent = (
+            within_tolerance
+            and ci_overlaps_zero
+            and not_both_degrade
+            and within_time_budget
+        )
         candidates.append(
             {
                 "budget": budget,
@@ -345,6 +397,8 @@ def select_budget(
                 "ssim_not_worse": ssim_not_worse,
                 "lpips_not_worse": lpips_not_worse,
                 "not_both_degrade": not_both_degrade,
+                "paired_time_overhead_ratio": time_overhead_ratio,
+                "within_time_budget": within_time_budget,
                 "equivalent": equivalent,
             }
         )
@@ -354,7 +408,14 @@ def select_budget(
         "selected_budget": int(selected),
         "max_psnr_budget": maximum_budget,
         "max_psnr": maximum_psnr,
+        "unconstrained_max_psnr_budget": int(
+            unconstrained_maximum_row["budget"]
+        ),
+        "unconstrained_max_psnr": float(
+            unconstrained_maximum_row["PSNR_macro"]
+        ),
         "tolerance_db": float(tolerance_db),
+        "max_time_overhead_ratio": float(max_time_overhead_ratio),
         "bootstrap_replicates": int(bootstrap_replicates),
         "active_scenes": list(active_scenes),
         "candidates": candidates,

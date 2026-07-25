@@ -13,7 +13,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,15 +31,20 @@ from tools.run_pose_verification_a_ablation import (
 from tools.run_v31_a_official_pose_benchmark import git_commit
 
 
-DEFAULT_BUDGETS = (0, 2, 4, 8, 12, 16, 20)
-DEFAULT_SEEDS = (0,)
-ACTIVE_SCENES = tuple(SCENES)
-INACTIVE_SCENES: tuple[str, ...] = ()
+DEFAULT_BUDGETS = (0, 2, 4, 8, 12, 16, 24)
+DEFAULT_SEEDS = (0, 1, 2, 3, 4)
+VALIDATION_SEEDS = (0, 1, 2)
+ACTIVE_SCENES = ("forest1",)
+INACTIVE_SCENES = tuple(scene for scene in SCENES if scene not in ACTIVE_SCENES)
 PHASES = ("sweep", "validation", "smoke")
 A_MODULE_ARGS = (
     "--pose_initialization_risk_mode",
-    "verify_v1",
+    "observe_v1",
     *A_SHARED_ARGS,
+    "--pose_verification_v2_min_improvement",
+    "0.0",
+    "--pose_direct_retry_mode",
+    "pose_safe_v18",
 )
 
 
@@ -77,8 +82,13 @@ def validate_budgets(budgets: Sequence[int]) -> tuple[int, ...]:
 
 def validate_seeds(seeds: Sequence[int]) -> tuple[int, ...]:
     values = tuple(int(seed) for seed in seeds)
-    if values != (0,):
-        raise ValueError("the final pose-verification-A branch uses built-in seed zero")
+    if (
+        not values
+        or len(values) > 16
+        or len(set(values)) != len(values)
+        or any(seed < 0 for seed in values)
+    ):
+        raise ValueError("provide one to sixteen unique non-negative seeds")
     return values
 
 
@@ -101,6 +111,25 @@ def budget_args(budget: int) -> list[str]:
         "--paper_aligned_pose_render_extra_optimization_max_extra",
         str(value),
     ]
+
+
+def reproducibility_environment(
+    base: Mapping[str, str],
+    *,
+    seed: int,
+) -> dict[str, str]:
+    environment = dict(base)
+    environment.update(
+        {
+            "PYTHONHASHSEED": str(int(seed)),
+            "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+            "CUDA_LAUNCH_BLOCKING": "1",
+            "NVIDIA_TF32_OVERRIDE": "0",
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+        }
+    )
+    return environment
 
 
 def build_specs(
@@ -152,7 +181,11 @@ def build_command(
     spec: RoundSpec,
     *,
     python: Path = DEFAULT_PYTHON,
+    deterministic: bool = False,
 ) -> list[str]:
+    deterministic_args = (
+        ["--experiment_deterministic"] if bool(deterministic) else []
+    )
     return [
         str(python),
         "train.py",
@@ -167,6 +200,9 @@ def build_command(
         str(spec.scene.test_hold),
         "--test_frequency",
         "-1",
+        "--experiment_seed",
+        str(spec.seed),
+        *deterministic_args,
         *V31_PROFILE_ARGS,
         *A_MODULE_ARGS,
         *budget_args(spec.budget),
@@ -250,6 +286,19 @@ def summarize(
         "extra_applied": int(extra.get("applied", 0) or 0),
         "extra_iterations": int(extra.get("extra_iterations_sum", 0) or 0),
         "extra_iterations_mean": float(extra.get("extra_iterations_mean", 0.0) or 0.0),
+        "transaction_attempted": int(extra.get("transaction_attempted", 0) or 0),
+        "transaction_committed": int(extra.get("transaction_committed", 0) or 0),
+        "transaction_rolled_back": int(extra.get("transaction_rolled_back", 0) or 0),
+        "transaction_best_iteration_mean": float(
+            extra.get("transaction_best_iteration_mean", 0.0) or 0.0
+        ),
+        "transaction_runtime_seconds": float(
+            extra.get("transaction_runtime_seconds", 0.0) or 0.0
+        ),
+        "base_runtime_seconds": float(extra.get("base_runtime_seconds", 0.0) or 0.0),
+        "refinement_to_base_time_ratio": float(
+            extra.get("refinement_to_base_time_ratio", 0.0) or 0.0
+        ),
         "model_dir": str(spec.model_dir),
         "log_path": str(spec.run_dir / "train.log"),
     }
@@ -338,8 +387,13 @@ def run_one(
     gpu: str,
     skip_existing: bool,
     dry_run: bool,
+    deterministic: bool = False,
 ) -> dict[str, Any]:
-    command = build_command(spec, python=python)
+    command = build_command(
+        spec,
+        python=python,
+        deterministic=deterministic,
+    )
     if dry_run:
         print(f"[dry-run gpu={gpu} {spec.job_id}] {' '.join(command)}", flush=True)
         return summarize(spec, gpu=gpu, returncode=0, dry_run=True)
@@ -371,11 +425,29 @@ def run_one(
         "repo": str(ROOT),
         "repo_commit": git_commit(ROOT),
         "command": command,
+        "experiment_deterministic": bool(deterministic),
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
-    _write_json(spec.run_dir / "command.json", context)
-    environment = os.environ.copy()
+    environment = (
+        reproducibility_environment(os.environ, seed=spec.seed)
+        if deterministic
+        else dict(os.environ)
+    )
     environment["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    if deterministic:
+        context["reproducibility_environment"] = {
+            key: environment[key]
+            for key in (
+                "PYTHONHASHSEED",
+                "CUBLAS_WORKSPACE_CONFIG",
+                "CUDA_LAUNCH_BLOCKING",
+                "NVIDIA_TF32_OVERRIDE",
+                "OMP_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "CUDA_VISIBLE_DEVICES",
+            )
+        }
+    _write_json(spec.run_dir / "command.json", context)
     started = time.time()
     with (spec.run_dir / "train.log").open("w", encoding="utf-8") as log:
         process = subprocess.run(
@@ -417,6 +489,7 @@ def run_specs(
     gpus: Sequence[str],
     skip_existing: bool,
     dry_run: bool,
+    deterministic: bool = False,
 ) -> list[dict[str, Any]]:
     if not specs:
         raise ValueError("at least one job is required")
@@ -434,6 +507,7 @@ def run_specs(
                 gpu=gpu,
                 skip_existing=skip_existing,
                 dry_run=dry_run,
+                deterministic=deterministic,
             )
             with lock:
                 rows[spec.job_id] = row
@@ -460,6 +534,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--python", type=Path, default=DEFAULT_PYTHON)
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Use the slower deterministic diagnostic execution mode.",
+    )
     return parser.parse_args(argv)
 
 
@@ -476,7 +555,7 @@ def resolve_layout(args: argparse.Namespace) -> tuple[tuple[str, ...], tuple[int
             budgets = (0, int(args.selected_budget))
         else:
             raise ValueError("validation requires --selected-budget or --budgets")
-        seeds = tuple(args.seeds) if args.seeds else DEFAULT_SEEDS
+        seeds = tuple(args.seeds) if args.seeds else VALIDATION_SEEDS
     else:
         scene_names = tuple(args.scenes) if args.scenes else ("desk",)
         budgets = tuple(args.budgets) if args.budgets else (2,)
@@ -525,6 +604,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "seeds": list(seeds),
             "jobs": len(specs),
             "dry_run": bool(args.dry_run),
+            "experiment_deterministic": bool(args.deterministic),
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         },
     )
@@ -535,6 +615,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         gpus=gpus,
         skip_existing=args.skip_existing,
         dry_run=args.dry_run,
+        deterministic=args.deterministic,
     )
     failures = [row for row in rows if int(row["returncode"]) != 0]
     print(

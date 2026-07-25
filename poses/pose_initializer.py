@@ -21,15 +21,171 @@ from poses.triangulator import matches_to_points
 from utils import fov2focal, depth2points, sixD2mtx
 from scene.keyframe import Keyframe
 from poses.ransac import RANSACEstimator, EstimatorType
+from poses.delayed_pose_verification import summarize_candidate_validation
 from poses.pose_verification import (
     choose_verified_pose,
+    compute_epipolar_sampson_errors,
     compute_reprojection_errors,
     decide_pose_refinement,
+    estimate_multireference_relative_pose_candidates,
+    estimate_opencv_pnp_candidates,
+    interpolate_world_to_camera_pose,
     pose_correction_magnitude,
+    predict_constant_velocity_pose,
+    select_balanced_correspondence_indices,
+    select_pose_candidate_by_reprojection,
     select_robust_correspondences,
     split_pose_verification_evidence,
     summarize_reprojection_errors,
+    temporal_pose_consistency,
+    validation_candidate_rank,
 )
+from experiment_reproducibility import experiment_cuda_graphs_enabled
+
+
+def should_retry_direct_pose_initialization_v18(
+    debug: dict[str, object],
+    *,
+    is_test: bool,
+    retry_test_frames: bool = True,
+    min_2d3d: int = 500,
+    min_pnp_inliers: int = 20,
+) -> bool:
+    """Gate v18 retries to supported MiniBA failures."""
+    if is_test and not retry_test_frames:
+        return False
+    if str(debug.get("failure_reason", "") or "") != "miniba_inliers_too_few":
+        return False
+    valid_2d3d = int(debug.get("num_2d3d_correspondences", 0) or 0)
+    pnp_inliers = int(debug.get("num_pnp_inliers", 0) or 0)
+    return valid_2d3d >= int(min_2d3d) and pnp_inliers >= int(min_pnp_inliers)
+
+
+def should_run_direct_pose_multi_hypothesis_v18(
+    debug: dict[str, object],
+    *,
+    min_2d3d: int = 2000,
+    min_pnp_inliers: int = 700,
+    max_pnp_inlier_ratio: float = 0.45,
+    max_miniba_residual: float = 1.0,
+) -> bool:
+    """Detect successful but weak v18 poses that need re-sampling."""
+    if str(debug.get("failure_reason", "") or ""):
+        return False
+    valid_2d3d = int(debug.get("num_2d3d_correspondences", 0) or 0)
+    if valid_2d3d < int(min_2d3d):
+        return False
+    pnp_inliers = int(debug.get("num_pnp_inliers", 0) or 0)
+    sampled = int(debug.get("num_pnp_candidate_correspondences", 0) or 0)
+    if sampled <= 0:
+        sampled = min(
+            valid_2d3d,
+            int(debug.get("num_pts_pnpransac", valid_2d3d) or valid_2d3d),
+        )
+    pnp_ratio = float(pnp_inliers) / max(float(sampled), 1.0)
+    miniba_residual = float(
+        debug.get("direct_pose_miniba_residual", 0.0) or 0.0
+    )
+    if (
+        math.isfinite(miniba_residual)
+        and miniba_residual > float(max_miniba_residual)
+    ):
+        return True
+    return (
+        pnp_inliers < int(min_pnp_inliers)
+        or pnp_ratio < float(max_pnp_inlier_ratio)
+    )
+
+
+def score_direct_pose_candidate_v18(debug: dict[str, object]) -> float:
+    """Rank v18 hypotheses by support, residual, and reference motion."""
+    pnp_inliers = float(debug.get("num_pnp_inliers", 0) or 0)
+    miniba_inliers = float(debug.get("num_miniba_inliers", 0) or 0)
+    rotation_deg = float(
+        debug.get("direct_pose_motion_rotation_deg", 0.0) or 0.0
+    )
+    translation = float(
+        debug.get("direct_pose_motion_translation", 0.0) or 0.0
+    )
+    miniba_residual = float(
+        debug.get("direct_pose_miniba_residual", 0.0) or 0.0
+    )
+    support_score = pnp_inliers + 0.50 * miniba_inliers
+    motion_penalty = rotation_deg + 25.0 * translation
+    residual_penalty = (
+        400.0 * miniba_residual if math.isfinite(miniba_residual) else 0.0
+    )
+    return support_score - motion_penalty - residual_penalty
+
+
+def should_accept_direct_pose_candidate_v18(
+    current_best: dict[str, object],
+    candidate: dict[str, object],
+    *,
+    min_support_gain: float = 0.15,
+    min_residual_gain: float = 0.20,
+    rotation_margin_deg: float = 4.0,
+    translation_margin: float = 0.12,
+    translation_scale: float = 2.5,
+) -> bool:
+    """Accept a v18 replacement only with a supported, bounded gain."""
+    best_support = float(
+        current_best.get("num_pnp_inliers", 0) or 0
+    ) + 0.50 * float(current_best.get("num_miniba_inliers", 0) or 0)
+    candidate_support = float(
+        candidate.get("num_pnp_inliers", 0) or 0
+    ) + 0.50 * float(candidate.get("num_miniba_inliers", 0) or 0)
+    best_residual = float(
+        current_best.get("direct_pose_miniba_residual", float("inf"))
+        or float("inf")
+    )
+    candidate_residual = float(
+        candidate.get("direct_pose_miniba_residual", float("inf"))
+        or float("inf")
+    )
+    support_gain_ok = candidate_support > best_support * (
+        1.0 + float(min_support_gain)
+    )
+    residual_gain_ok = (
+        math.isfinite(best_residual)
+        and math.isfinite(candidate_residual)
+        and candidate_residual
+        < best_residual * (1.0 - float(min_residual_gain))
+        and candidate_support >= best_support * 0.75
+    )
+    if not support_gain_ok and not residual_gain_ok:
+        return False
+
+    best_rotation = float(
+        current_best.get("direct_pose_motion_rotation_deg", 0.0) or 0.0
+    )
+    candidate_rotation = float(
+        candidate.get("direct_pose_motion_rotation_deg", 0.0) or 0.0
+    )
+    best_translation = float(
+        current_best.get("direct_pose_motion_translation", 0.0) or 0.0
+    )
+    candidate_translation = float(
+        candidate.get("direct_pose_motion_translation", 0.0) or 0.0
+    )
+    max_rotation = max(
+        8.0,
+        best_rotation + float(rotation_margin_deg),
+        best_rotation * 1.75,
+    )
+    max_translation = max(
+        0.35,
+        best_translation * float(translation_scale)
+        + float(translation_margin),
+    )
+    if candidate_rotation > max_rotation:
+        return False
+    if candidate_translation > max_translation:
+        return False
+    return score_direct_pose_candidate_v18(
+        candidate
+    ) > score_direct_pose_candidate_v18(current_best)
+
 
 class PoseInitializer():
     """
@@ -78,15 +234,18 @@ class PoseInitializer():
             self.f_init = 0.7 * width
 
         # Initialize MiniBA models
+        make_cuda_graph = experiment_cuda_graphs_enabled(
+            bool(getattr(args, "experiment_deterministic", False))
+        )
         self.miniba_bootstrap = MiniBA(
             1, args.num_keyframes_miniba_bootstrap, 0, args.num_pts_miniba_bootstrap,  not args.fix_focal, True,
-            make_cuda_graph=True, iters=args.iters_miniba_bootstrap)
+            make_cuda_graph=make_cuda_graph, iters=args.iters_miniba_bootstrap)
         self.miniba_rebooting = MiniBA(
             1, args.num_keyframes_miniba_bootstrap, 0, args.num_pts_miniba_bootstrap,  False, True,
-            make_cuda_graph=True, iters=args.iters_miniba_bootstrap)
+            make_cuda_graph=make_cuda_graph, iters=args.iters_miniba_bootstrap)
         self.miniBA_incr = MiniBA(
             1, 1, 0, args.num_pts_miniba_incr, optimize_focal=False, optimize_3Dpts=False,
-            make_cuda_graph=True, iters=args.iters_miniba_incr)
+            make_cuda_graph=make_cuda_graph, iters=args.iters_miniba_incr)
         
         self.PnPRANSAC = RANSACEstimator(args.pnpransac_samples, self.max_pnp_error, EstimatorType.P4P)
         self.last_incremental_debug: dict[str, object] = {}
@@ -98,6 +257,22 @@ class PoseInitializer():
         self.last_incremental_pose_candidates: dict[str, torch.Tensor] = {}
         self.recovery_defer_source_frame_id: int = -1
         self._last_pnp_Rt: torch.Tensor | None = None
+        self.pose_direct_retry_mode = str(
+            getattr(args, "pose_direct_retry_mode", "off") or "off"
+        ).strip().lower()
+        if self.pose_direct_retry_mode not in {"off", "pose_safe_v18"}:
+            raise ValueError(
+                f"Unsupported pose direct retry mode: {self.pose_direct_retry_mode}"
+            )
+        self.direct_pose_retry_attempts = 2
+        self.direct_pose_retry_min_2d3d = 500
+        self.direct_pose_retry_min_pnp_inliers = 20
+        self.direct_pose_retry_test_frames = True
+        self.direct_pose_multi_hypothesis_attempts = 2
+        self.direct_pose_multi_hypothesis_min_2d3d = 2000
+        self.direct_pose_multi_hypothesis_min_pnp_inliers = 700
+        self.direct_pose_multi_hypothesis_max_pnp_ratio = 0.45
+        self.direct_pose_multi_hypothesis_max_miniba_residual = 1.0
         self.recovery_miniba_retry_min_2d3d = 500
         self.recovery_miniba_retry_min_pnp_inliers = 20
         self.recovery_consensus_target_refs = 10
@@ -105,6 +280,323 @@ class PoseInitializer():
         self.recovery_consensus_min_refs = 6
         self.recovery_consensus_min_total_valid_2d3d = 120
         self.recovery_probe_min_inlier_ratio = 0.03
+
+    @staticmethod
+    def _keyframe_geometry_Rt(keyframe: Keyframe) -> torch.Tensor:
+        getter = getattr(keyframe, "get_geometry_Rt", None)
+        if callable(getter):
+            return getter()
+        return keyframe.get_Rt()
+
+    @staticmethod
+    def _keyframe_pose_reference_geometry(
+        keyframe: Keyframe,
+        *,
+        verification_evidence: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        mode = str(
+            getattr(
+                keyframe,
+                "_pose_verification_geometry_snapshot_mode",
+                "off",
+            )
+        )
+        if not verification_evidence and mode == "frozen_verification_only_v2":
+            return (
+                keyframe.desc_kpts.pts3d,
+                keyframe.desc_kpts.pts_conf,
+                keyframe.desc_kpts.has_pt3d,
+            )
+        getter = getattr(
+            keyframe,
+            "get_pose_verification_geometry",
+            None,
+        )
+        if callable(getter):
+            return getter()
+        return (
+            keyframe.desc_kpts.pts3d,
+            keyframe.desc_kpts.pts_conf,
+            keyframe.desc_kpts.has_pt3d,
+        )
+
+    @staticmethod
+    def _keyframe_pose_reference_bundle(
+        keyframe: Keyframe,
+        matched_indices: torch.Tensor,
+        *,
+        verification_evidence: bool,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        bool,
+        dict,
+    ]:
+        live_geometry = (
+            keyframe.desc_kpts.pts3d,
+            keyframe.desc_kpts.pts_conf,
+            keyframe.desc_kpts.has_pt3d,
+        )
+        live_Rt = PoseInitializer._keyframe_geometry_Rt(keyframe)
+        mode = str(
+            getattr(
+                keyframe,
+                "_pose_verification_geometry_snapshot_mode",
+                "off",
+            )
+        )
+
+        if mode not in {
+            "guarded_frozen_v3",
+            "guarded_frozen_live_pose_v4",
+            "guarded_frozen_homogeneous_v5",
+        }:
+            geometry = PoseInitializer._keyframe_pose_reference_geometry(
+                keyframe,
+                verification_evidence=verification_evidence,
+            )
+            snapshot = getattr(
+                keyframe,
+                "_pose_verification_geometry_snapshot",
+                None,
+            )
+            used_snapshot = bool(
+                snapshot is not None
+                and mode
+                in {
+                    "frozen_first_valid_v1",
+                    "frozen_verification_only_v2",
+                    "frozen_global_support_guard_v6",
+                }
+                and (
+                    verification_evidence
+                    or mode != "frozen_verification_only_v2"
+                )
+            )
+            return (
+                *geometry,
+                live_Rt,
+                used_snapshot,
+                {
+                    "reason": (
+                        "legacy_frozen_geometry"
+                        if used_snapshot
+                        else "live_geometry"
+                    ),
+                    "live_support": None,
+                    "frozen_support": None,
+                    "required_frozen_support": None,
+                },
+            )
+
+        snapshot_marker = getattr(
+            keyframe,
+            "_pose_verification_geometry_snapshot",
+            ...
+        )
+        snapshot_getter = getattr(
+            keyframe,
+            "get_pose_verification_geometry",
+            None,
+        )
+        if snapshot_marker is None or not callable(snapshot_getter):
+            return (
+                *live_geometry,
+                live_Rt,
+                False,
+                {
+                    "reason": "frozen_snapshot_unavailable",
+                    "live_support": None,
+                    "frozen_support": 0,
+                    "required_frozen_support": None,
+                },
+            )
+
+        frozen_geometry = snapshot_getter()
+        frozen_points, frozen_confidence, frozen_mask = frozen_geometry
+        live_points, live_confidence, live_mask = live_geometry
+        if (
+            frozen_mask.shape[0] != live_mask.shape[0]
+            or matched_indices.numel() == 0
+        ):
+            return (
+                live_points,
+                live_confidence,
+                live_mask,
+                live_Rt,
+                False,
+                {
+                    "reason": (
+                        "frozen_geometry_shape_mismatch"
+                        if frozen_mask.shape[0] != live_mask.shape[0]
+                        else "no_current_matches"
+                    ),
+                    "live_support": 0,
+                    "frozen_support": 0,
+                    "required_frozen_support": None,
+                },
+            )
+
+        live_support = int(live_mask[matched_indices].sum().item())
+        frozen_support = int(frozen_mask[matched_indices].sum().item())
+        minimum_support = max(
+            0,
+            int(
+                getattr(
+                    keyframe,
+                    "_pose_verification_frozen_min_match_support",
+                    24,
+                )
+            ),
+        )
+        minimum_live_ratio = max(
+            0.0,
+            float(
+                getattr(
+                    keyframe,
+                    "_pose_verification_frozen_min_live_ratio",
+                    0.50,
+                )
+            ),
+        )
+        ratio_support = int(math.ceil(live_support * minimum_live_ratio))
+        required_support = max(minimum_support, ratio_support)
+        debug = {
+            "live_support": live_support,
+            "frozen_support": frozen_support,
+            "required_frozen_support": required_support,
+            "minimum_match_support": minimum_support,
+            "minimum_live_ratio": minimum_live_ratio,
+        }
+        if frozen_support < required_support:
+            return (
+                live_points,
+                live_confidence,
+                live_mask,
+                live_Rt,
+                False,
+                {
+                    **debug,
+                    "reason": "frozen_support_too_low",
+                },
+            )
+
+        frozen_Rt_getter = getattr(
+            keyframe,
+            "get_pose_verification_geometry_Rt",
+            None,
+        )
+        frozen_Rt = (
+            frozen_Rt_getter()
+            if callable(frozen_Rt_getter)
+            else live_Rt
+        )
+        selected_Rt = (
+            live_Rt
+            if mode
+            in {
+                "guarded_frozen_live_pose_v4",
+                "guarded_frozen_homogeneous_v5",
+            }
+            else frozen_Rt
+        )
+        if mode == "guarded_frozen_live_pose_v4":
+            reason = "frozen_support_guard_passed_live_pose"
+        elif mode == "guarded_frozen_homogeneous_v5":
+            reason = "frozen_support_guard_passed_homogeneous_candidate"
+        else:
+            reason = "frozen_support_guard_passed"
+        return (
+            frozen_points,
+            frozen_confidence,
+            frozen_mask,
+            selected_Rt,
+            True,
+            {
+                **debug,
+                "reason": reason,
+            },
+        )
+
+    @staticmethod
+    def _select_guarded_frozen_frame_policy(
+        candidate_supports: list[int],
+        *,
+        total_reference_count: int,
+        min_reference_count: int,
+        min_total_support: int,
+    ) -> tuple[str, list[int], dict]:
+        normalized_supports = [
+            max(0, int(value)) for value in candidate_supports
+        ]
+        candidate_indices = [
+            index
+            for index, support in enumerate(normalized_supports)
+            if support > 0
+        ]
+        candidate_total_support = sum(
+            normalized_supports[index] for index in candidate_indices
+        )
+        required_references = max(1, int(min_reference_count))
+        required_total_support = max(4, int(min_total_support))
+        use_frozen_subset = bool(
+            len(candidate_indices) >= required_references
+            and candidate_total_support >= required_total_support
+        )
+        debug = {
+            "mode": (
+                "frozen_subset"
+                if use_frozen_subset
+                else "live_fallback"
+            ),
+            "candidate_reference_count": len(candidate_indices),
+            "candidate_total_support": candidate_total_support,
+            "required_reference_count": required_references,
+            "required_total_support": required_total_support,
+            "total_reference_count": max(0, int(total_reference_count)),
+        }
+        if use_frozen_subset:
+            return "frozen_subset", candidate_indices, debug
+        return (
+            "live_fallback",
+            list(range(max(0, int(total_reference_count)))),
+            debug,
+        )
+
+    @staticmethod
+    def _select_frozen_global_support_policy(
+        candidate_supports: list[int],
+        *,
+        all_snapshots_available: bool,
+        total_reference_count: int,
+        min_total_support: int,
+    ) -> tuple[str, list[int], dict]:
+        normalized_supports = [
+            max(0, int(value)) for value in candidate_supports
+        ]
+        reference_count = max(0, int(total_reference_count))
+        candidate_total_support = sum(normalized_supports)
+        required_total_support = max(4, int(min_total_support))
+        use_all_frozen = bool(
+            all_snapshots_available
+            and len(normalized_supports) == reference_count
+            and candidate_total_support >= required_total_support
+        )
+        debug = {
+            "mode": "frozen_all" if use_all_frozen else "live_fallback",
+            "candidate_total_support": candidate_total_support,
+            "required_total_support": required_total_support,
+            "total_reference_count": reference_count,
+            "all_snapshots_available": bool(all_snapshots_available),
+        }
+        indices = list(range(reference_count))
+        return (
+            "frozen_all" if use_all_frozen else "live_fallback",
+            indices,
+            debug,
+        )
 
     def _record_incremental_pose_support(
         self,
@@ -129,6 +621,8 @@ class PoseInitializer():
         pts_conf: torch.Tensor,
         uvs: torch.Tensor,
         corr_ref_ids: torch.Tensor,
+        ref_uvs: torch.Tensor | None = None,
+        ref_Rts: torch.Tensor | None = None,
     ) -> None:
         self.last_incremental_pose_candidates = {
             "match_indices": match_indices.detach().clone(),
@@ -137,6 +631,491 @@ class PoseInitializer():
             "uvs": uvs.detach().clone(),
             "corr_ref_ids": corr_ref_ids.detach().clone(),
         }
+        if isinstance(ref_uvs, torch.Tensor):
+            self.last_incremental_pose_candidates["ref_uvs"] = (
+                ref_uvs.detach().clone()
+            )
+        if isinstance(ref_Rts, torch.Tensor):
+            self.last_incremental_pose_candidates["ref_Rts"] = (
+                ref_Rts.detach().clone()
+            )
+
+    def _run_incremental_pose_with_direct_retry_v18(
+        self,
+        *,
+        keyframes: list[Keyframe],
+        index: int,
+        is_test: bool,
+        pnp_xyz: torch.Tensor,
+        pnp_uvs: torch.Tensor,
+        pnp_confs: torch.Tensor,
+        pnp_match_indices: torch.Tensor,
+        pnp_corr_ref_ids: torch.Tensor,
+        reference_initial_Rt: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Run the locked pose-safe v18 retry and hypothesis policy."""
+        rotation_init = reference_initial_Rt[:3, :2]
+        translation_init = reference_initial_Rt[:3, 3]
+
+        def clone_support() -> dict[str, torch.Tensor]:
+            return {
+                key: (
+                    value.detach().clone()
+                    if isinstance(value, torch.Tensor)
+                    else value
+                )
+                for key, value in self.last_incremental_pose_support.items()
+            }
+
+        def restore_support(support: dict[str, torch.Tensor]) -> None:
+            self.last_incremental_pose_support = {
+                key: (
+                    value.detach().clone()
+                    if isinstance(value, torch.Tensor)
+                    else value
+                )
+                for key, value in support.items()
+            }
+
+        def motion_debug(pose: torch.Tensor) -> dict[str, float]:
+            relative_rotation = (
+                pose[:3, :3] @ reference_initial_Rt[:3, :3].transpose(0, 1)
+            )
+            trace = torch.trace(relative_rotation).clamp(-1.0, 3.0)
+            cosine = ((trace - 1.0) * 0.5).clamp(-1.0, 1.0)
+            rotation_deg = float(
+                torch.rad2deg(torch.arccos(cosine)).item()
+            )
+            translation = float(
+                torch.linalg.vector_norm(
+                    pose[:3, 3] - reference_initial_Rt[:3, 3]
+                ).item()
+            )
+            return {
+                "direct_pose_motion_rotation_deg": rotation_deg,
+                "direct_pose_motion_translation": translation,
+            }
+
+        def select_pnp_sample() -> tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ]:
+            if len(pnp_xyz) > self.num_pts_pnpransac:
+                selected = torch.multinomial(
+                    pnp_confs,
+                    self.num_pts_miniba_incr,
+                    replacement=False,
+                )
+                return (
+                    pnp_xyz[selected],
+                    pnp_uvs[selected],
+                    pnp_confs[selected],
+                    pnp_match_indices[selected],
+                    pnp_corr_ref_ids[selected],
+                )
+            return (
+                pnp_xyz,
+                pnp_uvs,
+                pnp_confs,
+                pnp_match_indices,
+                pnp_corr_ref_ids,
+            )
+
+        def run_pose_attempt(attempt_id: int) -> torch.Tensor | None:
+            self.last_incremental_debug[
+                "direct_pose_retry_attempt_id"
+            ] = int(attempt_id)
+            (
+                xyz,
+                uvs,
+                confs,
+                match_indices,
+                corr_ref_ids,
+            ) = select_pnp_sample()
+            self.last_incremental_debug[
+                "num_pnp_candidate_correspondences"
+            ] = int(len(xyz))
+            self.last_incremental_debug["num_pts_pnpransac"] = int(
+                self.num_pts_pnpransac
+            )
+            try:
+                pnp_Rt, inliers = self.PnPRANSAC(
+                    uvs,
+                    xyz,
+                    self.f,
+                    self.centre,
+                    rotation_init,
+                    translation_init,
+                    confs,
+                )
+            except Exception:
+                self.last_incremental_debug[
+                    "failure_reason"
+                ] = "pnp_ransac_exception"
+                return None
+
+            inliers = inliers.to(dtype=torch.bool)
+            self._last_pnp_Rt = pnp_Rt.clone()
+            self.last_incremental_debug["pnp_candidate_Rt"] = (
+                pnp_Rt.detach().cpu().tolist()
+            )
+            xyz = xyz[inliers]
+            uvs = uvs[inliers]
+            confs = confs[inliers]
+            match_indices = match_indices[inliers]
+            corr_ref_ids = corr_ref_ids[inliers]
+            self.last_incremental_debug["num_pnp_inliers"] = int(len(xyz))
+            pnp_reference_ids = sorted(
+                {int(value) for value in corr_ref_ids.detach().cpu().tolist()}
+            )
+            self.last_incremental_debug[
+                "pnp_ref_keyframe_ids"
+            ] = pnp_reference_ids
+            self.last_incremental_debug[
+                "pnp_ref_source_frame_ids"
+            ] = [
+                int(
+                    keyframe.info.get(
+                        "_paper_aligned_source_frame_id",
+                        keyframe.index,
+                    )
+                )
+                for keyframe in keyframes
+                if int(keyframe.index) in pnp_reference_ids
+            ]
+            self.last_incremental_debug["pnp_ref_contains_seed"] = any(
+                bool(
+                    keyframe.info.get(
+                        "_paper_aligned_is_v7_early_seed",
+                        False,
+                    )
+                )
+                for keyframe in keyframes
+                if int(keyframe.index) in pnp_reference_ids
+            )
+            if len(xyz) < 4:
+                self.last_incremental_debug[
+                    "failure_reason"
+                ] = "pnp_inliers_too_few"
+                return None
+
+            selected_indices: torch.Tensor | None = None
+            if len(xyz) >= self.num_pts_miniba_incr:
+                selected_indices = torch.topk(
+                    torch.rand_like(xyz[..., 0]),
+                    self.num_pts_miniba_incr,
+                    dim=0,
+                    largest=False,
+                )[1]
+                xyz_ba = xyz[selected_indices]
+                uvs_ba = uvs[selected_indices]
+                confs_ba = confs[selected_indices]
+                match_indices_ba = match_indices[selected_indices]
+                corr_ref_ids_ba = corr_ref_ids[selected_indices]
+                miniba_reference_ids_tensor = corr_ref_ids_ba
+            else:
+                padding = self.num_pts_miniba_incr - len(xyz)
+                xyz_ba = torch.cat(
+                    [
+                        xyz,
+                        torch.zeros(
+                            padding,
+                            3,
+                            device=xyz.device,
+                            dtype=xyz.dtype,
+                        ),
+                    ],
+                    dim=0,
+                )
+                uvs_ba = torch.cat(
+                    [
+                        uvs,
+                        -torch.ones(
+                            padding,
+                            2,
+                            device=uvs.device,
+                            dtype=uvs.dtype,
+                        ),
+                    ],
+                    dim=0,
+                )
+                confs_ba = torch.cat(
+                    [
+                        confs,
+                        torch.zeros(
+                            padding,
+                            device=confs.device,
+                            dtype=confs.dtype,
+                        ),
+                    ],
+                    dim=0,
+                )
+                match_indices_ba = torch.cat(
+                    [
+                        match_indices,
+                        -torch.ones(
+                            padding,
+                            device=match_indices.device,
+                            dtype=match_indices.dtype,
+                        ),
+                    ],
+                    dim=0,
+                )
+                corr_ref_ids_ba = torch.cat(
+                    [
+                        corr_ref_ids,
+                        -torch.ones(
+                            padding,
+                            device=corr_ref_ids.device,
+                            dtype=corr_ref_ids.dtype,
+                        ),
+                    ],
+                    dim=0,
+                )
+                miniba_reference_ids_tensor = corr_ref_ids
+
+            miniba_reference_ids = sorted(
+                {
+                    int(value)
+                    for value in miniba_reference_ids_tensor.detach()
+                    .cpu()
+                    .tolist()
+                }
+            )
+            self.last_incremental_debug[
+                "miniba_ref_keyframe_ids"
+            ] = miniba_reference_ids
+            self.last_incremental_debug[
+                "miniba_ref_source_frame_ids"
+            ] = [
+                int(
+                    keyframe.info.get(
+                        "_paper_aligned_source_frame_id",
+                        keyframe.index,
+                    )
+                )
+                for keyframe in keyframes
+                if int(keyframe.index) in miniba_reference_ids
+            ]
+            self.last_incremental_debug["miniba_ref_contains_seed"] = any(
+                bool(
+                    keyframe.info.get(
+                        "_paper_aligned_is_v7_early_seed",
+                        False,
+                    )
+                )
+                for keyframe in keyframes
+                if int(keyframe.index) in miniba_reference_ids
+            )
+
+            rotations = pnp_Rt[:3, :2][None]
+            translations = pnp_Rt[:3, 3][None]
+            (
+                rotations,
+                translations,
+                _,
+                _,
+                miniba_residuals,
+                _,
+                miniba_mask,
+            ) = self.miniBA_incr(
+                rotations,
+                translations,
+                self.f,
+                xyz_ba,
+                self.centre,
+                uvs_ba.view(-1),
+            )
+            miniba_count = int(miniba_mask.sum().item())
+            self.last_incremental_debug[
+                "num_miniba_inliers"
+            ] = miniba_count
+            mask_sum = miniba_mask.sum()
+            if int(mask_sum.item()) > 0:
+                miniba_residual = float(
+                    (
+                        (miniba_residuals * miniba_mask).abs().sum()
+                        / mask_sum
+                    )
+                    .detach()
+                    .cpu()
+                    .item()
+                )
+            else:
+                miniba_residual = float("inf")
+            self.last_incremental_debug[
+                "direct_pose_miniba_residual"
+            ] = miniba_residual
+
+            pose = torch.eye(
+                4,
+                device=pnp_Rt.device,
+                dtype=pnp_Rt.dtype,
+            )
+            pose[:3, :3] = sixD2mtx(rotations)[0]
+            pose[:3, 3] = translations[0]
+            self.last_incremental_debug["miniba_candidate_Rt"] = (
+                pose.detach().cpu().tolist()
+            )
+            self.last_incremental_debug.update(motion_debug(pose))
+            self.last_incremental_debug[
+                "direct_pose_candidate_score"
+            ] = score_direct_pose_candidate_v18(
+                self.last_incremental_debug
+            )
+
+            if miniba_count > self.min_num_inliers:
+                valid_ba = uvs_ba[:, 0] >= 0
+                if bool(valid_ba.any()):
+                    self._record_incremental_pose_support(
+                        match_indices_ba[valid_ba],
+                        xyz_ba[valid_ba],
+                        confs_ba[valid_ba],
+                        uvs_ba[valid_ba],
+                        corr_ref_ids_ba[valid_ba],
+                    )
+                self.last_incremental_debug["failure_reason"] = ""
+                return pose
+
+            self.last_incremental_debug[
+                "failure_reason"
+            ] = "miniba_inliers_too_few"
+            return None
+
+        self.last_incremental_debug["pose_direct_retry_mode"] = (
+            "pose_safe_v18"
+        )
+        self.last_incremental_debug["direct_pose_retry_applied"] = False
+        self.last_incremental_debug["direct_pose_retry_success"] = False
+        self.last_incremental_debug["direct_pose_retry_attempts"] = 0
+        self.last_incremental_debug[
+            "direct_pose_multi_hypothesis_applied"
+        ] = False
+        self.last_incremental_debug[
+            "direct_pose_multi_hypothesis_attempts"
+        ] = 0
+
+        pose = run_pose_attempt(0)
+        if pose is not None:
+            best_pose = pose
+            best_debug = dict(self.last_incremental_debug)
+            best_support = clone_support()
+            if should_run_direct_pose_multi_hypothesis_v18(
+                best_debug,
+                min_2d3d=self.direct_pose_multi_hypothesis_min_2d3d,
+                min_pnp_inliers=(
+                    self.direct_pose_multi_hypothesis_min_pnp_inliers
+                ),
+                max_pnp_inlier_ratio=(
+                    self.direct_pose_multi_hypothesis_max_pnp_ratio
+                ),
+                max_miniba_residual=(
+                    self.direct_pose_multi_hypothesis_max_miniba_residual
+                ),
+            ):
+                best_score = score_direct_pose_candidate_v18(best_debug)
+                for retry_id in range(
+                    1,
+                    self.direct_pose_multi_hypothesis_attempts + 1,
+                ):
+                    self.last_incremental_debug = dict(best_debug)
+                    candidate_pose = run_pose_attempt(retry_id)
+                    self.last_incremental_debug[
+                        "direct_pose_multi_hypothesis_attempts"
+                    ] = retry_id
+                    if candidate_pose is None:
+                        continue
+                    candidate_debug = dict(self.last_incremental_debug)
+                    candidate_score = score_direct_pose_candidate_v18(
+                        candidate_debug
+                    )
+                    if (
+                        candidate_score > best_score
+                        and should_accept_direct_pose_candidate_v18(
+                            best_debug,
+                            candidate_debug,
+                        )
+                    ):
+                        best_score = candidate_score
+                        best_pose = candidate_pose
+                        best_debug = candidate_debug
+                        best_support = clone_support()
+                self.last_incremental_debug = dict(best_debug)
+                restore_support(best_support)
+                self.last_incremental_debug[
+                    "direct_pose_multi_hypothesis_applied"
+                ] = True
+                self.last_incremental_debug[
+                    "direct_pose_multi_hypothesis_attempts"
+                ] = self.direct_pose_multi_hypothesis_attempts
+                self.last_incremental_debug[
+                    "direct_pose_multi_hypothesis_selected_score"
+                ] = score_direct_pose_candidate_v18(
+                    self.last_incremental_debug
+                )
+            return best_pose
+
+        initial_failure_reason = str(
+            self.last_incremental_debug.get("failure_reason", "") or ""
+        )
+        initial_pnp_inliers = int(
+            self.last_incremental_debug.get("num_pnp_inliers", 0) or 0
+        )
+        initial_miniba_inliers = int(
+            self.last_incremental_debug.get("num_miniba_inliers", 0) or 0
+        )
+        if should_retry_direct_pose_initialization_v18(
+            self.last_incremental_debug,
+            is_test=is_test,
+            retry_test_frames=self.direct_pose_retry_test_frames,
+            min_2d3d=self.direct_pose_retry_min_2d3d,
+            min_pnp_inliers=self.direct_pose_retry_min_pnp_inliers,
+        ):
+            self.last_incremental_debug["direct_pose_retry_applied"] = True
+            self.last_incremental_debug[
+                "direct_pose_retry_initial_failure_reason"
+            ] = initial_failure_reason
+            self.last_incremental_debug[
+                "direct_pose_retry_initial_pnp_inliers"
+            ] = initial_pnp_inliers
+            self.last_incremental_debug[
+                "direct_pose_retry_initial_miniba_inliers"
+            ] = initial_miniba_inliers
+            for retry_id in range(1, self.direct_pose_retry_attempts + 1):
+                self.last_incremental_debug[
+                    "direct_pose_retry_attempts"
+                ] = retry_id
+                pose = run_pose_attempt(retry_id)
+                if pose is not None:
+                    self.last_incremental_debug[
+                        "direct_pose_retry_success"
+                    ] = True
+                    self.last_incremental_debug[
+                        "direct_pose_retry_success_attempt"
+                    ] = retry_id
+                    return pose
+                if not should_retry_direct_pose_initialization_v18(
+                    self.last_incremental_debug,
+                    is_test=is_test,
+                    retry_test_frames=self.direct_pose_retry_test_frames,
+                    min_2d3d=self.direct_pose_retry_min_2d3d,
+                    min_pnp_inliers=self.direct_pose_retry_min_pnp_inliers,
+                ):
+                    break
+
+        if (
+            str(
+                self.last_incremental_debug.get("failure_reason", "") or ""
+            )
+            == "miniba_inliers_too_few"
+        ):
+            print("Too few inliers for pose initialization")
+        for keyframe in keyframes:
+            keyframe.desc_kpts.matches.pop(index, None)
+        return None
 
     def build_problem(self,
                       desc_kpts_list: list[DescribedKeypoints],
@@ -288,7 +1267,16 @@ class PoseInitializer():
         return Rts, f, final_residual
 
     @torch.no_grad()
-    def initialize_incremental(self, keyframes: list[Keyframe], curr_desc_kpts: DescribedKeypoints, index: int, is_test: bool, curr_img):
+    def initialize_incremental(
+        self,
+        keyframes: list[Keyframe],
+        curr_desc_kpts: DescribedKeypoints,
+        index: int,
+        is_test: bool,
+        curr_img,
+        sampling_seed: int | None = None,
+        registration_solver_mode: str = "baseline_cuda_v1",
+    ):
         """
         【位姿估计模块】增量位姿初始化
         
@@ -310,6 +1298,17 @@ class PoseInitializer():
         """
         self.last_incremental_pose_support = {}
         self.last_incremental_pose_candidates = {}
+        normalized_registration_solver_mode = str(
+            registration_solver_mode or "baseline_cuda_v1"
+        ).strip().lower()
+        if normalized_registration_solver_mode not in {
+            "baseline_cuda_v1",
+            "deterministic_opencv_v2",
+        }:
+            raise ValueError(
+                "Unsupported pose registration solver mode: "
+                f"{registration_solver_mode}"
+            )
         self.last_incremental_debug = {
             "failure_reason": "",
             "num_2d3d_correspondences": 0,
@@ -333,6 +1332,17 @@ class PoseInitializer():
             "miniba_ref_keyframe_ids": [],
             "miniba_ref_source_frame_ids": [],
             "miniba_ref_contains_seed": False,
+            "reference_geometry_mode_by_ref": [],
+            "reference_geometry_guard_by_ref": [],
+            "frozen_reference_count": 0,
+            "guarded_frozen_reference_count": 0,
+            "guarded_live_fallback_count": 0,
+            "guarded_frame_geometry_policy": "per_reference",
+            "guarded_frame_geometry_debug": {},
+            "sampling_seed": (
+                int(sampling_seed) if sampling_seed is not None else None
+            ),
+            "registration_solver_mode": normalized_registration_solver_mode,
         }
 
         # Match the current frame with previous keyframes
@@ -342,12 +1352,280 @@ class PoseInitializer():
         confs = []
         match_indices = []
         corr_ref_ids = []
-        for keyframe in keyframes:
-            # 匹配当前帧与历史关键帧并过滤外点
-            matches = self.matcher(curr_desc_kpts, keyframe.desc_kpts, remove_outliers=True, update_kpts_flag="all", kID=index, kID_other=keyframe.index)
+        verification_xyz = []
+        verification_uvs = []
+        verification_confs = []
+        verification_match_indices = []
+        verification_corr_ref_ids = []
+        verification_ref_uvs = []
+        verification_ref_Rts = []
+        initial_ref_Rts = []
+        global_support_mode = any(
+            str(
+                getattr(
+                    keyframe,
+                    "_pose_verification_geometry_snapshot_mode",
+                    "off",
+                )
+            )
+            == "frozen_global_support_guard_v6"
+            for keyframe in keyframes
+        )
+        homogeneous_mode = global_support_mode or any(
+            str(
+                getattr(
+                    keyframe,
+                    "_pose_verification_geometry_snapshot_mode",
+                    "off",
+                )
+            )
+            == "guarded_frozen_homogeneous_v5"
+            for keyframe in keyframes
+        )
+        homogeneous_records = None
+        if homogeneous_mode:
+            candidate_records = []
+            for keyframe in keyframes:
+                matches = self.matcher(
+                    curr_desc_kpts,
+                    keyframe.desc_kpts,
+                    remove_outliers=True,
+                    update_kpts_flag="all",
+                    kID=index,
+                    kID_other=keyframe.index,
+                )
+                reference_bundle = self._keyframe_pose_reference_bundle(
+                    keyframe,
+                    matches.idx_other,
+                    verification_evidence=False,
+                )
+                verification_bundle = self._keyframe_pose_reference_bundle(
+                    keyframe,
+                    matches.idx_other,
+                    verification_evidence=True,
+                )
+                candidate_records.append(
+                    (
+                        keyframe,
+                        matches,
+                        reference_bundle,
+                        verification_bundle,
+                    )
+                )
 
-            mask = keyframe.desc_kpts.has_pt3d[matches.idx_other]
+            candidate_supports = [
+                int(
+                    record[2][2][record[1].idx_other]
+                    .sum()
+                    .item()
+                )
+                if bool(record[2][4])
+                else 0
+                for record in candidate_records
+            ]
+            policy_keyframe = keyframes[0]
+            if global_support_mode:
+                (
+                    frame_policy,
+                    selected_record_indices,
+                    frame_policy_debug,
+                ) = self._select_frozen_global_support_policy(
+                    candidate_supports,
+                    all_snapshots_available=all(
+                        bool(record[2][4])
+                        for record in candidate_records
+                    ),
+                    total_reference_count=len(candidate_records),
+                    min_total_support=int(
+                        getattr(
+                            policy_keyframe,
+                            "_pose_verification_frozen_min_total_support",
+                            24,
+                        )
+                    ),
+                )
+            else:
+                (
+                    frame_policy,
+                    selected_record_indices,
+                    frame_policy_debug,
+                ) = self._select_guarded_frozen_frame_policy(
+                    candidate_supports,
+                    total_reference_count=len(candidate_records),
+                    min_reference_count=int(
+                        getattr(
+                            policy_keyframe,
+                            "_pose_verification_frozen_min_reference_count",
+                            2,
+                        )
+                    ),
+                    min_total_support=int(
+                        getattr(
+                            policy_keyframe,
+                            "_pose_verification_frozen_min_total_support",
+                            48,
+                        )
+                    ),
+                )
+            self.last_incremental_debug[
+                "guarded_frame_geometry_policy"
+            ] = frame_policy
+            self.last_incremental_debug[
+                "guarded_frame_geometry_debug"
+            ] = frame_policy_debug
+            if frame_policy in {"frozen_subset", "frozen_all"}:
+                homogeneous_records = [
+                    candidate_records[record_index]
+                    for record_index in selected_record_indices
+                ]
+            else:
+                homogeneous_records = []
+                for (
+                    keyframe,
+                    matches,
+                    reference_bundle,
+                    verification_bundle,
+                ) in candidate_records:
+                    live_geometry = (
+                        keyframe.desc_kpts.pts3d,
+                        keyframe.desc_kpts.pts_conf,
+                        keyframe.desc_kpts.has_pt3d,
+                    )
+                    live_Rt = self._keyframe_geometry_Rt(keyframe)
+                    reference_debug = {
+                        **reference_bundle[5],
+                        "candidate_reason": reference_bundle[5].get(
+                            "reason",
+                            "",
+                        ),
+                        "reason": "frame_homogeneous_live_fallback",
+                    }
+                    verification_debug = {
+                        **verification_bundle[5],
+                        "candidate_reason": verification_bundle[5].get(
+                            "reason",
+                            "",
+                        ),
+                        "reason": "frame_homogeneous_live_fallback",
+                    }
+                    homogeneous_records.append(
+                        (
+                            keyframe,
+                            matches,
+                            (
+                                *live_geometry,
+                                live_Rt,
+                                False,
+                                reference_debug,
+                            ),
+                            (
+                                *live_geometry,
+                                live_Rt,
+                                False,
+                                verification_debug,
+                            ),
+                        )
+                    )
+
+        reference_records = (
+            homogeneous_records
+            if homogeneous_records is not None
+            else (
+                (
+                    keyframe,
+                    self.matcher(
+                        curr_desc_kpts,
+                        keyframe.desc_kpts,
+                        remove_outliers=True,
+                        update_kpts_flag="all",
+                        kID=index,
+                        kID_other=keyframe.index,
+                    ),
+                    None,
+                    None,
+                )
+                for keyframe in keyframes
+            )
+        )
+        for (
+            keyframe,
+            matches,
+            reference_bundle,
+            verification_bundle,
+        ) in reference_records:
+            # 匹配当前帧与历史关键帧并过滤外点
+            if reference_bundle is None:
+                reference_bundle = self._keyframe_pose_reference_bundle(
+                    keyframe,
+                    matches.idx_other,
+                    verification_evidence=False,
+                )
+                verification_bundle = self._keyframe_pose_reference_bundle(
+                    keyframe,
+                    matches.idx_other,
+                    verification_evidence=True,
+                )
+
+            (
+                ref_points,
+                ref_confidence,
+                ref_has_point,
+                reference_Rt,
+                reference_used_snapshot,
+                reference_guard_debug,
+            ) = reference_bundle
+            (
+                verification_points,
+                verification_confidence,
+                verification_has_point,
+                verification_reference_Rt,
+                verification_used_snapshot,
+                verification_guard_debug,
+            ) = verification_bundle
+            snapshot_mode = str(
+                getattr(
+                    keyframe,
+                    "_pose_verification_geometry_snapshot_mode",
+                    "off",
+                )
+            )
+            reference_geometry_mode = (
+                snapshot_mode
+                if reference_used_snapshot or verification_used_snapshot
+                else "live"
+            )
+            self.last_incremental_debug[
+                "reference_geometry_mode_by_ref"
+            ].append(reference_geometry_mode)
+            self.last_incremental_debug[
+                "reference_geometry_guard_by_ref"
+            ].append(
+                {
+                    "initial": reference_guard_debug,
+                    "verification": verification_guard_debug,
+                }
+            )
+            if reference_geometry_mode != "live":
+                self.last_incremental_debug["frozen_reference_count"] += 1
+            if snapshot_mode in {
+                "guarded_frozen_v3",
+                "guarded_frozen_live_pose_v4",
+                "guarded_frozen_homogeneous_v5",
+                "frozen_global_support_guard_v6",
+            }:
+                if reference_used_snapshot:
+                    self.last_incremental_debug[
+                        "guarded_frozen_reference_count"
+                    ] += 1
+                else:
+                    self.last_incremental_debug[
+                        "guarded_live_fallback_count"
+                    ] += 1
+            initial_ref_Rts.append(reference_Rt)
+            mask = ref_has_point[matches.idx_other]
+            verification_mask = verification_has_point[matches.idx_other]
             valid_count = int(mask.sum().item())
+            verification_valid_count = int(verification_mask.sum().item())
             source_frame_id = int(keyframe.info.get("_paper_aligned_source_frame_id", keyframe.index))
             commit_origin = str(keyframe.info.get("_paper_aligned_commit_origin", "unknown"))
             is_recovery = commit_origin in {"true_recovery_commit", "early_seed_recovery_commit"}
@@ -368,11 +1646,41 @@ class PoseInitializer():
                 self.last_incremental_debug["best_match_num_matches"] = valid_count
                 self.last_incremental_debug["best_match_keyframe_id"] = int(keyframe.index)
                 self.last_incremental_debug["best_match_is_seed"] = is_seed
-            xyz.append(keyframe.desc_kpts.pts3d[matches.idx_other[mask]])
+            xyz.append(ref_points[matches.idx_other[mask]])
             uvs.append(matches.kpts[mask])
-            confs.append(keyframe.desc_kpts.pts_conf[matches.idx_other[mask]])
+            confs.append(ref_confidence[matches.idx_other[mask]])
             match_indices.append(matches.idx[mask])
             corr_ref_ids.append(torch.full((valid_count,), int(keyframe.index), device="cuda", dtype=torch.long))
+            verification_xyz.append(
+                verification_points[matches.idx_other[verification_mask]]
+            )
+            verification_uvs.append(matches.kpts[verification_mask])
+            verification_confs.append(
+                verification_confidence[
+                    matches.idx_other[verification_mask]
+                ]
+            )
+            verification_match_indices.append(matches.idx[verification_mask])
+            verification_corr_ref_ids.append(
+                torch.full(
+                    (verification_valid_count,),
+                    int(keyframe.index),
+                    device="cuda",
+                    dtype=torch.long,
+                )
+            )
+            verification_ref_uvs.append(
+                keyframe.desc_kpts.kpts[
+                    matches.idx_other[verification_mask]
+                ]
+            )
+            verification_ref_Rts.append(
+                verification_reference_Rt[None].expand(
+                    verification_valid_count,
+                    -1,
+                    -1,
+                )
+            )
 
         if len(xyz) == 0:
             self.last_incremental_debug["failure_reason"] = "no_2d3d_correspondences"
@@ -382,20 +1690,56 @@ class PoseInitializer():
         confs = torch.cat(confs, dim=0)
         match_indices = torch.cat(match_indices, dim=0)
         corr_ref_ids = torch.cat(corr_ref_ids, dim=0)
+        verification_xyz = torch.cat(verification_xyz, dim=0)
+        verification_uvs = torch.cat(verification_uvs, dim=0)
+        verification_confs = torch.cat(verification_confs, dim=0)
+        verification_match_indices = torch.cat(
+            verification_match_indices,
+            dim=0,
+        )
+        verification_corr_ref_ids = torch.cat(
+            verification_corr_ref_ids,
+            dim=0,
+        )
+        verification_ref_uvs = torch.cat(verification_ref_uvs, dim=0)
+        verification_ref_Rts = torch.cat(verification_ref_Rts, dim=0)
+        sampling_generator = None
+        if sampling_seed is not None:
+            sampling_generator = torch.Generator(device=xyz.device)
+            sampling_generator.manual_seed(int(sampling_seed))
         self.last_incremental_debug["num_2d3d_correspondences"] = int(len(xyz))
         self._record_incremental_pose_candidates(
-            match_indices,
-            xyz,
-            confs,
-            uvs,
-            corr_ref_ids,
+            verification_match_indices,
+            verification_xyz,
+            verification_confs,
+            verification_uvs,
+            verification_corr_ref_ids,
+            verification_ref_uvs,
+            verification_ref_Rts,
         )
+        if self.pose_direct_retry_mode == "pose_safe_v18":
+            return self._run_incremental_pose_with_direct_retry_v18(
+                keyframes=keyframes,
+                index=index,
+                is_test=is_test,
+                pnp_xyz=xyz,
+                pnp_uvs=uvs,
+                pnp_confs=confs,
+                pnp_match_indices=match_indices,
+                pnp_corr_ref_ids=corr_ref_ids,
+                reference_initial_Rt=initial_ref_Rts[0],
+            )
 
         # Subsample the points if there are too many
         # 先按置信度采样控制 PnP 输入规模
         if len(xyz) > self.num_pts_pnpransac:
             # 按置信度随机下采样，避免单帧点过多
-            selected_indices = torch.multinomial(confs, self.num_pts_miniba_incr, replacement=False)
+            selected_indices = torch.multinomial(
+                confs,
+                self.num_pts_miniba_incr,
+                replacement=False,
+                generator=sampling_generator,
+            )
             xyz = xyz[selected_indices]
             uvs = uvs[selected_indices]
             confs = confs[selected_indices]
@@ -404,16 +1748,86 @@ class PoseInitializer():
 
         # Estimate an initial camera pose and inliers using PnP RANSAC
         # 使用上一关键帧作为初始位姿
-        Rs6D_init = keyframes[0].rW2C
-        ts_init = keyframes[0].tW2C
+        reference_initial_Rt = initial_ref_Rts[0]
+        Rs6D_init = reference_initial_Rt[:3, :2]
+        ts_init = reference_initial_Rt[:3, 3]
         if len(xyz) < 4:
             self.last_incremental_debug["failure_reason"] = "insufficient_correspondences_for_pnp"
             return None
-        try:
-            Rt, inliers = self.PnPRANSAC(uvs, xyz, self.f, self.centre, Rs6D_init, ts_init, confs)
-        except Exception:
-            self.last_incremental_debug["failure_reason"] = "pnp_ransac_exception"
-            return None
+        Rt = None
+        inliers = None
+        if normalized_registration_solver_mode == "deterministic_opencv_v2":
+            try:
+                opencv_candidates, opencv_debug = (
+                    estimate_opencv_pnp_candidates(
+                        xyz,
+                        uvs,
+                        focal=self.f,
+                        centre=self.centre,
+                        initial_pose=reference_initial_Rt,
+                        max_reprojection_error=float(self.max_pnp_error),
+                    )
+                )
+                selected_candidate, ranking_debug = (
+                    select_pose_candidate_by_reprojection(
+                        opencv_candidates,
+                        xyz,
+                        uvs,
+                        focal=self.f,
+                        centre=self.centre,
+                        max_reprojection_error=float(self.max_pnp_error),
+                    )
+                )
+                self.last_incremental_debug["opencv_registration"] = {
+                    **opencv_debug,
+                    "ranking": ranking_debug,
+                }
+                if selected_candidate is not None:
+                    Rt = selected_candidate["pose"]
+                    inliers = selected_candidate["inlier_mask"]
+                    self.last_incremental_debug[
+                        "registration_solver_selected"
+                    ] = str(selected_candidate["name"])
+            except Exception as exc:
+                self.last_incremental_debug["opencv_registration"] = {
+                    "reason": "exception",
+                    "exception_type": type(exc).__name__,
+                }
+        if Rt is None or inliers is None:
+            self.last_incremental_debug[
+                "registration_solver_fallback"
+            ] = bool(
+                normalized_registration_solver_mode
+                == "deterministic_opencv_v2"
+            )
+            try:
+                pnp_kwargs = (
+                    {"generator": sampling_generator}
+                    if sampling_generator is not None
+                    else {}
+                )
+                Rt, inliers = self.PnPRANSAC(
+                    uvs,
+                    xyz,
+                    self.f,
+                    self.centre,
+                    Rs6D_init,
+                    ts_init,
+                    confs,
+                    **pnp_kwargs,
+                )
+                self.last_incremental_debug[
+                    "registration_solver_selected"
+                ] = "baseline_cuda_pnp"
+            except Exception:
+                self.last_incremental_debug[
+                    "failure_reason"
+                ] = "pnp_ransac_exception"
+                return None
+        self._last_pnp_Rt = Rt.clone()
+        self.last_incremental_debug["pnp_candidate_Rt"] = (
+            Rt.detach().cpu().tolist()
+        )
 
         xyz = xyz[inliers]
         uvs = uvs[inliers]
@@ -440,7 +1854,18 @@ class PoseInitializer():
         # Subsample the points if there are too many
         # 为 miniBA 填充固定数量的点
         if len(xyz) >= self.num_pts_miniba_incr:
-            selected_indices = torch.topk(torch.rand_like(xyz[..., 0]), self.num_pts_miniba_incr, dim=0, largest=False)[1]
+            random_scores = torch.rand(
+                xyz[..., 0].shape,
+                device=xyz.device,
+                dtype=xyz.dtype,
+                generator=sampling_generator,
+            )
+            selected_indices = torch.topk(
+                random_scores,
+                self.num_pts_miniba_incr,
+                dim=0,
+                largest=False,
+            )[1]
             xyz_ba = xyz[selected_indices]
             uvs_ba = uvs[selected_indices]
             miniba_ref_ids_tensor = corr_ref_ids[selected_indices]
@@ -481,6 +1906,9 @@ class PoseInitializer():
         Rt = torch.eye(4, device="cuda")
         Rt[:3, :3] = sixD2mtx(Rs6D)[0]
         Rt[:3, 3] = ts[0]
+        self.last_incremental_debug["miniba_candidate_Rt"] = (
+            Rt.detach().cpu().tolist()
+        )
 
         # Check if we have sufficiently many inliers
         # 训练阶段要求足够内点以避免错误注册
@@ -550,10 +1978,26 @@ class PoseInitializer():
         max_p90_ratio: float = 1.01,
         min_support_ratio: float = 0.80,
         independent_validation: bool = False,
+        candidate_mode: str = "single_v2",
+        max_temporal_score_ratio: float = float("inf"),
+        pose_evidence_override: dict[str, object] | None = None,
+        pose_evidence_pre_error_scale: float = 1.0,
+        sampling_seed: int | None = None,
     ) -> tuple[torch.Tensor, dict[str, object]]:
         """Risk-triggered pose-only MiniBA verification with exact fallback."""
         started = time.perf_counter()
         event = dict(risk_event or {})
+        normalized_candidate_mode = str(candidate_mode or "single_v2").strip().lower()
+        if normalized_candidate_mode not in {
+            "single_v2",
+            "balanced_step_v21",
+            "balanced_epipolar_v22",
+            "multihypothesis_v23",
+            "multiview_relative_v24",
+        }:
+            raise ValueError(
+                f"Unsupported pose verification candidate mode: {candidate_mode}"
+            )
         debug: dict[str, object] = {
             "triggered": bool(event.get("verification_trigger", False)),
             "attempted": False,
@@ -561,6 +2005,10 @@ class PoseInitializer():
             "reason": "risk_not_triggered",
             "risk_score": float(event.get("risk_score", 0.0) or 0.0),
             "independent_validation": bool(independent_validation),
+            "candidate_mode": normalized_candidate_mode,
+            "sampling_seed": (
+                int(sampling_seed) if sampling_seed is not None else None
+            ),
         }
         if not debug["triggered"]:
             debug["runtime_seconds"] = time.perf_counter() - started
@@ -570,12 +2018,19 @@ class PoseInitializer():
             getattr(self, "last_incremental_pose_candidates", {}) or {}
         )
         support = dict(getattr(self, "last_incremental_pose_support", {}) or {})
-        candidate_source = "full_2d3d" if candidates else "miniba_support"
-        pose_evidence = candidates or support
+        override = dict(pose_evidence_override or {})
+        if override:
+            candidate_source = "stable_anchor_2d3d"
+            pose_evidence = override
+        else:
+            candidate_source = "full_2d3d" if candidates else "miniba_support"
+            pose_evidence = candidates or support
         xyz = pose_evidence.get("pts3d")
         uvs = pose_evidence.get("uvs")
         confs = pose_evidence.get("pts_conf")
         corr_ref_ids = pose_evidence.get("corr_ref_ids")
+        ref_uvs = pose_evidence.get("ref_uvs")
+        ref_Rts = pose_evidence.get("ref_Rts")
         debug["candidate_source"] = candidate_source
         if not all(isinstance(value, torch.Tensor) for value in (xyz, uvs, confs)):
             debug["reason"] = "pose_support_unavailable"
@@ -592,15 +2047,37 @@ class PoseInitializer():
             debug["reason"] = "reference_ids_unavailable"
             debug["runtime_seconds"] = time.perf_counter() - started
             return initial_Rt.clone(), debug
+        epipolar_validation = normalized_candidate_mode == "balanced_epipolar_v22"
+        relative_multiview = (
+            normalized_candidate_mode == "multiview_relative_v24"
+        )
+        if (epipolar_validation or relative_multiview) and (
+            not isinstance(ref_uvs, torch.Tensor)
+            or ref_uvs.shape != (len(xyz), 2)
+            or not isinstance(ref_Rts, torch.Tensor)
+            or ref_Rts.shape not in {(len(xyz), 3, 4), (len(xyz), 4, 4)}
+        ):
+            debug["reason"] = "epipolar_evidence_unavailable"
+            debug["runtime_seconds"] = time.perf_counter() - started
+            return initial_Rt.clone(), debug
 
         pre_errors, pre_valid = compute_reprojection_errors(
             initial_Rt, xyz, uvs, focal=self.f, centre=self.centre
         )
-        evaluation_mask = pre_valid & (pre_errors <= float(self.max_pnp_error))
+        pre_error_scale = max(
+            1.0,
+            min(8.0, float(pose_evidence_pre_error_scale)),
+        )
+        pre_error_limit = float(self.max_pnp_error) * pre_error_scale
+        debug["pose_evidence_pre_error_scale"] = pre_error_scale
+        debug["pose_evidence_pre_error_limit"] = pre_error_limit
+        evaluation_mask = pre_valid & (pre_errors <= pre_error_limit)
         solve_input_mask = pre_valid
         validation_mask = evaluation_mask
+        validation_input_mask = evaluation_mask
+        validation_minimum = max(4, int(min_support) // 2)
         if independent_validation:
-            split_minimum = max(4, int(min_support) // 2)
+            split_minimum = validation_minimum
             solve_input_mask, validation_input_mask, split_debug = (
                 split_pose_verification_evidence(
                     corr_ref_ids,
@@ -640,7 +2117,7 @@ class PoseInitializer():
                 width=image_width,
                 height=image_height,
                 mad_scale=mad_scale,
-                max_cutoff=float(self.max_pnp_error),
+                max_cutoff=pre_error_limit,
                 min_support=split_minimum,
             )
             debug.update(
@@ -654,6 +2131,39 @@ class PoseInitializer():
                 debug["runtime_seconds"] = time.perf_counter() - started
                 return initial_Rt.clone(), debug
         pre_stats = summarize_reprojection_errors(pre_errors, validation_mask)
+        decision_pre_stats = pre_stats
+        epipolar_validation_mask: torch.Tensor | None = None
+        if epipolar_validation:
+            pre_epipolar_errors, pre_epipolar_valid = (
+                compute_epipolar_sampson_errors(
+                    initial_Rt,
+                    uvs,
+                    ref_uvs,
+                    ref_Rts,
+                    focal=self.f,
+                    centre=self.centre,
+                )
+            )
+            epipolar_validation_mask = (
+                validation_input_mask & pre_epipolar_valid
+            )
+            if (
+                int(epipolar_validation_mask.sum().item())
+                < validation_minimum
+            ):
+                debug["reason"] = "insufficient_epipolar_support"
+                debug["runtime_seconds"] = time.perf_counter() - started
+                return initial_Rt.clone(), debug
+            decision_pre_stats = summarize_reprojection_errors(
+                pre_epipolar_errors,
+                epipolar_validation_mask,
+            )
+            debug.update(
+                {
+                    f"pre_epipolar_{key}": value
+                    for key, value in decision_pre_stats.items()
+                }
+            )
         selected, cleaning = select_robust_correspondences(
             pre_errors,
             uvs,
@@ -661,7 +2171,7 @@ class PoseInitializer():
             width=image_width,
             height=image_height,
             mad_scale=mad_scale,
-            max_cutoff=float(self.max_pnp_error),
+            max_cutoff=pre_error_limit,
             min_support=min_support,
         )
         debug.update({f"cleaning_{key}": value for key, value in cleaning.items()})
@@ -671,15 +2181,51 @@ class PoseInitializer():
             debug["runtime_seconds"] = time.perf_counter() - started
             return initial_Rt.clone(), debug
 
-        selected_indices = torch.where(selected)[0]
         max_pnp_points = int(
-            getattr(self, "num_pts_pnpransac", len(selected_indices))
+            getattr(self, "num_pts_pnpransac", int(selected.sum().item()))
         )
-        if len(selected_indices) > max_pnp_points:
-            strongest = torch.topk(
-                confs[selected_indices], max_pnp_points, largest=True
-            ).indices
-            selected_indices = selected_indices[strongest]
+        balanced_candidate = normalized_candidate_mode in {
+            "balanced_step_v21",
+            "balanced_epipolar_v22",
+            "multihypothesis_v23",
+            "multiview_relative_v24",
+        }
+        if balanced_candidate:
+            effective_ref_ids = (
+                corr_ref_ids
+                if isinstance(corr_ref_ids, torch.Tensor)
+                else torch.zeros(
+                    len(xyz), dtype=torch.long, device=xyz.device
+                )
+            )
+            selected_indices, balance_debug = (
+                select_balanced_correspondence_indices(
+                    pre_errors,
+                    confs,
+                    uvs,
+                    effective_ref_ids,
+                    selected,
+                    width=image_width,
+                    height=image_height,
+                    max_points=max_pnp_points,
+                    grid_rows=4,
+                    grid_cols=6,
+                    max_reference_fraction=0.40,
+                )
+            )
+            debug.update(
+                {
+                    f"pnp_balance_{key}": value
+                    for key, value in balance_debug.items()
+                }
+            )
+        else:
+            selected_indices = torch.where(selected)[0]
+            if len(selected_indices) > max_pnp_points:
+                strongest = torch.topk(
+                    confs[selected_indices], max_pnp_points, largest=True
+                ).indices
+                selected_indices = selected_indices[strongest]
         xyz_pnp = xyz[selected_indices]
         uvs_pnp = uvs[selected_indices]
         confs_pnp = confs[selected_indices]
@@ -688,7 +2234,16 @@ class PoseInitializer():
         cuda_rng_state = (
             torch.cuda.get_rng_state(initial_Rt.device) if initial_Rt.is_cuda else None
         )
+        sampling_generator = None
+        if sampling_seed is not None:
+            sampling_generator = torch.Generator(device=xyz_pnp.device)
+            sampling_generator.manual_seed(int(sampling_seed))
         try:
+            pnp_kwargs = (
+                {"generator": sampling_generator}
+                if sampling_generator is not None
+                else {}
+            )
             pnp_Rt, pnp_inliers = self.PnPRANSAC(
                 uvs_pnp,
                 xyz_pnp,
@@ -697,6 +2252,7 @@ class PoseInitializer():
                 initial_Rt[:3, :2],
                 initial_Rt[:3, 3],
                 confs_pnp,
+                **pnp_kwargs,
             )
         except Exception:
             debug["reason"] = "verification_pnp_exception"
@@ -708,6 +2264,7 @@ class PoseInitializer():
                 torch.cuda.set_rng_state(cuda_rng_state, initial_Rt.device)
         pnp_inliers = pnp_inliers.to(dtype=torch.bool)
         debug["verification_pnp_inliers"] = int(pnp_inliers.sum().item())
+        debug["verification_pnp_Rt"] = pnp_Rt.detach().cpu().tolist()
         if int(pnp_inliers.sum().item()) < 4:
             debug["reason"] = "verification_pnp_inliers_too_few"
             debug["runtime_seconds"] = time.perf_counter() - started
@@ -715,7 +2272,42 @@ class PoseInitializer():
         xyz_selected = xyz_pnp[pnp_inliers]
         uvs_selected = uvs_pnp[pnp_inliers]
         confs_selected = confs_pnp[pnp_inliers]
-        if len(xyz_selected) > self.num_pts_miniba_incr:
+        if balanced_candidate:
+            source_indices = selected_indices[pnp_inliers]
+            effective_ref_ids = (
+                corr_ref_ids
+                if isinstance(corr_ref_ids, torch.Tensor)
+                else torch.zeros(
+                    len(xyz), dtype=torch.long, device=xyz.device
+                )
+            )
+            ba_indices, ba_balance_debug = (
+                select_balanced_correspondence_indices(
+                    pre_errors[source_indices],
+                    confs_selected,
+                    uvs_selected,
+                    effective_ref_ids[source_indices],
+                    torch.ones(
+                        len(source_indices), dtype=torch.bool, device=xyz.device
+                    ),
+                    width=image_width,
+                    height=image_height,
+                    max_points=self.num_pts_miniba_incr,
+                    grid_rows=4,
+                    grid_cols=6,
+                    max_reference_fraction=0.40,
+                )
+            )
+            xyz_selected = xyz_selected[ba_indices]
+            uvs_selected = uvs_selected[ba_indices]
+            confs_selected = confs_selected[ba_indices]
+            debug.update(
+                {
+                    f"miniba_balance_{key}": value
+                    for key, value in ba_balance_debug.items()
+                }
+            )
+        elif len(xyz_selected) > self.num_pts_miniba_incr:
             strongest = torch.topk(
                 confs_selected, self.num_pts_miniba_incr, largest=True
             ).indices
@@ -747,36 +2339,463 @@ class PoseInitializer():
         refined_Rt = torch.eye(4, device=initial_Rt.device, dtype=initial_Rt.dtype)
         refined_Rt[:3, :3] = sixD2mtx(rotations)[0]
         refined_Rt[:3, 3] = translations[0]
-        post_errors, post_valid = compute_reprojection_errors(
-            refined_Rt, xyz, uvs, focal=self.f, centre=self.centre
-        )
-        post_stats = summarize_reprojection_errors(
-            post_errors, post_valid & validation_mask
-        )
-        correction = pose_correction_magnitude(initial_Rt, refined_Rt)
+        solver_candidates: list[dict[str, object]] = [
+            {"name": "cuda_pnp_miniba", "pose": refined_Rt}
+        ]
+        if normalized_candidate_mode in {
+            "multihypothesis_v23",
+            "multiview_relative_v24",
+        }:
+            opencv_candidates, opencv_debug = estimate_opencv_pnp_candidates(
+                xyz_pnp,
+                uvs_pnp,
+                focal=self.f,
+                centre=self.centre,
+                initial_pose=initial_Rt,
+                max_reprojection_error=float(self.max_pnp_error),
+            )
+            solver_candidates.extend(opencv_candidates)
+            debug.update(
+                {
+                    f"opencv_pnp_{key}": value
+                    for key, value in opencv_debug.items()
+                }
+            )
+        if relative_multiview:
+            relative_indices = torch.where(solve_input_mask)[0]
+            relative_candidates, relative_debug = (
+                estimate_multireference_relative_pose_candidates(
+                    uvs[relative_indices],
+                    ref_uvs[relative_indices],
+                    ref_Rts[relative_indices],
+                    corr_ref_ids[relative_indices],
+                    focal=self.f,
+                    centre=self.centre,
+                    initial_pose=initial_Rt,
+                    max_epipolar_error=min(
+                        2.0, max(0.5, float(self.max_pnp_error) * 0.25)
+                    ),
+                )
+            )
+            solver_candidates.extend(relative_candidates)
+            debug.update(
+                {
+                    f"relative_pose_{key}": value
+                    for key, value in relative_debug.items()
+                }
+            )
+        if normalized_candidate_mode in {
+            "multihypothesis_v23",
+            "multiview_relative_v24",
+        }:
+            debug["solver_candidates"] = [
+                {
+                    "name": str(item["name"]),
+                    "pose": item["pose"].detach().cpu().tolist(),
+                    "inlier_count": int(item.get("inlier_count", 0)),
+                }
+                for item in solver_candidates
+                if isinstance(item.get("pose"), torch.Tensor)
+            ]
         max_rotation, max_translation, history_debug = self._pose_verification_motion_limits(
             pose_history
         )
-        decision = decide_pose_refinement(
-            pre=pre_stats,
-            post=post_stats,
-            correction=correction,
-            max_rotation_deg=max_rotation,
-            max_translation=max_translation,
-            min_relative_median_improvement=min_relative_median_improvement,
-            max_p90_ratio=max_p90_ratio,
-            min_support_ratio=min_support_ratio,
+        temporal_prediction, temporal_prediction_debug = (
+            predict_constant_velocity_pose(
+                pose_history,
+                current_frame_id=int(event.get("frame_id", -1)),
+                like_pose=initial_Rt,
+            )
         )
+        debug.update(
+            {
+                f"temporal_prediction_{key}": value
+                for key, value in temporal_prediction_debug.items()
+            }
+        )
+        initial_temporal_stats: dict[str, float] | None = None
+        if temporal_prediction is not None:
+            initial_temporal_stats = temporal_pose_consistency(
+                initial_Rt,
+                temporal_prediction,
+                pose_history,
+            )
+            debug.update(
+                {
+                    f"pre_temporal_{key}": value
+                    for key, value in initial_temporal_stats.items()
+                }
+            )
+        debug["max_temporal_score_ratio"] = float(
+            max_temporal_score_ratio
+        )
+        selected_alpha = 1.0
+        selected_candidate = refined_Rt
+        selected_candidate_source = "cuda_pnp_miniba"
+        step_candidates: list[dict[str, object]] = []
+        if balanced_candidate:
+            evaluated_candidates: list[
+                tuple[
+                    tuple[float, float, float],
+                    str,
+                    float,
+                    torch.Tensor,
+                    dict[str, object],
+                    dict[str, float | int],
+                ]
+            ] = []
+            for solver_candidate in solver_candidates:
+                candidate_source = str(solver_candidate["name"])
+                base_candidate = solver_candidate["pose"]
+                if not isinstance(base_candidate, torch.Tensor):
+                    continue
+                for alpha in (0.25, 0.50, 0.75, 1.00):
+                    candidate_Rt = interpolate_world_to_camera_pose(
+                        initial_Rt, base_candidate, alpha
+                    )
+                    candidate_errors, candidate_valid = compute_reprojection_errors(
+                        candidate_Rt, xyz, uvs, focal=self.f, centre=self.centre
+                    )
+                    candidate_reprojection_stats = summarize_reprojection_errors(
+                        candidate_errors, candidate_valid & validation_mask
+                    )
+                    candidate_stats = candidate_reprojection_stats
+                    if epipolar_validation:
+                        candidate_epipolar_errors, candidate_epipolar_valid = (
+                            compute_epipolar_sampson_errors(
+                                candidate_Rt,
+                                uvs,
+                                ref_uvs,
+                                ref_Rts,
+                                focal=self.f,
+                                centre=self.centre,
+                            )
+                        )
+                        candidate_stats = summarize_reprojection_errors(
+                            candidate_epipolar_errors,
+                            candidate_epipolar_valid
+                            & epipolar_validation_mask,
+                        )
+                    candidate_correction = pose_correction_magnitude(
+                        initial_Rt, candidate_Rt
+                    )
+                    candidate_decision = decide_pose_refinement(
+                        pre=decision_pre_stats,
+                        post=candidate_stats,
+                        correction=candidate_correction,
+                        max_rotation_deg=max_rotation,
+                        max_translation=max_translation,
+                        min_relative_median_improvement=min_relative_median_improvement,
+                        max_p90_ratio=max_p90_ratio,
+                        min_support_ratio=min_support_ratio,
+                    )
+                    candidate_temporal_stats: dict[str, float] | None = None
+                    if (
+                        temporal_prediction is not None
+                        and initial_temporal_stats is not None
+                    ):
+                        candidate_temporal_stats = temporal_pose_consistency(
+                            candidate_Rt,
+                            temporal_prediction,
+                            pose_history,
+                        )
+                        temporal_ratio = float(
+                            candidate_temporal_stats["score"]
+                            / max(initial_temporal_stats["score"], 1e-8)
+                        )
+                        candidate_decision["temporal_score_ratio"] = (
+                            temporal_ratio
+                        )
+                        if (
+                            bool(candidate_decision.get("accepted", False))
+                            and temporal_ratio
+                            > float(max_temporal_score_ratio)
+                        ):
+                            candidate_decision["accepted"] = False
+                            candidate_decision["reason"] = (
+                                "temporal_inconsistent"
+                            )
+                    row = {
+                        "source": candidate_source,
+                        "alpha": float(alpha),
+                        **{
+                            f"post_{key}": value
+                            for key, value in candidate_stats.items()
+                        },
+                        **(
+                            {
+                                f"post_reprojection_{key}": value
+                                for key, value in candidate_reprojection_stats.items()
+                            }
+                            if epipolar_validation
+                            else {}
+                        ),
+                        **candidate_decision,
+                        **(
+                            {
+                                f"temporal_{key}": value
+                                for key, value in candidate_temporal_stats.items()
+                            }
+                            if candidate_temporal_stats is not None
+                            else {}
+                        ),
+                    }
+                    step_candidates.append(row)
+                    if bool(candidate_decision.get("accepted", False)):
+                        if normalized_candidate_mode in {
+                            "multihypothesis_v23",
+                            "multiview_relative_v24",
+                        }:
+                            rank = validation_candidate_rank(
+                                decision_pre_stats,
+                                candidate_stats,
+                            )
+                        else:
+                            rank = (
+                                float(
+                                    candidate_stats.get(
+                                        "median", float("inf")
+                                    )
+                                ),
+                                float(
+                                    candidate_stats.get(
+                                        "mean", float("inf")
+                                    )
+                                ),
+                                float(
+                                    candidate_stats.get(
+                                        "p90", float("inf")
+                                    )
+                                ),
+                            )
+                        evaluated_candidates.append(
+                            (
+                                rank,
+                                candidate_source,
+                                float(alpha),
+                                candidate_Rt,
+                                candidate_decision,
+                                candidate_stats,
+                            )
+                        )
+            if evaluated_candidates:
+                (
+                    _,
+                    selected_candidate_source,
+                    selected_alpha,
+                    selected_candidate,
+                    decision,
+                    post_stats,
+                ) = min(evaluated_candidates, key=lambda item: item[0])
+            else:
+                primary_rows = [
+                    row
+                    for row in step_candidates
+                    if row.get("source") == "cuda_pnp_miniba"
+                ]
+                full_row = primary_rows[-1]
+                decision = {
+                    key: value
+                    for key, value in full_row.items()
+                    if key not in {"source", "alpha"}
+                    and not key.startswith("post_")
+                }
+                post_stats = {
+                    "valid_count": int(full_row["post_valid_count"]),
+                    "mean": float(full_row["post_mean"]),
+                    "median": float(full_row["post_median"]),
+                    "p90": float(full_row["post_p90"]),
+                    "max": float(full_row["post_max"]),
+                }
+                selected_candidate = refined_Rt
+                selected_alpha = 1.0
+                selected_candidate_source = "cuda_pnp_miniba"
+        else:
+            post_errors, post_valid = compute_reprojection_errors(
+                refined_Rt, xyz, uvs, focal=self.f, centre=self.centre
+            )
+            post_stats = summarize_reprojection_errors(
+                post_errors, post_valid & validation_mask
+            )
+            correction = pose_correction_magnitude(initial_Rt, refined_Rt)
+            decision = decide_pose_refinement(
+                pre=pre_stats,
+                post=post_stats,
+                correction=correction,
+                max_rotation_deg=max_rotation,
+                max_translation=max_translation,
+                min_relative_median_improvement=min_relative_median_improvement,
+                max_p90_ratio=max_p90_ratio,
+                min_support_ratio=min_support_ratio,
+            )
         debug.update(decision)
         debug.update(history_debug)
-        debug.update({f"post_reprojection_{key}": value for key, value in post_stats.items()})
+        selected_reprojection_errors, selected_reprojection_valid = (
+            compute_reprojection_errors(
+                selected_candidate,
+                xyz,
+                uvs,
+                focal=self.f,
+                centre=self.centre,
+            )
+        )
+        selected_reprojection_stats = summarize_reprojection_errors(
+            selected_reprojection_errors,
+            selected_reprojection_valid & validation_mask,
+        )
+        debug.update(
+            {
+                f"post_reprojection_{key}": value
+                for key, value in selected_reprojection_stats.items()
+            }
+        )
+        if epipolar_validation:
+            debug.update(
+                {
+                    f"post_epipolar_{key}": value
+                    for key, value in post_stats.items()
+                }
+            )
         debug["verification_miniba_inlier_coordinates"] = int(solver_mask.sum().item())
         debug["initial_Rt"] = initial_Rt.detach().cpu().tolist()
-        debug["refined_Rt"] = refined_Rt.detach().cpu().tolist()
-        selected_Rt = choose_verified_pose(initial_Rt, refined_Rt, decision)
+        debug["solver_refined_Rt"] = refined_Rt.detach().cpu().tolist()
+        debug["selected_step_alpha"] = float(selected_alpha)
+        debug["selected_candidate_source"] = selected_candidate_source
+        debug["selected_temporal_score_ratio"] = float(
+            decision.get("temporal_score_ratio", float("inf"))
+        )
+        debug["step_candidates"] = step_candidates
+        debug["refined_Rt"] = selected_candidate.detach().cpu().tolist()
+        selected_Rt = choose_verified_pose(
+            initial_Rt, selected_candidate, decision
+        )
         debug["final_Rt"] = selected_Rt.detach().cpu().tolist()
         debug["runtime_seconds"] = time.perf_counter() - started
         return selected_Rt, debug
+
+    @torch.no_grad()
+    def _collect_delayed_validation_evidence(
+        self,
+        keyframes: list[Keyframe],
+        curr_desc_kpts: DescribedKeypoints,
+        index: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        xyz: list[torch.Tensor] = []
+        uvs: list[torch.Tensor] = []
+        for keyframe in keyframes:
+            matches = self.matcher(
+                curr_desc_kpts,
+                keyframe.desc_kpts,
+                remove_outliers=True,
+                update_kpts_flag="all",
+                kID=index,
+                kID_other=keyframe.index,
+            )
+            mask = keyframe.desc_kpts.has_pt3d[matches.idx_other]
+            if bool(mask.any()):
+                xyz.append(keyframe.desc_kpts.pts3d[matches.idx_other[mask]])
+                uvs.append(matches.kpts[mask])
+        if not xyz:
+            device = curr_desc_kpts.kpts.device
+            return (
+                torch.empty((0, 3), device=device),
+                torch.empty((0, 2), device=device),
+            )
+        return torch.cat(xyz, dim=0), torch.cat(uvs, dim=0)
+
+    @torch.no_grad()
+    def verify_delayed_incremental_pose(
+        self,
+        initial_Rt: torch.Tensor,
+        solve_keyframes: list[Keyframe],
+        validation_keyframes: list[Keyframe],
+        curr_desc_kpts: DescribedKeypoints,
+        *,
+        index: int,
+        curr_img: torch.Tensor,
+        min_support: int = 24,
+        min_relative_improvement: float = 0.03,
+        max_mean_ratio: float = 0.99,
+        max_p90_ratio: float = 1.01,
+        max_translation: float = 0.10,
+        max_rotation_deg: float = 3.0,
+    ) -> tuple[torch.Tensor, dict[str, object]]:
+        """Re-section one pose using mature points and disjoint validation refs."""
+        started = time.perf_counter()
+        debug: dict[str, object] = {
+            "attempted": False,
+            "accepted": False,
+            "reason": "insufficient_reference_groups",
+            "solve_reference_ids": [int(kf.index) for kf in solve_keyframes],
+            "validation_reference_ids": [
+                int(kf.index) for kf in validation_keyframes
+            ],
+        }
+        if len(solve_keyframes) < 2 or len(validation_keyframes) < 2:
+            debug["runtime_seconds"] = time.perf_counter() - started
+            return initial_Rt.clone(), debug
+
+        cpu_rng_state = torch.random.get_rng_state()
+        cuda_rng_state = torch.cuda.get_rng_state(initial_Rt.device)
+        try:
+            seed = 0xA51E + int(index)
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed(seed)
+            candidate_Rt = self.initialize_incremental(
+                solve_keyframes,
+                curr_desc_kpts,
+                int(index),
+                True,
+                curr_img,
+            )
+        finally:
+            torch.random.set_rng_state(cpu_rng_state)
+            torch.cuda.set_rng_state(cuda_rng_state, initial_Rt.device)
+        debug["attempted"] = True
+        debug["candidate_pose_debug"] = dict(self.last_incremental_debug)
+        if candidate_Rt is None:
+            debug["reason"] = "candidate_generation_failed"
+            debug["runtime_seconds"] = time.perf_counter() - started
+            return initial_Rt.clone(), debug
+
+        xyz, uvs = self._collect_delayed_validation_evidence(
+            validation_keyframes,
+            curr_desc_kpts,
+            int(index),
+        )
+        pre_errors, pre_valid = compute_reprojection_errors(
+            initial_Rt, xyz, uvs, focal=self.f, centre=self.centre
+        )
+        post_errors, post_valid = compute_reprojection_errors(
+            candidate_Rt, xyz, uvs, focal=self.f, centre=self.centre
+        )
+        correction = pose_correction_magnitude(initial_Rt, candidate_Rt)
+        decision = summarize_candidate_validation(
+            pre_errors,
+            post_errors,
+            pre_valid,
+            post_valid,
+            max_error=float(self.max_pnp_error),
+            min_support=int(min_support),
+            min_relative_improvement=float(min_relative_improvement),
+            max_mean_ratio=float(max_mean_ratio),
+            max_p90_ratio=float(max_p90_ratio),
+            correction_translation=float(correction["translation"]),
+            correction_rotation_deg=float(correction["rotation_deg"]),
+            max_translation=float(max_translation),
+            max_rotation_deg=float(max_rotation_deg),
+        )
+        debug.update(decision)
+        debug["initial_Rt"] = initial_Rt.detach().cpu().tolist()
+        debug["candidate_Rt"] = candidate_Rt.detach().cpu().tolist()
+        debug["final_Rt"] = (
+            candidate_Rt if bool(decision["accepted"]) else initial_Rt
+        ).detach().cpu().tolist()
+        debug["runtime_seconds"] = time.perf_counter() - started
+        return (
+            candidate_Rt if bool(decision["accepted"]) else initial_Rt.clone(),
+            debug,
+        )
 
     def _keyframe_has_pt3d_count(self, keyframe: Keyframe) -> int:
         return int(keyframe.desc_kpts.has_pt3d.sum().item())

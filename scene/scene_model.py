@@ -34,6 +34,7 @@ from simple_knn._C import distIndex2
 from poses.feature_detector import DescribedKeypoints
 from poses.matcher import Matcher
 from poses.guided_mvs import GuidedMVS
+from poses.pose_verification import async_pose_update_enabled
 from scene.optimizers import SparseGaussianAdam
 from scene.keyframe import Keyframe
 from scene.anchor import Anchor
@@ -49,7 +50,12 @@ from scene.exposure_harmonization import (
     harmonized_test_exposure,
 )
 from scene.pose_render_edge_loss import pose_render_gradient_loss
-from scene.pose_render_extra_optimization import pose_render_extra_optimization_decision
+from scene.pose_render_extra_optimization import (
+    EXTRA_OPTIMIZATION_RENDER_ONLY_RESPONSE_MODE,
+    EXTRA_REFINEMENT_STATE_KEY,
+    pose_render_extra_optimization_decision,
+    updated_render_response,
+)
 from scene.pose_render_init_weighting import pose_render_init_weighting_decision
 from scene.pose_render_keyframe_sampling import choose_pose_render_keyframe_id
 from scene.pose_render_pre_refine import pose_render_pre_refine_decision
@@ -71,8 +77,23 @@ from scene.pose_render_update_gate import pose_render_update_gate_decision
 from scene.pose_risk_utility_admission import (
     filter_pose_reference_indices,
     pose_review_acceptance,
+    restore_optimizer_parameter_learning_rates,
+    restore_optimizer_parameter_state,
+    scale_optimizer_parameter_learning_rates,
+    snapshot_optimizer_parameter_state,
 )
 from scene.test_render_calibration import calibrate_test_render
+from scene.transactional_gaussian_refinement import (
+    overwrite_selected_gaussian_value_snapshot,
+    refinement_candidate_acceptance,
+    refinement_reference_guard,
+    refinement_time_budget_seconds,
+    rendering_response_gap,
+    restore_selected_gaussian_state,
+    scale_gaussian_gradients,
+    select_refinement_reference_indices,
+    snapshot_selected_gaussian_state,
+)
 from utils import (
     RGB2SH,
     depth2points,
@@ -153,6 +174,15 @@ class SceneModel:
         self.centre = torch.tensor([(width - 1) / 2, (height - 1) / 2], device="cuda")  # 图像中心点
         self.anchor_overlap = args.anchor_overlap  # 锚点重叠区域大小（用于平滑融合）
         self.optimization_thread = None  # 异步优化线程（流式模式下使用）
+        self.pose_verification_async_pose_protection_mode = str(
+            getattr(args, "pose_verification_async_pose_protection_mode", "off")
+            or "off"
+        )
+        self.pose_verification_async_pose_protection_stats = {
+            "mode": self.pose_verification_async_pose_protection_mode,
+            "joint_pose_steps": 0,
+            "protected_gaussian_steps": 0,
+        }
         self.risk_admission_mode = str(getattr(args, "risk_admission_mode", "off") or "off")
         self.recovery_commit_bridge = str(
             getattr(args, "paper_aligned_recovery_commit_bridge", "true_source_commit") or "true_source_commit"
@@ -743,6 +773,16 @@ class SceneModel:
             "render_response_extra_optimization": 0,
             "extra_iterations_sum": 0,
             "confidence_sum": 0.0,
+            "transaction_attempted": 0,
+            "transaction_committed": 0,
+            "transaction_rolled_back": 0,
+            "transaction_early_stopped": 0,
+            "transaction_budget_exhausted": 0,
+            "transaction_reference_guard_rejected": 0,
+            "transaction_best_iteration_sum": 0,
+            "transaction_runtime_seconds": 0.0,
+            "base_runtime_seconds": 0.0,
+            "refinement_time_target_ratio": 0.08,
         }
         self.pose_render_update_gate = str(
             getattr(args, "paper_aligned_pose_render_update_gate", "off") or "off"
@@ -1976,7 +2016,22 @@ class SceneModel:
             and not bool(keyframe.info.get("is_test", False))
         ):
             rgb_mse = (image.detach() - gt_image.detach()).square().mean()
-            self._record_pose_render_response(keyframe, rgb_mse)
+            representation_gap = None
+            if self.pose_render_extra_optimization == "render_response_v3":
+                valid_mask = (
+                    keyframe.mask_pyr[lvl]
+                    if keyframe.mask_pyr is not None
+                    else None
+                )
+                representation_gap = rendering_response_gap(
+                    image.detach() - gt_image.detach(),
+                    valid_mask,
+                )
+            self._record_pose_render_response(
+                keyframe,
+                rgb_mse,
+                representation_gap=representation_gap,
+            )
         edge_loss, edge_loss_debug = pose_render_gradient_loss(
             image,
             gt_image,
@@ -3206,7 +3261,10 @@ class SceneModel:
         stats = self.pose_render_extra_optimization_stats
         stats["events"] = int(stats.get("events", 0)) + 1
         reason = str(debug.get("reason", ""))
-        if reason in stats:
+        if reason in stats and reason not in {
+            "transaction_committed",
+            "transaction_rolled_back",
+        }:
             stats[reason] = int(stats.get(reason, 0)) + 1
         if bool(debug.get("applied", False)):
             stats["applied"] = int(stats.get("applied", 0)) + 1
@@ -3216,6 +3274,35 @@ class SceneModel:
             stats["confidence_sum"] = float(
                 stats.get("confidence_sum", 0.0)
             ) + float(debug.get("confidence", 0.0) or 0.0)
+        if bool(debug.get("transaction_attempted", False)):
+            stats["transaction_attempted"] = int(
+                stats.get("transaction_attempted", 0)
+            ) + 1
+        if bool(debug.get("committed", False)):
+            stats["transaction_committed"] = int(
+                stats.get("transaction_committed", 0)
+            ) + 1
+            stats["transaction_best_iteration_sum"] = int(
+                stats.get("transaction_best_iteration_sum", 0)
+            ) + int(debug.get("best_iteration", 0) or 0)
+        if bool(debug.get("rolled_back", False)):
+            stats["transaction_rolled_back"] = int(
+                stats.get("transaction_rolled_back", 0)
+            ) + 1
+        if bool(debug.get("early_stopped", False)):
+            stats["transaction_early_stopped"] = int(
+                stats.get("transaction_early_stopped", 0)
+            ) + 1
+        if bool(debug.get("time_budget_exhausted", False)):
+            stats["transaction_budget_exhausted"] = int(
+                stats.get("transaction_budget_exhausted", 0)
+            ) + 1
+        stats["transaction_reference_guard_rejected"] = int(
+            stats.get("transaction_reference_guard_rejected", 0)
+        ) + int(debug.get("reference_guard_rejections", 0) or 0)
+        stats["transaction_runtime_seconds"] = float(
+            stats.get("transaction_runtime_seconds", 0.0)
+        ) + float(debug.get("refinement_runtime_seconds", 0.0) or 0.0)
 
     def _pose_render_extra_optimization_summary(self) -> dict[str, object]:
         stats = dict(self.pose_render_extra_optimization_stats)
@@ -3232,28 +3319,43 @@ class SceneModel:
         else:
             stats["extra_iterations_mean"] = 0.0
             stats["confidence_mean"] = 0.0
+        committed = int(stats.get("transaction_committed", 0))
+        stats["transaction_best_iteration_mean"] = (
+            float(stats.get("transaction_best_iteration_sum", 0))
+            / float(max(committed, 1))
+        )
+        base_runtime = float(stats.get("base_runtime_seconds", 0.0))
+        stats["refinement_to_base_time_ratio"] = (
+            float(stats.get("transaction_runtime_seconds", 0.0))
+            / float(max(base_runtime, 1e-8))
+        )
         return stats
 
-    def _record_pose_render_response(self, keyframe: Keyframe, rgb_mse: torch.Tensor) -> None:
+    def _record_pose_render_response(
+        self,
+        keyframe: Keyframe,
+        rgb_mse: torch.Tensor,
+        *,
+        representation_gap: dict[str, object] | None = None,
+    ) -> None:
         try:
             latest = float(rgb_mse.detach().cpu().item())
         except Exception:
             return
+        gap = representation_gap if isinstance(representation_gap, dict) else {}
         response = keyframe.info.get("_paper_aligned_pose_render_response", None)
         if not isinstance(response, dict):
             response = {}
-        observations = int(response.get("observations", 0) or 0) + 1
-        first = float(response.get("first_rgb_mse", latest) or latest)
-        best = min(float(response.get("best_rgb_mse", latest) or latest), latest)
-        denom = max(abs(first), 1e-8)
-        keyframe.info["_paper_aligned_pose_render_response"] = {
-            "observations": observations,
-            "first_rgb_mse": first,
-            "latest_rgb_mse": latest,
-            "best_rgb_mse": best,
-            "relative_improvement": (first - latest) / denom,
-            "best_relative_improvement": (first - best) / denom,
-        }
+        keyframe.info["_paper_aligned_pose_render_response"] = updated_render_response(
+            response,
+            latest,
+            representation_coverage_deficit=float(
+                gap.get("coverage_deficit", 0.0) or 0.0
+            ),
+            representation_gap_selectivity=float(
+                gap.get("selectivity", 0.0) or 0.0
+            ),
+        )
         self._update_pose_render_texture_sampling_response_guard(keyframe)
 
     def _update_pose_render_texture_sampling_response_guard(self, keyframe: Keyframe) -> None:
@@ -3603,6 +3705,19 @@ class SceneModel:
             min_existing_keyframes=self.pose_render_pre_refine_min_existing_keyframes,
         )
         keyframe.info["_paper_aligned_pose_render_pre_refine"] = debug
+        if (
+            str(
+                keyframe.info.get(
+                    "_pose_verification_geometry_anchor_mode",
+                    "off",
+                )
+            )
+            == "freeze_v1"
+        ):
+            debug["run_pre_refine"] = False
+            debug["reason"] = "pose_geometry_anchor_frozen"
+            self._record_pose_render_pre_refine(debug)
+            return debug
         if not bool(debug.get("run_pre_refine", False)):
             self._record_pose_render_pre_refine(debug)
             return debug
@@ -3797,14 +3912,25 @@ class SceneModel:
         min_render_coverage: float = 0.15,
         max_rotation_delta_deg: float = 1.5,
         max_translation_delta: float = 0.05,
+        min_relative_loss_improvement: float = 0.0,
+        min_validation_support_ratio: float = 0.95,
+        learning_rate_scale: float = 1.0,
+        trace_key: str = "_pose_risk_utility_review",
     ) -> dict[str, object]:
         keyframe = self.keyframes[keyframe_id]
-        bounded_iterations = max(0, min(2, int(iterations)))
+        bounded_iterations = max(0, min(12, int(iterations)))
         debug: dict[str, object] = {
             "requested": True,
             "applied": False,
             "accepted": False,
             "iterations": bounded_iterations,
+            "min_relative_loss_improvement": float(
+                max(0.0, min_relative_loss_improvement)
+            ),
+            "min_validation_support_ratio": float(
+                max(0.0, min(1.0, min_validation_support_ratio))
+            ),
+            "learning_rate_scale": float(max(0.0, learning_rate_scale)),
             "reason": "",
         }
         if bounded_iterations <= 0:
@@ -3816,10 +3942,19 @@ class SceneModel:
 
         start_Rt = keyframe.get_Rt().detach().clone()
         pose_params = {"rW2C", "tW2C"}
+        optimizer_snapshot = snapshot_optimizer_parameter_state(
+            keyframe.optimizer,
+            pose_params,
+        )
+        learning_rate_snapshot = scale_optimizer_parameter_learning_rates(
+            keyframe.optimizer,
+            pose_params,
+            scale=learning_rate_scale,
+        )
         lvl = keyframe.pyr_lvl
         fixed_bg = torch.zeros(3, device=start_Rt.device)
 
-        def supported_loss() -> tuple[torch.Tensor | None, float]:
+        def render_residual_support():
             render_pkg = self.render_from_id(keyframe_id, pyr_lvl=lvl, bg=fixed_bg)
             support = render_pkg["mainGaussID"][0] >= 0
             if keyframe.mask_pyr is not None:
@@ -3828,46 +3963,101 @@ class SceneModel:
                     keyframe_mask = keyframe_mask[0]
                 support &= keyframe_mask.bool()
             coverage = float(support.float().mean().detach().cpu().item())
-            if coverage < float(min_render_coverage) or not bool(support.any()):
-                return None, coverage
             residual = (render_pkg["render"] - keyframe.image_pyr[lvl]).abs().mean(dim=0)
-            return residual[support].mean(), coverage
+            return residual, support, coverage
 
         with torch.no_grad():
-            initial_loss_tensor, initial_coverage = supported_loss()
+            initial_residual, initial_support, initial_coverage = (
+                render_residual_support()
+            )
         debug["render_coverage"] = initial_coverage
-        if initial_loss_tensor is None:
+        if (
+            initial_coverage < float(min_render_coverage)
+            or not bool(initial_support.any())
+        ):
             debug["reason"] = "insufficient_render_coverage"
             return debug
-        start_loss = float(initial_loss_tensor.detach().cpu().item())
+
+        height, width = initial_support.shape[-2:]
+        rows = torch.arange(height, device=initial_support.device).view(-1, 1)
+        columns = torch.arange(width, device=initial_support.device).view(1, -1)
+        validation_selector = ((rows + columns) % 2) == 0
+        initial_validation_support = initial_support & validation_selector
+        initial_solve_support = initial_support & ~validation_selector
+        initial_validation_count = int(initial_validation_support.sum().item())
+        initial_solve_count = int(initial_solve_support.sum().item())
+        debug["initial_validation_support"] = initial_validation_count
+        debug["initial_solve_support"] = initial_solve_count
+        if initial_validation_count <= 0 or initial_solve_count <= 0:
+            debug["reason"] = "insufficient_split_support"
+            return debug
+
+        def solve_loss() -> tuple[torch.Tensor | None, float, float]:
+            residual, support, coverage = render_residual_support()
+            common_support = initial_solve_support & support
+            support_ratio = float(
+                common_support.sum().detach().cpu().item()
+                / max(initial_solve_count, 1)
+            )
+            if (
+                coverage < float(min_render_coverage)
+                or not bool(common_support.any())
+                or support_ratio < float(min_validation_support_ratio)
+            ):
+                return None, coverage, support_ratio
+            return residual[common_support].mean(), coverage, support_ratio
 
         completed = 0
-        for _ in range(bounded_iterations):
-            keyframe.zero_grad()
-            self.optimizer.zero_grad()
-            loss, coverage = supported_loss()
-            if loss is None:
-                debug["reason"] = "coverage_lost_during_review"
-                break
-            loss.backward()
-            with torch.no_grad():
-                for name, param_dict in keyframe.optimizer.params.items():
-                    if name not in pose_params:
-                        param_dict["val"].grad = None
-                keyframe.optimizer.step()
-            self.optimizer.zero_grad()
-            keyframe.zero_grad()
-            completed += 1
+        solve_support_ratio = 1.0
+        loop_failure_reason = ""
+        try:
+            for _ in range(bounded_iterations):
+                keyframe.zero_grad()
+                self.optimizer.zero_grad()
+                loss, coverage, solve_support_ratio = solve_loss()
+                if loss is None:
+                    loop_failure_reason = "solve_support_lost"
+                    break
+                loss.backward()
+                with torch.no_grad():
+                    for name, param_dict in keyframe.optimizer.params.items():
+                        if name not in pose_params:
+                            param_dict["val"].grad = None
+                    keyframe.optimizer.step()
+                self.optimizer.zero_grad()
+                keyframe.zero_grad()
+                completed += 1
+        finally:
+            restore_optimizer_parameter_learning_rates(
+                keyframe.optimizer,
+                learning_rate_snapshot,
+            )
 
         with torch.no_grad():
-            end_loss_tensor, end_coverage = supported_loss()
+            end_residual, end_support, end_coverage = render_residual_support()
             end_Rt = keyframe.get_Rt().detach().clone()
+            common_validation_support = initial_validation_support & end_support
+            common_validation_count = int(common_validation_support.sum().item())
+            validation_support_ratio = float(
+                common_validation_count / max(initial_validation_count, 1)
+            )
+            if common_validation_count > 0:
+                start_loss_tensor = initial_residual[common_validation_support].mean()
+                end_loss_tensor = end_residual[common_validation_support].mean()
+            else:
+                start_loss_tensor = None
+                end_loss_tensor = None
             rotation_delta = rotation_distance(
                 start_Rt[:3, :3][None], end_Rt[:3, :3][None]
             ) * (180.0 / math.pi)
             translation_delta = torch.linalg.vector_norm(
                 start_Rt[:3, 3] - end_Rt[:3, 3]
             )
+        start_loss = (
+            float(start_loss_tensor.detach().cpu().item())
+            if start_loss_tensor is not None
+            else float("inf")
+        )
         end_loss = (
             float(end_loss_tensor.detach().cpu().item())
             if end_loss_tensor is not None
@@ -3882,9 +4072,23 @@ class SceneModel:
             translation_delta=translation_delta_value,
             max_rotation_delta_deg=max_rotation_delta_deg,
             max_translation_delta=max_translation_delta,
+            min_relative_loss_improvement=min_relative_loss_improvement,
+            validation_support_ratio=validation_support_ratio,
+            min_validation_support_ratio=min_validation_support_ratio,
+        )
+        if loop_failure_reason:
+            accepted = False
+            reason = loop_failure_reason
+        restore_optimizer_parameter_state(
+            keyframe.optimizer,
+            optimizer_snapshot,
+            restore_values=not accepted,
         )
         if not accepted:
             keyframe.set_Rt(start_Rt)
+        keyframe.optimizer.zero_grad()
+        self.optimizer.zero_grad()
+        final_Rt = keyframe.get_Rt().detach().clone()
         keyframe.approx_centre = keyframe.get_centre().detach()
         if hasattr(self, "approx_cam_centres") and self.approx_cam_centres is not None:
             try:
@@ -3906,12 +4110,332 @@ class SceneModel:
                 "start_loss": start_loss,
                 "end_loss": end_loss,
                 "end_render_coverage": float(end_coverage),
+                "validation_support_ratio": validation_support_ratio,
+                "solve_support_ratio": float(solve_support_ratio),
                 "rotation_delta_deg": rotation_delta_deg,
                 "translation_delta": translation_delta_value,
+                "initial_Rt": start_Rt.detach().cpu().tolist(),
+                "refined_Rt": end_Rt.detach().cpu().tolist(),
+                "final_Rt": final_Rt.detach().cpu().tolist(),
             }
         )
-        keyframe.info["_pose_risk_utility_review"] = dict(debug)
+        keyframe.info[str(trace_key)] = dict(debug)
         return debug
+
+    def _transactional_refinement_forward(
+        self,
+        keyframe_id: int,
+        fixed_background: torch.Tensor,
+    ):
+        keyframe = self.keyframes[int(keyframe_id)]
+        lvl = int(keyframe.pyr_lvl)
+        render_pkg = self.render_from_id(
+            int(keyframe_id),
+            pyr_lvl=lvl,
+            bg=fixed_background,
+        )
+        image = render_pkg["render"]
+        invdepth = render_pkg["invdepth"]
+        target = keyframe.image_pyr[lvl]
+        mono_idepth = keyframe.get_mono_idepth(lvl)
+        if keyframe.mask_pyr is not None:
+            mask = keyframe.mask_pyr[lvl]
+            image = image * mask
+            target = target * mask
+            invdepth = invdepth * mask
+            mono_idepth = mono_idepth * mask
+
+        l1_loss = (image - target).abs().mean()
+        dssim_loss = 1 - fused_ssim(image[None], target[None])
+        depth_loss = (invdepth - mono_idepth).abs().mean()
+        total_loss = (
+            self.lambda_dssim * dssim_loss
+            + (1 - self.lambda_dssim) * l1_loss
+            + keyframe.depth_loss_weight * depth_loss
+        )
+        metrics = {
+            "total_loss": _metric_float(total_loss),
+            "rgb_mse": _metric_float((image - target).square().mean()),
+            "dssim": _metric_float(dssim_loss),
+            "depth": _metric_float(depth_loss),
+            "l1": _metric_float(l1_loss),
+        }
+        visibility = render_pkg["visibility_filter"].detach().bool()
+        gaussian_count = int(render_pkg["radii"].shape[0])
+        return total_loss, metrics, visibility, gaussian_count
+
+    def _run_transactional_gaussian_refinement(
+        self,
+        debug: dict[str, object],
+    ) -> dict[str, object]:
+        result = dict(debug)
+        requested_iterations = int(result.get("extra_iterations", 0) or 0)
+        result.update(
+            {
+                "requested_extra_iterations": requested_iterations,
+                "transaction_attempted": False,
+                "committed": False,
+                "rolled_back": False,
+                "realized_iterations": 0,
+                "best_iteration": 0,
+                "early_stopped": False,
+                "time_budget_exhausted": False,
+                "refinement_runtime_seconds": 0.0,
+            }
+        )
+        if (
+            not bool(result.get("applied", False))
+            or requested_iterations <= 0
+            or not self.keyframes
+            or int(self.xyz.shape[0]) == 0
+        ):
+            result["applied"] = False
+            return result
+
+        current_id = len(self.keyframes) - 1
+        keyframe = self.keyframes[current_id]
+        if bool(keyframe.info.get("is_test", False)):
+            result.update({"applied": False, "reason": "test_frame"})
+            return result
+        reference_ids = select_refinement_reference_indices(
+            [
+                bool(frame.info.get("is_test", False))
+                for frame in self.keyframes
+            ],
+            current_index=current_id,
+            max_references=2,
+        )
+        result["reference_keyframe_ids"] = reference_ids
+        if not reference_ids:
+            result.update(
+                {
+                    "applied": False,
+                    "reason": "no_historical_training_reference",
+                }
+            )
+            return result
+
+        stats = self.pose_render_extra_optimization_stats
+        available_seconds = refinement_time_budget_seconds(
+            float(stats.get("base_runtime_seconds", 0.0)),
+            float(stats.get("transaction_runtime_seconds", 0.0)),
+            target_ratio=float(stats.get("refinement_time_target_ratio", 0.08)),
+        )
+        result["refinement_time_budget_seconds"] = available_seconds
+        if available_seconds <= 0.0:
+            result.update(
+                {
+                    "applied": False,
+                    "reason": "refinement_time_budget_exhausted",
+                    "time_budget_exhausted": True,
+                }
+            )
+            return result
+
+        lvl = int(keyframe.pyr_lvl)
+        fixed_background = keyframe.image_pyr[lvl].new_zeros(3)
+        last_trained_before = self.last_trained_id
+        cpu_rng_state = torch.random.get_rng_state()
+        numpy_rng_state = np.random.get_state()
+        cuda_rng_state = (
+            torch.cuda.get_rng_state(self.xyz.device) if self.xyz.is_cuda else None
+        )
+        state_snapshot = None
+        initial_visibility = None
+        initial_metrics = None
+        initial_reference_metrics = None
+        best_metrics = None
+        best_reference_metrics = None
+        best_iteration = 0
+        completed = 0
+        consecutive_rejections = 0
+        reference_guard_rejections = 0
+        last_acceptance_reason = ""
+        if self.xyz.is_cuda:
+            torch.cuda.synchronize(self.xyz.device)
+        started = time.perf_counter()
+        result["transaction_attempted"] = True
+        try:
+            keyframe.zero_grad()
+            self.optimizer.zero_grad()
+            current_loss, initial_metrics, current_visibility, gaussian_count = (
+                self._transactional_refinement_forward(
+                    current_id,
+                    fixed_background,
+                )
+            )
+            initial_reference_metrics = []
+            with torch.no_grad():
+                for reference_id in reference_ids:
+                    _, reference_metrics, _, _ = (
+                        self._transactional_refinement_forward(
+                            reference_id,
+                            fixed_background,
+                        )
+                    )
+                    initial_reference_metrics.append(reference_metrics)
+            initial_visibility = current_visibility.clone()
+            if not bool(initial_visibility.any()):
+                result.update(
+                    {
+                        "applied": False,
+                        "reason": "no_visible_gaussians",
+                        "rolled_back": True,
+                    }
+                )
+            else:
+                state_snapshot = snapshot_selected_gaussian_state(
+                    self.gaussian_params,
+                    initial_visibility,
+                )
+                for iteration in range(1, requested_iterations + 1):
+                    current_loss.backward()
+                    scale_gaussian_gradients(self.gaussian_params)
+                    with torch.no_grad():
+                        selected_visibility = (
+                            current_visibility.bool() & initial_visibility
+                        )
+                        if bool(selected_visibility.any()):
+                            self.optimizer.step(
+                                selected_visibility,
+                                gaussian_count,
+                            )
+                    self.optimizer.zero_grad()
+                    keyframe.zero_grad()
+                    completed = iteration
+
+                    current_loss, candidate_metrics, current_visibility, gaussian_count = (
+                        self._transactional_refinement_forward(
+                            current_id,
+                            fixed_background,
+                        )
+                    )
+                    acceptance = refinement_candidate_acceptance(
+                        initial_metrics,
+                        candidate_metrics,
+                    )
+                    candidate_reference_metrics = []
+                    with torch.no_grad():
+                        for reference_id in reference_ids:
+                            _, reference_metrics, _, _ = (
+                                self._transactional_refinement_forward(
+                                    reference_id,
+                                    fixed_background,
+                                )
+                            )
+                            candidate_reference_metrics.append(reference_metrics)
+                    reference_acceptance = refinement_reference_guard(
+                        initial_reference_metrics,
+                        candidate_reference_metrics,
+                    )
+                    if not bool(reference_acceptance.get("accepted", False)):
+                        reference_guard_rejections += 1
+                    last_acceptance_reason = str(
+                        (
+                            reference_acceptance
+                            if bool(acceptance.get("accepted", False))
+                            else acceptance
+                        ).get("reason", "")
+                    )
+                    candidate_is_best = (
+                        bool(acceptance.get("accepted", False))
+                        and bool(reference_acceptance.get("accepted", False))
+                        and (
+                        best_metrics is None
+                        or float(candidate_metrics["total_loss"])
+                        < float(best_metrics["total_loss"])
+                        )
+                    )
+                    if candidate_is_best:
+                        overwrite_selected_gaussian_value_snapshot(
+                            self.gaussian_params,
+                            initial_visibility,
+                            state_snapshot,
+                        )
+                        best_metrics = dict(candidate_metrics)
+                        best_reference_metrics = [
+                            dict(metrics) for metrics in candidate_reference_metrics
+                        ]
+                        best_iteration = iteration
+                        consecutive_rejections = 0
+                    else:
+                        consecutive_rejections += 1
+
+                    elapsed = time.perf_counter() - started
+                    if elapsed >= available_seconds:
+                        result["time_budget_exhausted"] = True
+                        break
+                    if consecutive_rejections >= 2:
+                        result["early_stopped"] = True
+                        break
+
+                restore_selected_gaussian_state(
+                    self.gaussian_params,
+                    initial_visibility,
+                    state_snapshot,
+                )
+                committed = best_metrics is not None
+                result.update(
+                    {
+                        "applied": committed,
+                        "committed": committed,
+                        "rolled_back": not committed,
+                        "reason": (
+                            "transaction_committed"
+                            if committed
+                            else "transaction_no_safe_candidate"
+                        ),
+                        "extra_iterations": best_iteration if committed else 0,
+                        "realized_iterations": completed,
+                        "best_iteration": best_iteration,
+                        "pre_refinement_metrics": dict(initial_metrics),
+                        "post_refinement_metrics": (
+                            dict(best_metrics)
+                            if best_metrics is not None
+                            else dict(initial_metrics)
+                        ),
+                        "pre_refinement_reference_metrics": [
+                            dict(metrics) for metrics in initial_reference_metrics
+                        ],
+                        "post_refinement_reference_metrics": (
+                            best_reference_metrics
+                            if best_reference_metrics is not None
+                            else [
+                                dict(metrics)
+                                for metrics in initial_reference_metrics
+                            ]
+                        ),
+                        "reference_guard_rejections": reference_guard_rejections,
+                        "last_acceptance_reason": last_acceptance_reason,
+                    }
+                )
+        finally:
+            if (
+                state_snapshot is not None
+                and initial_visibility is not None
+                and not bool(result.get("committed", False))
+                and str(result.get("reason", "")) != "transaction_no_safe_candidate"
+            ):
+                restore_selected_gaussian_state(
+                    self.gaussian_params,
+                    initial_visibility,
+                    state_snapshot,
+                )
+            self.optimizer.zero_grad()
+            keyframe.zero_grad()
+            torch.random.set_rng_state(cpu_rng_state)
+            np.random.set_state(numpy_rng_state)
+            if cuda_rng_state is not None:
+                torch.cuda.set_rng_state(cuda_rng_state, self.xyz.device)
+            self.last_trained_id = last_trained_before
+
+        if self.xyz.is_cuda:
+            torch.cuda.synchronize(self.xyz.device)
+        runtime_seconds = time.perf_counter() - started
+        result["refinement_runtime_seconds"] = runtime_seconds
+        result["last_trained_id_preserved"] = self.last_trained_id == last_trained_before
+        result["rng_state_preserved"] = True
+        return result
 
     def optimization_loop(self, n_iters: int, run_until_interupt: bool = False):
         """
@@ -3963,10 +4487,40 @@ class SceneModel:
         # 重置中断标志
         self.interupt_optimization = False
         i = 0
+        if self.xyz.is_cuda:
+            torch.cuda.synchronize(self.xyz.device)
+        base_loop_started = time.perf_counter()
         # 持续优化直到达到最小迭代次数，或收到中断信号
         while i < n_iters or (run_until_interupt and not self.interupt_optimization):
-            self.optimization_step()
+            pose_update_enabled = async_pose_update_enabled(
+                self.pose_verification_async_pose_protection_mode,
+                run_until_interrupt=run_until_interupt,
+                iteration=i,
+                base_iterations=n_iters,
+            )
+            if pose_update_enabled:
+                self.pose_verification_async_pose_protection_stats[
+                    "joint_pose_steps"
+                ] += 1
+            else:
+                self.pose_verification_async_pose_protection_stats[
+                    "protected_gaussian_steps"
+                ] += 1
+            self.optimization_step(update_pose=pose_update_enabled)
             i += 1
+        if self.xyz.is_cuda:
+            torch.cuda.synchronize(self.xyz.device)
+        base_loop_runtime = time.perf_counter() - base_loop_started
+        if (
+            self.pose_render_extra_optimization
+            == EXTRA_OPTIMIZATION_RENDER_ONLY_RESPONSE_MODE
+        ):
+            self.pose_render_extra_optimization_stats["base_runtime_seconds"] = float(
+                self.pose_render_extra_optimization_stats.get(
+                    "base_runtime_seconds",
+                    0.0,
+                )
+            ) + base_loop_runtime
         if (
             self.pose_render_extra_optimization == "pose_confidence_render_response_v2"
             or self.pose_render_extra_optimization == "render_response_v3"
@@ -3998,14 +4552,75 @@ class SceneModel:
                 min_pose_support=self.pose_render_extra_optimization_min_pose_support,
                 min_match_support=self.pose_render_extra_optimization_min_match_support,
             )
-            if self.keyframes:
-                self.keyframes[-1].info["_paper_aligned_pose_render_extra_optimization"] = (
-                    extra_optimization_debug
-                )
-            self._record_pose_render_extra_optimization(extra_optimization_debug)
         if not run_until_interupt:
-            for _ in range(int(extra_optimization_debug.get("extra_iterations", 0) or 0)):
-                self.optimization_step(keyframe_id_override=-1, update_pose=False)
+            if (
+                self.pose_render_extra_optimization
+                == EXTRA_OPTIMIZATION_RENDER_ONLY_RESPONSE_MODE
+            ):
+                if self.keyframes:
+                    keyframe = self.keyframes[-1]
+                    already_finalized = (
+                        str(extra_optimization_debug.get("reason", ""))
+                        == "refinement_already_finalized"
+                    )
+                    if not already_finalized:
+                        keyframe.info[EXTRA_REFINEMENT_STATE_KEY] = {
+                            "state": "ATTEMPTING",
+                            "attempted": bool(
+                                extra_optimization_debug.get("applied", False)
+                            ),
+                        }
+                        extra_optimization_debug = (
+                            self._run_transactional_gaussian_refinement(
+                                extra_optimization_debug
+                            )
+                        )
+                        keyframe.info[EXTRA_REFINEMENT_STATE_KEY] = {
+                            "state": "DONE",
+                            "attempted": bool(
+                                extra_optimization_debug.get(
+                                    "transaction_attempted",
+                                    False,
+                                )
+                            ),
+                            "committed": bool(
+                                extra_optimization_debug.get("committed", False)
+                            ),
+                            "reason": str(
+                                extra_optimization_debug.get("reason", "")
+                            ),
+                            "best_iteration": int(
+                                extra_optimization_debug.get("best_iteration", 0)
+                                or 0
+                            ),
+                        }
+            else:
+                for _ in range(
+                    int(extra_optimization_debug.get("extra_iterations", 0) or 0)
+                ):
+                    self.optimization_step(
+                        keyframe_id_override=-1,
+                        update_pose=False,
+                    )
+        elif (
+            self.pose_render_extra_optimization
+            == EXTRA_OPTIMIZATION_RENDER_ONLY_RESPONSE_MODE
+        ):
+            extra_optimization_debug = dict(extra_optimization_debug)
+            extra_optimization_debug.update(
+                {
+                    "applied": False,
+                    "reason": "transaction_deferred_async",
+                    "extra_iterations": 0,
+                }
+            )
+
+        if response_gated_extra_optimization:
+            if self.keyframes:
+                self.keyframes[-1].info[
+                    "_paper_aligned_pose_render_extra_optimization"
+                ] = extra_optimization_debug
+            self._record_pose_render_extra_optimization(extra_optimization_debug)
 
     def join_optimization_thread(self):
         """
@@ -5585,6 +6200,9 @@ class SceneModel:
             "pose_render_edge_loss": self._pose_render_edge_loss_summary(),
             "pose_render_psnr_loss": self._pose_render_psnr_loss_summary(),
             "pose_render_extra_optimization": self._pose_render_extra_optimization_summary(),
+            "pose_verification_async_pose_protection": dict(
+                self.pose_verification_async_pose_protection_stats
+            ),
             "pose_render_update_gate": self._pose_render_update_gate_summary(),
             "pose_render_pre_refine": self._pose_render_pre_refine_summary(),
             "pose_render_init_weighting": self._pose_render_init_weighting_summary(),

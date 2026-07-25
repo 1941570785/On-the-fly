@@ -17,6 +17,7 @@ import torch
 import torch.nn.functional as F
 
 from poses.feature_detector import DescribedKeypoints
+from poses.pose_verification import geometry_anchor_pose
 from poses.triangulator import Triangulator
 from scene.dense_extractor import DenseExtractor
 from scene.mono_depth import MonoDepthEstimator, align_depth
@@ -31,6 +32,11 @@ def pop_chosen_kfs_resolution_events() -> list[dict]:
     events = list(_CHOSEN_KFS_RESOLUTION_EVENTS)
     _CHOSEN_KFS_RESOLUTION_EVENTS.clear()
     return events
+
+
+def _geometry_rt(keyframe: "Keyframe") -> torch.Tensor:
+    getter = getattr(keyframe, "get_geometry_Rt", None)
+    return getter() if callable(getter) else keyframe.get_Rt()
 
 
 def resolve_chosen_keyframes(
@@ -178,6 +184,75 @@ class Keyframe:
         self.desc_kpts = desc_kpts  # 描述的关键点
         self.info = info  # 元信息
         self.is_test = info["is_test"]  # 是否为测试帧
+        self._pose_verification_geometry_snapshot_mode = (
+            str(
+                getattr(
+                    args,
+                    "pose_verification_reference_geometry_mode",
+                    "off",
+                )
+            )
+            if args is not None
+            else "off"
+        )
+        self._pose_verification_geometry_snapshot = None
+        self._pose_verification_geometry_snapshot_Rt = None
+        self._pose_verification_geometry_initial_Rt = Rt.detach().clone()
+        self._pose_verification_frozen_min_match_support = int(
+            getattr(
+                args,
+                "pose_verification_frozen_min_match_support",
+                24,
+            )
+            if args is not None
+            else 24
+        )
+        self._pose_verification_frozen_min_live_ratio = float(
+            getattr(
+                args,
+                "pose_verification_frozen_min_live_ratio",
+                0.50,
+            )
+            if args is not None
+            else 0.50
+        )
+        self._pose_verification_frozen_min_reference_count = int(
+            getattr(
+                args,
+                "pose_verification_frozen_min_reference_count",
+                2,
+            )
+            if args is not None
+            else 2
+        )
+        self._pose_verification_frozen_min_total_support = int(
+            getattr(
+                args,
+                "pose_verification_frozen_min_total_support",
+                48,
+            )
+            if args is not None
+            else 48
+        )
+        self.capture_pose_verification_geometry_snapshot()
+        geometry_anchor_mode = (
+            str(
+                getattr(
+                    args,
+                    "pose_verification_geometry_anchor_mode",
+                    "off",
+                )
+            )
+            if args is not None
+            else "off"
+        )
+        if geometry_anchor_mode != "off":
+            self.info["_pose_verification_geometry_anchor_mode"] = (
+                geometry_anchor_mode
+            )
+            self.info["_pose_verification_geometry_anchor_Rt"] = (
+                Rt.detach().cpu().tolist()
+            )
 
         # ========== 可优化参数初始化 ==========
         # 【优化模块】相机位姿（6D表示：前两列旋转矩阵）
@@ -225,6 +300,24 @@ class Keyframe:
             self.mono_idepth = self.mono_idepth.to(device)
             if self.latest_invdepth is not None:
                 self.latest_invdepth = self.latest_invdepth.to(device)
+        snapshot = getattr(
+            self,
+            "_pose_verification_geometry_snapshot",
+            None,
+        )
+        if snapshot is not None:
+            self._pose_verification_geometry_snapshot = tuple(
+                tensor.to(device) for tensor in snapshot
+            )
+        snapshot_Rt = getattr(
+            self,
+            "_pose_verification_geometry_snapshot_Rt",
+            None,
+        )
+        if isinstance(snapshot_Rt, torch.Tensor):
+            self._pose_verification_geometry_snapshot_Rt = snapshot_Rt.to(
+                device
+            )
 
     @property
     def device(self):
@@ -241,6 +334,110 @@ class Keyframe:
         Rt[:3, :3] = self.get_R()
         Rt[:3, 3] = self.get_t()
         return Rt
+
+    def get_geometry_Rt(self):
+        return geometry_anchor_pose(self.get_Rt(), self.info)
+
+    @torch.no_grad()
+    def capture_pose_verification_geometry_snapshot(self) -> bool:
+        if (
+            getattr(
+                self,
+                "_pose_verification_geometry_snapshot_mode",
+                "off",
+            )
+            not in {
+                "frozen_first_valid_v1",
+                "frozen_verification_only_v2",
+                "guarded_frozen_v3",
+                "guarded_frozen_live_pose_v4",
+                "guarded_frozen_homogeneous_v5",
+                "frozen_global_support_guard_v6",
+            }
+            or getattr(
+                self,
+                "_pose_verification_geometry_snapshot",
+                None,
+            )
+            is not None
+        ):
+            return False
+        points = self.desc_kpts.pts3d
+        confidence = self.desc_kpts.pts_conf
+        mask = self.desc_kpts.has_pt3d
+        if not (
+            torch.is_tensor(points)
+            and torch.is_tensor(confidence)
+            and torch.is_tensor(mask)
+            and points.shape[0] == confidence.shape[0] == mask.shape[0]
+            and bool(mask.any().item())
+        ):
+            return False
+        self._pose_verification_geometry_snapshot = (
+            points.detach().clone(),
+            confidence.detach().clone(),
+            mask.detach().clone(),
+        )
+        if hasattr(self, "rW2C") and hasattr(self, "tW2C"):
+            snapshot_Rt = self.get_Rt()
+        else:
+            snapshot_Rt = getattr(
+                self,
+                "_pose_verification_geometry_initial_Rt",
+                None,
+            )
+        if isinstance(snapshot_Rt, torch.Tensor):
+            self._pose_verification_geometry_snapshot_Rt = (
+                snapshot_Rt.detach().clone()
+            )
+        return True
+
+    def get_pose_verification_geometry(self):
+        snapshot = getattr(
+            self,
+            "_pose_verification_geometry_snapshot",
+            None,
+        )
+        if (
+            getattr(
+                self,
+                "_pose_verification_geometry_snapshot_mode",
+                "off",
+            )
+            in {
+                "frozen_first_valid_v1",
+                "frozen_verification_only_v2",
+                "guarded_frozen_v3",
+                "guarded_frozen_live_pose_v4",
+                "guarded_frozen_homogeneous_v5",
+                "frozen_global_support_guard_v6",
+            }
+            and snapshot is not None
+        ):
+            target_device = self.desc_kpts.pts3d.device
+            if any(tensor.device != target_device for tensor in snapshot):
+                snapshot = tuple(tensor.to(target_device) for tensor in snapshot)
+                self._pose_verification_geometry_snapshot = snapshot
+            return snapshot
+        return (
+            self.desc_kpts.pts3d,
+            self.desc_kpts.pts_conf,
+            self.desc_kpts.has_pt3d,
+        )
+
+    def get_pose_verification_geometry_Rt(self):
+        snapshot_Rt = getattr(
+            self,
+            "_pose_verification_geometry_snapshot_Rt",
+            None,
+        )
+        if not isinstance(snapshot_Rt, torch.Tensor):
+            return self.get_geometry_Rt()
+        target_device = self.desc_kpts.pts3d.device
+        if snapshot_Rt.device != target_device:
+            snapshot_Rt = snapshot_Rt.to(target_device)
+            self._pose_verification_geometry_snapshot_Rt = snapshot_Rt
+        return snapshot_Rt
 
     def set_Rt(self, Rt: torch.Tensor):
         self.rW2C.data.copy_(Rt[:3, :2])
@@ -269,6 +466,7 @@ class Keyframe:
         unload_desc_kpts = self.desc_kpts.kpts.device.type == "cpu"
         if unload_desc_kpts:
             self.desc_kpts.to("cuda")
+        geometry_Rt = self.get_geometry_Rt()
 
         ## Update 3D points using the latest rendered depth
         if self.latest_invdepth is not None:
@@ -294,7 +492,9 @@ class Keyframe:
             conf = 0.1 * torch.exp(-mono_model_diff / var) * mono_conf
             depth = 1 / model_idepth.clamp(1e-6, 1e6)
             new_pts = depth2points(uv, depth[..., None], self.f, self.centre)
-            new_pts = (new_pts - self.get_t()) @ self.get_R()
+            new_pts = (
+                new_pts - geometry_Rt[:3, 3]
+            ) @ geometry_Rt[:3, :3]
             mask = conf > 0
             self.desc_kpts.update_3D_pts(new_pts[mask], depth[mask], conf[mask], mask)
 
@@ -328,7 +528,10 @@ class Keyframe:
                     f"invalid={invalid_chosen_ids}, scene_size={len(all_keyframes)}"
                 )
             Rts_others = torch.stack(
-                [all_keyframes[index].get_Rt() for index in baseline_indices],
+                [
+                    _geometry_rt(all_keyframes[index])
+                    for index in baseline_indices
+                ],
                 dim=0,
             )
             if len(Rts_others < self.triangulator.n_cams):
@@ -343,11 +546,17 @@ class Keyframe:
                 )
 
             new_pts, depth, best_dis, valid_matches = self.triangulator(
-                uv, uvs_others, self.get_Rt(), Rts_others, self.f, self.centre
+                uv,
+                uvs_others,
+                geometry_Rt,
+                Rts_others,
+                self.f,
+                self.centre,
             )
             self.desc_kpts.update_3D_pts(
                 new_pts[valid_matches], depth[valid_matches], 1, valid_matches
             )
+            self.capture_pose_verification_geometry_snapshot()
             if unload_desc_kpts:
                 self.desc_kpts.to("cpu")
             return
@@ -402,7 +611,13 @@ class Keyframe:
                 f"scene_size={len(all_keyframes)}"
             )
 
-        Rts_others = torch.stack([all_keyframes[index].get_Rt() for index in resolved_indices], dim=0)
+        Rts_others = torch.stack(
+            [
+                _geometry_rt(all_keyframes[index])
+                for index in resolved_indices
+            ],
+            dim=0,
+        )
         if len(Rts_others) < self.triangulator.n_cams:
             Rts_others = torch.cat(
                 [
@@ -416,11 +631,17 @@ class Keyframe:
 
         # Run the triangulator and update the 3D points
         new_pts, depth, best_dis, valid_matches = self.triangulator(
-            uv, resolved_uvs_others, self.get_Rt(), Rts_others, self.f, self.centre
+            uv,
+            resolved_uvs_others,
+            geometry_Rt,
+            Rts_others,
+            self.f,
+            self.centre,
         )
         self.desc_kpts.update_3D_pts(
             new_pts[valid_matches], depth[valid_matches], 1, valid_matches
         )
+        self.capture_pose_verification_geometry_snapshot()
         resolution_event["gaussian_update_attempted"] = True
         resolution_event["gaussian_update_success"] = True
         resolution_event["recovery_commit_success_final"] = True
@@ -475,6 +696,17 @@ class Keyframe:
     def step(self):
         # Optimizer step
         self.optimizer.step()
+        anchor = geometry_anchor_pose(self.get_Rt(), self.info)
+        if (
+            str(
+                self.info.get(
+                    "_pose_verification_geometry_anchor_mode",
+                    "off",
+                )
+            )
+            == "freeze_v1"
+        ):
+            self.set_Rt(anchor)
         self.depth_loss_weight *= self.depth_loss_weight_decay
         self.num_steps += 1
         # decrement pyr_lvl

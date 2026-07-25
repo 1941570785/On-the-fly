@@ -9,6 +9,15 @@ from scene.keyframe import Keyframe
 class _Desc:
     def __init__(self):
         self.kpts = torch.zeros(3, 2, device="cuda")
+        self.pts3d = torch.arange(
+            9, dtype=torch.float32, device="cuda"
+        ).view(3, 3)
+        self.pts_conf = torch.tensor(
+            [0.2, 0.6, 0.9], dtype=torch.float32, device="cuda"
+        )
+        self.has_pt3d = torch.tensor(
+            [True, False, True], dtype=torch.bool, device="cuda"
+        )
 
     def update_3D_pts(self, *_args, **_kwargs):
         pass
@@ -52,6 +61,112 @@ class _Triangulator:
 
 
 class KeyframeBaselineResolutionTests(unittest.TestCase):
+    def test_frozen_pose_geometry_snapshot_is_opt_in_and_immutable(self):
+        keyframe = Keyframe.__new__(Keyframe)
+        keyframe.desc_kpts = _Desc()
+        keyframe._pose_verification_geometry_snapshot_mode = "frozen_first_valid_v1"
+        keyframe._pose_verification_geometry_snapshot = None
+
+        captured = keyframe.capture_pose_verification_geometry_snapshot()
+        original_points = keyframe.desc_kpts.pts3d.clone()
+        original_confidence = keyframe.desc_kpts.pts_conf.clone()
+        original_mask = keyframe.desc_kpts.has_pt3d.clone()
+        keyframe.desc_kpts.pts3d.add_(100.0)
+        keyframe.desc_kpts.pts_conf.zero_()
+        keyframe.desc_kpts.has_pt3d.logical_not_()
+
+        points, confidence, mask = keyframe.get_pose_verification_geometry()
+
+        self.assertTrue(captured)
+        self.assertTrue(torch.equal(points, original_points))
+        self.assertTrue(torch.equal(confidence, original_confidence))
+        self.assertTrue(torch.equal(mask, original_mask))
+
+    def test_disabled_pose_geometry_snapshot_reads_live_points(self):
+        keyframe = Keyframe.__new__(Keyframe)
+        keyframe.desc_kpts = _Desc()
+        keyframe._pose_verification_geometry_snapshot_mode = "off"
+        keyframe._pose_verification_geometry_snapshot = None
+
+        self.assertFalse(keyframe.capture_pose_verification_geometry_snapshot())
+        keyframe.desc_kpts.pts3d.add_(7.0)
+        points, confidence, mask = keyframe.get_pose_verification_geometry()
+
+        self.assertIs(points, keyframe.desc_kpts.pts3d)
+        self.assertIs(confidence, keyframe.desc_kpts.pts_conf)
+        self.assertIs(mask, keyframe.desc_kpts.has_pt3d)
+
+    def test_guarded_snapshot_captures_the_same_geometry_pose(self):
+        keyframe = Keyframe.__new__(Keyframe)
+        keyframe.desc_kpts = _Desc()
+        keyframe._pose_verification_geometry_snapshot_mode = (
+            "guarded_frozen_v3"
+        )
+        keyframe._pose_verification_geometry_snapshot = None
+        keyframe._pose_verification_geometry_snapshot_Rt = None
+        initial_rt = torch.eye(4, device="cuda")
+        initial_rt[1, 3] = 0.25
+        expected_rt = initial_rt.clone()
+        keyframe._pose_verification_geometry_initial_Rt = initial_rt
+
+        self.assertTrue(keyframe.capture_pose_verification_geometry_snapshot())
+        captured_rt = keyframe.get_pose_verification_geometry_Rt()
+        keyframe._pose_verification_geometry_initial_Rt[1, 3] = 9.0
+
+        self.assertTrue(torch.equal(captured_rt, expected_rt))
+        self.assertAlmostEqual(float(captured_rt[1, 3]), 0.25)
+
+    def test_guarded_live_pose_mode_still_captures_immutable_global_points(self):
+        keyframe = Keyframe.__new__(Keyframe)
+        keyframe.desc_kpts = _Desc()
+        keyframe._pose_verification_geometry_snapshot_mode = (
+            "guarded_frozen_live_pose_v4"
+        )
+        keyframe._pose_verification_geometry_snapshot = None
+        keyframe._pose_verification_geometry_snapshot_Rt = None
+        keyframe._pose_verification_geometry_initial_Rt = torch.eye(
+            4,
+            device="cuda",
+        )
+
+        self.assertTrue(keyframe.capture_pose_verification_geometry_snapshot())
+        frozen_points = keyframe.get_pose_verification_geometry()[0]
+        keyframe.desc_kpts.pts3d.add_(50.0)
+
+        self.assertFalse(torch.equal(frozen_points, keyframe.desc_kpts.pts3d))
+
+    def test_homogeneous_guard_mode_captures_immutable_global_points(self):
+        keyframe = Keyframe.__new__(Keyframe)
+        keyframe.desc_kpts = _Desc()
+        keyframe._pose_verification_geometry_snapshot_mode = (
+            "guarded_frozen_homogeneous_v5"
+        )
+        keyframe._pose_verification_geometry_snapshot = None
+        keyframe._pose_verification_geometry_snapshot_Rt = None
+        keyframe._pose_verification_geometry_initial_Rt = torch.eye(
+            4,
+            device="cuda",
+        )
+
+        self.assertTrue(keyframe.capture_pose_verification_geometry_snapshot())
+        self.assertIsNotNone(keyframe.get_pose_verification_geometry())
+
+    def test_global_support_guard_captures_immutable_global_points(self):
+        keyframe = Keyframe.__new__(Keyframe)
+        keyframe.desc_kpts = _Desc()
+        keyframe._pose_verification_geometry_snapshot_mode = (
+            "frozen_global_support_guard_v6"
+        )
+        keyframe._pose_verification_geometry_snapshot = None
+        keyframe._pose_verification_geometry_snapshot_Rt = None
+        keyframe._pose_verification_geometry_initial_Rt = torch.eye(
+            4,
+            device="cuda",
+        )
+
+        self.assertTrue(keyframe.capture_pose_verification_geometry_snapshot())
+        self.assertIsNotNone(keyframe.get_pose_verification_geometry())
+
     def test_baseline_resolution_preserves_duplicate_chosen_keyframe_order(self):
         triangulator = _Triangulator()
         keyframe = Keyframe.__new__(Keyframe)

@@ -92,7 +92,7 @@ class MiniBAInternal(nn.Module):
         """
         # 扩展维度到 [npts, n_cams, ...] 以便并行求导
         xyz_e = xyz.unsqueeze(1).expand(-1, self.n_cams, *xyz.shape[1:])
-        Rs6D_ts = torch.cat([Rs6D.view(-1, 6), ts], dim=-1)
+        Rs6D_ts = torch.cat([Rs6D.reshape(-1, 6), ts], dim=-1)
         Rs6D_ts_e = Rs6D_ts[None].expand(self.npts, *Rs6D_ts.shape)
         f_e = f[None, None].expand(self.npts, self.n_cams, *f.shape)
         centre_e = centre[None, None].expand(self.npts, self.n_cams, *centre.shape)

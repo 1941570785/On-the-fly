@@ -1,7 +1,10 @@
 from pathlib import Path
 import unittest
 
-from scene.pose_render_extra_optimization import pose_render_extra_optimization_decision
+from scene.pose_render_extra_optimization import (
+    pose_render_extra_optimization_decision,
+    updated_render_response,
+)
 
 
 class PoseRenderExtraOptimizationTests(unittest.TestCase):
@@ -190,6 +193,126 @@ class PoseRenderExtraOptimizationTests(unittest.TestCase):
         self.assertEqual(debug["confidence"], 1.0)
         self.assertAlmostEqual(debug["coverage_deficit"], 0.12)
 
+    def test_render_response_v3_requires_four_response_observations(self):
+        debug = pose_render_extra_optimization_decision(
+            mode="render_response_v3",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info={
+                "is_test": False,
+                "_paper_aligned_pose_render_texture_sampling_coverage": {
+                    "coverage": 0.88,
+                    "coverage_deficit": 0.12,
+                },
+                "_paper_aligned_pose_render_response": {
+                    "observations": 3,
+                    "first_rgb_mse": 0.020,
+                    "latest_rgb_mse": 0.016,
+                    "best_rgb_mse": 0.016,
+                    "recent_rgb_mse": [0.020, 0.018, 0.016],
+                    "relative_improvement": 0.20,
+                },
+            },
+            base_iterations=30,
+            fraction=0.25,
+            max_extra=8,
+        )
+
+        self.assertFalse(debug["applied"])
+        self.assertEqual(debug["reason"], "render_response_pending")
+        self.assertEqual(debug["extra_iterations"], 0)
+
+    def test_render_response_v3_rejects_unstable_recent_response(self):
+        debug = pose_render_extra_optimization_decision(
+            mode="render_response_v3",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info={
+                "is_test": False,
+                "_paper_aligned_pose_render_texture_sampling_coverage": {
+                    "coverage": 0.88,
+                    "coverage_deficit": 0.12,
+                },
+                "_paper_aligned_pose_render_response": {
+                    "observations": 4,
+                    "first_rgb_mse": 0.020,
+                    "latest_rgb_mse": 0.016,
+                    "best_rgb_mse": 0.015,
+                    "recent_rgb_mse": [0.020, 0.015, 0.017, 0.016],
+                    "relative_improvement": 0.20,
+                },
+            },
+            base_iterations=30,
+            fraction=0.25,
+            max_extra=8,
+        )
+
+        self.assertFalse(debug["applied"])
+        self.assertEqual(debug["reason"], "render_response_unstable")
+        self.assertGreater(debug["render_response_rebound_ratio"], 0.01)
+
+    def test_render_response_v3_rejects_gap_too_large_for_visible_refinement(self):
+        debug = pose_render_extra_optimization_decision(
+            mode="render_response_v3",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info={
+                "is_test": False,
+                "_paper_aligned_pose_render_texture_sampling_coverage": {
+                    "coverage": 0.60,
+                    "coverage_deficit": 0.40,
+                },
+                "_paper_aligned_pose_render_response": {
+                    "observations": 4,
+                    "first_rgb_mse": 0.020,
+                    "latest_rgb_mse": 0.014,
+                    "best_rgb_mse": 0.014,
+                    "recent_rgb_mse": [0.020, 0.018, 0.016, 0.014],
+                    "relative_improvement": 0.30,
+                },
+            },
+            base_iterations=30,
+            fraction=0.25,
+            max_extra=8,
+        )
+
+        self.assertFalse(debug["applied"])
+        self.assertEqual(debug["reason"], "coverage_gap_too_large")
+        self.assertEqual(debug["extra_iterations"], 0)
+
+    def test_render_response_v3_does_not_repeat_a_finalized_keyframe(self):
+        debug = pose_render_extra_optimization_decision(
+            mode="render_response_v3",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info={
+                "is_test": False,
+                "_paper_aligned_pose_render_extra_refinement_state": {
+                    "state": "DONE",
+                    "attempted": True,
+                },
+                "_paper_aligned_pose_render_texture_sampling_coverage": {
+                    "coverage": 0.88,
+                    "coverage_deficit": 0.12,
+                },
+                "_paper_aligned_pose_render_response": {
+                    "observations": 4,
+                    "first_rgb_mse": 0.020,
+                    "latest_rgb_mse": 0.014,
+                    "best_rgb_mse": 0.014,
+                    "recent_rgb_mse": [0.020, 0.018, 0.016, 0.014],
+                    "relative_improvement": 0.30,
+                },
+            },
+            base_iterations=30,
+            fraction=0.25,
+            max_extra=8,
+        )
+
+        self.assertFalse(debug["applied"])
+        self.assertEqual(debug["reason"], "refinement_already_finalized")
+        self.assertEqual(debug["extra_iterations"], 0)
+
     def test_render_response_v3_is_self_authorized_without_render_lock_policy(self):
         debug = pose_render_extra_optimization_decision(
             mode="render_response_v3",
@@ -249,6 +372,38 @@ class PoseRenderExtraOptimizationTests(unittest.TestCase):
         self.assertFalse(debug["applied"])
         self.assertEqual(debug["reason"], "coverage_sufficient")
         self.assertEqual(debug["extra_iterations"], 0)
+
+    def test_render_response_v3_uses_selective_representation_gap_when_projection_is_full(self):
+        debug = pose_render_extra_optimization_decision(
+            mode="render_response_v3",
+            direct_density_mode="off",
+            render_frame_policy="baseline_keyframe_lock_v1",
+            keyframe_info={
+                "is_test": False,
+                "_paper_aligned_pose_render_texture_sampling_coverage": {
+                    "coverage": 0.99,
+                    "coverage_deficit": 0.01,
+                },
+                "_paper_aligned_pose_render_response": {
+                    "observations": 4,
+                    "first_rgb_mse": 0.020,
+                    "latest_rgb_mse": 0.014,
+                    "best_rgb_mse": 0.014,
+                    "recent_rgb_mse": [0.020, 0.018, 0.016, 0.014],
+                    "relative_improvement": 0.30,
+                    "representation_coverage_deficit": 0.12,
+                    "representation_gap_selectivity": 0.45,
+                },
+            },
+            base_iterations=30,
+            fraction=0.25,
+            max_extra=8,
+        )
+
+        self.assertTrue(debug["applied"])
+        self.assertEqual(debug["coverage_deficit"], 0.12)
+        self.assertEqual(debug["projection_coverage_deficit"], 0.01)
+        self.assertEqual(debug["representation_coverage_deficit"], 0.12)
 
     def test_render_response_v3_uses_current_view_despite_low_scene_pressure(self):
         debug = pose_render_extra_optimization_decision(
@@ -632,13 +787,31 @@ class PoseRenderExtraOptimizationTests(unittest.TestCase):
         self.assertEqual(debug["training_background_dark_scene_mask_blocked"], 128)
         self.assertEqual(debug["extra_iterations"], 0)
 
-    def test_scene_model_focuses_extra_iterations_on_latest_keyframe(self):
+    def test_render_response_history_keeps_the_latest_four_observations(self):
+        response = {}
+        for value in (0.040, 0.030, 0.025, 0.024, 0.023):
+            response = updated_render_response(
+                response,
+                value,
+                representation_coverage_deficit=0.12,
+                representation_gap_selectivity=0.45,
+            )
+
+        self.assertEqual(response["observations"], 5)
+        self.assertEqual(response["first_rgb_mse"], 0.040)
+        self.assertEqual(response["latest_rgb_mse"], 0.023)
+        self.assertEqual(response["best_rgb_mse"], 0.023)
+        self.assertEqual(response["representation_coverage_deficit"], 0.12)
+        self.assertEqual(response["representation_gap_selectivity"], 0.45)
+        self.assertEqual(response["recent_rgb_mse"], [0.030, 0.025, 0.024, 0.023])
+
+    def test_scene_model_focuses_transactional_extra_iterations_on_latest_keyframe(self):
         source = Path("scene/scene_model.py").read_text(encoding="utf-8")
 
-        self.assertIn("keyframe_id_override", source)
-        self.assertIn("update_pose", source)
         self.assertIn("pose_render_extra_optimization_decision", source)
-        self.assertIn("keyframe_id_override=-1, update_pose=False", source)
+        self.assertIn("_run_transactional_gaussian_refinement", source)
+        self.assertIn("refinement_candidate_acceptance", source)
+        self.assertIn("scale_gaussian_gradients", source)
 
     def test_scene_model_defers_render_response_extra_decision_until_after_base_loop(self):
         source = Path("scene/scene_model.py").read_text(encoding="utf-8")

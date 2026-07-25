@@ -22,6 +22,7 @@ from tools.run_extra_optimization_round_ablation import (
     validate_seeds,
 )
 from tools.run_pose_verification_a_ablation import SCENES
+import tools.run_extra_optimization_round_ablation as round_runner
 
 
 class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
@@ -41,10 +42,36 @@ class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
             command = build_command(self.make_spec(Path(directory), budget=0, seed=0))
 
         self.assertIn("disable_extra_optimization", command)
-        self.assertNotIn("--experiment_seed", command)
+        self.assertEqual(command[command.index("--experiment_seed") + 1], "0")
         self.assertNotIn(
             "--paper_aligned_pose_render_extra_optimization_max_extra", command
         )
+
+    def test_command_passes_each_paired_experiment_seed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            command = build_command(self.make_spec(Path(directory), budget=8, seed=3))
+            deterministic_command = build_command(
+                self.make_spec(Path(directory), budget=8, seed=3),
+                deterministic=True,
+            )
+
+        self.assertEqual(command[command.index("--experiment_seed") + 1], "3")
+        self.assertNotIn("--experiment_deterministic", command)
+        self.assertIn("--experiment_deterministic", deterministic_command)
+
+    def test_runner_builds_a_deterministic_subprocess_environment(self):
+        base = {"KEEP": "value", "PYTHONHASHSEED": "old"}
+
+        environment = round_runner.reproducibility_environment(base, seed=3)
+
+        self.assertEqual(environment["KEEP"], "value")
+        self.assertEqual(environment["PYTHONHASHSEED"], "3")
+        self.assertEqual(environment["CUBLAS_WORKSPACE_CONFIG"], ":4096:8")
+        self.assertEqual(environment["CUDA_LAUNCH_BLOCKING"], "1")
+        self.assertEqual(environment["NVIDIA_TF32_OVERRIDE"], "0")
+        self.assertEqual(environment["OMP_NUM_THREADS"], "1")
+        self.assertEqual(environment["MKL_NUM_THREADS"], "1")
+        self.assertEqual(base, {"KEEP": "value", "PYTHONHASHSEED": "old"})
 
     def test_command_uses_latest_pose_verification_a(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -52,7 +79,7 @@ class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
 
         self.assertEqual(
             command[command.index("--pose_initialization_risk_mode") + 1],
-            "verify_v1",
+            "observe_v1",
         )
         self.assertEqual(
             command[command.index("--pose_risk_utility_admission_mode") + 1],
@@ -61,6 +88,14 @@ class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
         self.assertEqual(
             command[command.index("--pose_verification_min_support") + 1],
             "24",
+        )
+        self.assertEqual(
+            command[command.index("--pose_verification_v2_min_improvement") + 1],
+            "0.0",
+        )
+        self.assertEqual(
+            command[command.index("--pose_direct_retry_mode") + 1],
+            "pose_safe_v18",
         )
 
     def test_positive_budget_maps_fraction_and_cap(self):
@@ -86,12 +121,13 @@ class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
         for invalid in ([], [0, 0], [-1, 2], [1, 2]):
             with self.subTest(budgets=invalid), self.assertRaises(ValueError):
                 validate_budgets(invalid)
-        for invalid in ([], [1], [0, 1]):
+        self.assertEqual(validate_seeds([0, 1, 2, 3, 4]), (0, 1, 2, 3, 4))
+        for invalid in ([], [0, 0], [-1, 1]):
             with self.subTest(seeds=invalid), self.assertRaises(ValueError):
                 validate_seeds(invalid)
 
-    def test_default_sweep_has_all_nine_scenes_and_63_unique_jobs(self):
-        self.assertEqual(tuple(ACTIVE_SCENES), tuple(SCENES))
+    def test_default_sweep_is_forest1_with_seven_budgets_and_five_seeds(self):
+        self.assertEqual(tuple(ACTIVE_SCENES), ("forest1",))
         with tempfile.TemporaryDirectory() as directory:
             specs = build_specs(
                 output_root=Path(directory),
@@ -101,8 +137,8 @@ class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
                 seeds=DEFAULT_SEEDS,
             )
 
-        self.assertEqual(len(specs), 63)
-        self.assertEqual(len({spec.job_id for spec in specs}), 63)
+        self.assertEqual(len(specs), 35)
+        self.assertEqual(len({spec.job_id for spec in specs}), 35)
 
     def test_worker_queues_keep_paired_blocks_on_one_gpu(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -111,7 +147,7 @@ class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
                 phase="sweep",
                 scene_names=("bonsai", "desk"),
                 budgets=(0, 2, 4, 8),
-                seeds=(0,),
+                seeds=(0, 1),
             )
         queues = build_worker_queues(specs, ("5", "6", "7"))
         assignments = {
@@ -121,7 +157,7 @@ class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
         }
 
         for scene_name in ("bonsai", "desk"):
-            for seed in (0,):
+            for seed in (0, 1):
                 gpu = assignments[(scene_name, seed)]
                 budgets = {
                     spec.budget
@@ -129,6 +165,18 @@ class ExtraOptimizationRoundRunnerTests(unittest.TestCase):
                     if spec.scene.name == scene_name and spec.seed == seed
                 }
                 self.assertEqual(budgets, {0, 2, 4, 8})
+
+    def test_training_entrypoint_seeds_torch_and_numpy_from_the_argument(self):
+        train_source = Path("train.py").read_text(encoding="utf-8")
+        args_source = Path("args.py").read_text(encoding="utf-8")
+
+        self.assertIn("--experiment_seed", args_source)
+        self.assertIn("--experiment_deterministic", args_source)
+        self.assertIn("args = get_args()", train_source)
+        self.assertIn("experiment_seed", train_source)
+        self.assertIn("configure_experiment_reproducibility", train_source)
+        self.assertIn("torch.random.manual_seed(experiment_seed)", train_source)
+        self.assertIn("np.random.seed(experiment_seed)", train_source)
 
     def test_completion_requires_success_status_and_metadata(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -11,7 +11,17 @@ POSE_RISK_UTILITY_MODES = {
     "observe_v1",
     "active_v1",
     "pose_quarantine_v1",
+    "pose_quarantine_utility_v1",
+    "pose_quarantine_severe_v1",
 }
+
+
+def pose_reference_quarantine_enabled(mode: str) -> bool:
+    return str(mode or "").strip().lower() in {
+        "pose_quarantine_v1",
+        "pose_quarantine_utility_v1",
+        "pose_quarantine_severe_v1",
+    }
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -24,6 +34,67 @@ def _as_float(value: Any, default: float = 0.0) -> float:
 
 def _clamp01(value: Any, default: float = 0.0) -> float:
     return max(0.0, min(1.0, _as_float(value, default)))
+
+
+def snapshot_optimizer_parameter_state(
+    optimizer: Any,
+    parameter_names: set[str],
+) -> dict[str, dict[str, Any]]:
+    snapshot: dict[str, dict[str, Any]] = {}
+    for name, parameter in optimizer.params.items():
+        if name not in parameter_names:
+            continue
+        snapshot[name] = {
+            key: parameter[key].detach().clone()
+            for key in ("val", "exp_avg", "exp_avg_sq")
+            if key in parameter
+        }
+    return snapshot
+
+
+def restore_optimizer_parameter_state(
+    optimizer: Any,
+    snapshot: dict[str, dict[str, Any]],
+    *,
+    restore_values: bool = True,
+) -> None:
+    for name, state in snapshot.items():
+        parameter = optimizer.params[name]
+        for key, value in state.items():
+            if key == "val" and not restore_values:
+                continue
+            parameter[key].data.copy_(value)
+
+
+def scale_optimizer_parameter_learning_rates(
+    optimizer: Any,
+    parameter_names: set[str],
+    *,
+    scale: float,
+) -> dict[str, Any]:
+    factor = _as_float(scale, 1.0)
+    if factor <= 0.0:
+        factor = 1.0
+    snapshot: dict[str, Any] = {}
+    for name, parameter in optimizer.params.items():
+        if name not in parameter_names or "lr" not in parameter:
+            continue
+        learning_rate = parameter["lr"]
+        snapshot[name] = (
+            learning_rate.detach().clone()
+            if hasattr(learning_rate, "detach")
+            else learning_rate
+        )
+        parameter["lr"] = learning_rate * factor
+    return snapshot
+
+
+def restore_optimizer_parameter_learning_rates(
+    optimizer: Any,
+    snapshot: dict[str, Any],
+) -> None:
+    for name, learning_rate in snapshot.items():
+        optimizer.params[name]["lr"] = learning_rate
 
 
 def representation_utility_score(
@@ -64,6 +135,21 @@ def pose_risk_candidate(risk_event: dict[str, Any] | None) -> bool:
     )
 
 
+def pose_review_candidate(
+    risk_event: dict[str, Any] | None,
+    *,
+    use_verification_candidates: bool = False,
+) -> bool:
+    event = dict(risk_event or {})
+    verification_candidate = bool(
+        use_verification_candidates
+        and event.get("eligible", False)
+        and event.get("warmed_up", False)
+        and event.get("verification_candidate", False)
+    )
+    return bool(pose_risk_candidate(event) or verification_candidate)
+
+
 def filter_pose_reference_indices(
     keyframes: list[Any],
     indices: list[int],
@@ -92,11 +178,25 @@ def pose_review_acceptance(
     max_rotation_delta_deg: float,
     max_translation_delta: float,
     max_loss_increase_ratio: float = 0.0,
+    min_relative_loss_improvement: float = 0.0,
+    validation_support_ratio: float = 1.0,
+    min_validation_support_ratio: float = 0.0,
 ) -> tuple[bool, str]:
+    if not math.isfinite(float(start_loss)) or not math.isfinite(float(end_loss)):
+        return False, "non_finite_loss"
+    if _as_float(validation_support_ratio) < max(
+        0.0, _as_float(min_validation_support_ratio)
+    ):
+        return False, "validation_support_lost"
     start = max(_as_float(start_loss), 1e-8)
-    end = _as_float(end_loss, float("inf"))
+    end = _as_float(end_loss)
     if end > start * (1.0 + max(0.0, _as_float(max_loss_increase_ratio))):
         return False, "loss_degraded"
+    relative_improvement = (start - end) / start
+    if relative_improvement < max(
+        0.0, _as_float(min_relative_loss_improvement)
+    ):
+        return False, "loss_improvement_too_small"
     if _as_float(rotation_delta_deg) > max(
         0.0, _as_float(max_rotation_delta_deg)
     ):
@@ -119,6 +219,8 @@ class PoseRiskUtilityAdmissionGate:
         isolation_cooldown_frames: int = 24,
         quarantine_risk_margin: float = 0.08,
         quarantine_cooldown_frames: int = 64,
+        use_verification_candidates: bool = False,
+        review_test_candidates: bool = False,
     ) -> None:
         normalized_mode = str(mode or "off").strip().lower()
         if normalized_mode not in POSE_RISK_UTILITY_MODES:
@@ -140,6 +242,8 @@ class PoseRiskUtilityAdmissionGate:
         self.quarantine_cooldown_frames = max(
             0, int(quarantine_cooldown_frames)
         )
+        self.use_verification_candidates = bool(use_verification_candidates)
+        self.review_test_candidates = bool(review_test_candidates)
         self.last_isolated_frame_id = -1
         self.last_quarantined_frame_id = -1
         self.events: list[dict[str, Any]] = []
@@ -156,7 +260,16 @@ class PoseRiskUtilityAdmissionGate:
     ) -> dict[str, Any]:
         risk_event = dict(risk_event or {})
         render_probe = dict(render_probe or {})
-        candidate = pose_risk_candidate(risk_event)
+        verification_candidate_routed = bool(
+            self.use_verification_candidates
+            and risk_event.get("eligible", False)
+            and risk_event.get("warmed_up", False)
+            and risk_event.get("verification_candidate", False)
+        )
+        candidate = pose_review_candidate(
+            risk_event,
+            use_verification_candidates=self.use_verification_candidates,
+        )
         coverage_deficit = _clamp01(render_probe.get("coverage_deficit"), 0.0)
         residual_selectivity = max(
             0.0, _as_float(render_probe.get("residual_selectivity"), 0.0)
@@ -194,7 +307,27 @@ class PoseRiskUtilityAdmissionGate:
             and int(frame_id) - self.last_quarantined_frame_id
             < self.quarantine_cooldown_frames
         )
-        if self.mode == "pose_quarantine_v1":
+        if self.mode == "pose_quarantine_severe_v1":
+            if not candidate:
+                suggested_decision = "admit"
+            elif not bool(risk_event.get("severe_pose_risk", False)):
+                suggested_decision = "admit_conservative"
+            elif quarantine_cooldown_active:
+                suggested_decision = "quarantine_cooldown_admit"
+            else:
+                suggested_decision = "conservative_render_pose_quarantine"
+        elif self.mode == "pose_quarantine_utility_v1":
+            if not candidate:
+                suggested_decision = "admit"
+            elif utility_score >= self.utility_threshold:
+                suggested_decision = "render_admit_high_utility"
+            elif not quarantine_risk:
+                suggested_decision = "admit_conservative"
+            elif quarantine_cooldown_active:
+                suggested_decision = "quarantine_cooldown_admit"
+            else:
+                suggested_decision = "conservative_render_pose_quarantine"
+        elif self.mode == "pose_quarantine_v1":
             if not candidate:
                 suggested_decision = "admit"
             elif not quarantine_risk:
@@ -220,7 +353,12 @@ class PoseRiskUtilityAdmissionGate:
         if not baseline_selected:
             decision = "bypass_not_selected"
         elif is_test:
-            decision = "bypass_test"
+            decision = (
+                "review_admit"
+                if self.review_test_candidates
+                and suggested_decision == "review_admit"
+                else "bypass_test"
+            )
         elif is_bootstrap:
             decision = "bypass_bootstrap"
         elif self.mode == "off":
@@ -250,6 +388,7 @@ class PoseRiskUtilityAdmissionGate:
             "is_test": bool(is_test),
             "is_bootstrap": bool(is_bootstrap),
             "risk_candidate": bool(candidate),
+            "verification_candidate_routed": verification_candidate_routed,
             "probe_required": bool(candidate and not render_probe),
             "review": bool(decision == "review_admit"),
             "isolated": bool(decision == "isolate_low_utility"),
@@ -320,6 +459,8 @@ class PoseRiskUtilityAdmissionGate:
                 "isolation_cooldown_frames": self.isolation_cooldown_frames,
                 "quarantine_risk_margin": self.quarantine_risk_margin,
                 "quarantine_cooldown_frames": self.quarantine_cooldown_frames,
+                "use_verification_candidates": self.use_verification_candidates,
+                "review_test_candidates": self.review_test_candidates,
             },
             "summary": self.summary(),
             "events": self.events,
