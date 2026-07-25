@@ -60,6 +60,10 @@ def extract_scene(
     source_image: Path,
     frame_name: str,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    with (scene_path / "metadata.json").open(
+        "r", encoding="utf-8"
+    ) as source:
+        metadata = json.load(source)
     inference_args = get_args(
         [
             "-s",
@@ -71,16 +75,14 @@ def extract_scene(
         ]
     )
     scene_model = SceneModel.from_scene(str(scene_path), inference_args)
+    scene_model.f = float(metadata["config"]["f"])
+    scene_model.init_intrinsics()
     keyframe_id = _find_keyframe_id(scene_model, frame_name)
     package = scene_model.render_from_id(keyframe_id, pyr_lvl=0)
-    render = (
-        package["render"]
-        .clamp(0, 1)
-        .mul(255)
-        .permute(1, 2, 0)
-        .byte()
-        .cpu()
-        .numpy()
+    render_path = scene_path / "test_images" / frame_name
+    render = np.asarray(
+        Image.open(render_path).convert("RGB"),
+        dtype=np.uint8,
     )
     id_map = package["mainGaussID"][0].int().cpu().numpy()
     valid_ids = id_map[id_map >= 0]
@@ -88,6 +90,8 @@ def extract_scene(
         "scene_dir": str(scene_path),
         "keyframe_id": keyframe_id,
         "keyframe_name": frame_name,
+        "restored_focal_pixels": scene_model.f,
+        "render_path": str(render_path),
         "visible_unique_gaussians": int(np.unique(valid_ids).size),
         "total_blended_gaussians": int(scene_model.xyz.shape[0]),
     }
