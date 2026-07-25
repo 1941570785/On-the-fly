@@ -164,7 +164,6 @@ class RANSACEstimator:
         R6D_init=None,
         t_init=None,
         confs=None,
-        generator: torch.Generator | None = None,
     ):
         """
         Run the RANSAC estimator to find the best model and inliers.
@@ -188,12 +187,7 @@ class RANSACEstimator:
 
         # Select N x m random points
         # 每个模型随机采样 m 个匹配点
-        random_scores = torch.rand(
-            self.N,
-            mkpts1.shape[0],
-            device=mkpts1.device,
-            generator=generator,
-        )
+        random_scores = torch.rand(self.N, mkpts1.shape[0], device=mkpts1.device)
         _, idxs = torch.topk(random_scores, self.m, dim=1)
 
         # Run the batch estimator

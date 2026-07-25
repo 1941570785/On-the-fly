@@ -1,0 +1,11 @@
+{
+  "protocol": "Sim(3)-aligned evaluation on held-out frames",
+  "translation_unit": "100 x reconstruction coordinate unit",
+  "rotation_unit": "radian",
+  "metrics": ["T_APE", "R_APE", "T_RPE", "R_RPE"],
+  "datasets": {
+    "Mip-NeRF360": [2.316327567027958, 0.006457017201146662, 1.8784818207840608, 0.004559954670301459],
+    "StaticHikes": [34.89764507165662, 0.044823031393290746, 2.7336156222529993, 0.0021517222362665745],
+    "TUM RGB-D": [29.45376573887137, 0.14306761797202514, 5.814997932651322, 0.035976787272467226]
+  }
+}
