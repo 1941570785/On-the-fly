@@ -31,6 +31,10 @@ class PoseReliabilityConfig:
 @dataclass(frozen=True)
 class ResponseSamplingConfig:
     enabled: bool = True
+    signal_mode: str = "r_e_d"
+    photometric_weight: float = 0.65
+    edge_weight: float = 0.35
+    coverage_gate_enabled: bool = True
     alpha: float = 0.03
     min_selectivity: float = 1.8
     min_coverage_deficit: float = 0.08
@@ -95,6 +99,8 @@ FINAL_CONFIG = ASRGSConfig(
 def resolve_config(
     method: str,
     ablations: Iterable[str] = (),
+    *,
+    sampling_mode: str = "r_e_d",
 ) -> ASRGSConfig:
     normalized_method = str(method).strip().lower()
     if normalized_method not in {"baseline", "asr-gs"}:
@@ -108,10 +114,55 @@ def resolve_config(
     if normalized_method == "baseline":
         disabled = {"a", "b", "c"}
 
+    normalized_sampling_mode = str(sampling_mode).strip().lower()
+    sampling_modes = {
+        "base": {
+            "enabled": False,
+            "photometric_weight": 0.0,
+            "edge_weight": 0.0,
+            "coverage_gate_enabled": False,
+        },
+        "r": {
+            "enabled": True,
+            "photometric_weight": 1.0,
+            "edge_weight": 0.0,
+            "coverage_gate_enabled": False,
+        },
+        "r_e": {
+            "enabled": True,
+            "photometric_weight": 0.65,
+            "edge_weight": 0.35,
+            "coverage_gate_enabled": False,
+        },
+        "r_d": {
+            "enabled": True,
+            "photometric_weight": 1.0,
+            "edge_weight": 0.0,
+            "coverage_gate_enabled": True,
+        },
+        "r_e_d": {
+            "enabled": True,
+            "photometric_weight": 0.65,
+            "edge_weight": 0.35,
+            "coverage_gate_enabled": True,
+        },
+    }
+    if normalized_sampling_mode not in sampling_modes:
+        raise ValueError(
+            f"unsupported B signal mode: {normalized_sampling_mode}"
+        )
+    if "b" in disabled:
+        normalized_sampling_mode = "base"
+    sampling_values = sampling_modes[normalized_sampling_mode]
+
     return ASRGSConfig(
         method=normalized_method,
         pose=replace(FINAL_CONFIG.pose, enabled="a" not in disabled),
-        sampling=replace(FINAL_CONFIG.sampling, enabled="b" not in disabled),
+        sampling=replace(
+            FINAL_CONFIG.sampling,
+            signal_mode=normalized_sampling_mode,
+            **sampling_values,
+        ),
         refinement=replace(
             FINAL_CONFIG.refinement,
             enabled="c" not in disabled,

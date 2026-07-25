@@ -79,6 +79,12 @@ def _parser() -> argparse.ArgumentParser:
     method.add_argument("--ablate-a", action="store_true")
     method.add_argument("--ablate-b", action="store_true")
     method.add_argument("--ablate-c", action="store_true")
+    method.add_argument(
+        "--b-signal-mode",
+        choices=("base", "r", "r_e", "r_d", "r_e_d"),
+        default="r_e_d",
+        help="Controlled B-module signal composition for internal ablation.",
+    )
     method.add_argument("--experiment-seed", type=int, default=0)
     method.add_argument("--deterministic", action="store_true")
 
@@ -113,7 +119,13 @@ def get_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     }
     if args.method == "baseline" and ablations:
         raise ValueError("component ablations require --method asr-gs")
-    args.asr_gs_config = resolve_config(args.method, ablations)
+    if args.method == "baseline" and args.b_signal_mode != "r_e_d":
+        raise ValueError("B signal modes require --method asr-gs")
+    args.asr_gs_config = resolve_config(
+        args.method,
+        ablations,
+        sampling_mode=args.b_signal_mode,
+    )
 
     if not args.model_path:
         index = 0

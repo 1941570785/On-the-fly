@@ -5,6 +5,18 @@ from typing import Any, Mapping
 from asr_gs.config import ResponseSamplingConfig
 
 
+def combine_sampling_response(
+    photometric_residual: Any,
+    edge_response: Any,
+    config: ResponseSamplingConfig,
+) -> Any:
+    """Combine the two spatial B signals without changing their scale."""
+    return (
+        float(config.photometric_weight) * photometric_residual
+        + float(config.edge_weight) * edge_response
+    )
+
+
 def sampling_scene_guard(
     stats: Mapping[str, object],
     config: ResponseSamplingConfig,
@@ -65,11 +77,15 @@ def response_guided_sampling_probability(
     """Reallocate baseline Bernoulli mass using rendering response."""
     debug: dict[str, Any] = {
         "enabled": bool(config.enabled),
+        "signal_mode": str(config.signal_mode),
         "applied": False,
         "reason": "",
         "alpha": 0.0,
         "selectivity": 0.0,
         "coverage_deficit": float(coverage_deficit),
+        "coverage_gate_enabled": bool(config.coverage_gate_enabled),
+        "photometric_weight": float(config.photometric_weight),
+        "edge_weight": float(config.edge_weight),
     }
     if not config.enabled:
         debug["reason"] = "disabled"
@@ -78,7 +94,10 @@ def response_guided_sampling_probability(
         debug["reason"] = "scene_guard_disabled"
         debug["scene_guard"] = dict(scene_guard or {})
         return base_probability, debug
-    if float(coverage_deficit) < config.min_coverage_deficit:
+    if (
+        config.coverage_gate_enabled
+        and float(coverage_deficit) < config.min_coverage_deficit
+    ):
         debug["reason"] = "coverage_sufficient"
         return base_probability, debug
     if base_probability.numel() == 0 or residual_edge_response.numel() == 0:

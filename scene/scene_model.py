@@ -57,6 +57,7 @@ from asr_gs.refinement_policy import (
     updated_render_response,
 )
 from asr_gs.response_sampling import (
+    combine_sampling_response,
     response_guided_sampling_probability,
     sampling_response_verdict,
     sampling_scene_guard,
@@ -1553,12 +1554,14 @@ class SceneModel:
             }
             penalty = get_lapla_norm(render, self.disc_kernel)  # 渲染图像的Laplacian作为惩罚
             residual = (render.detach() - img).abs().mean(dim=0)
-            residual_edge_response = (
-                0.65 * residual
-                + 0.35 * get_lapla_norm(
-                    residual[None],
-                    self.disc_kernel,
-                )
+            edge_response = get_lapla_norm(
+                residual[None],
+                self.disc_kernel,
+            )
+            residual_edge_response = combine_sampling_response(
+                residual,
+                edge_response,
+                self.sampling_config,
             )
 
         # ========== 采样掩码生成 ==========
