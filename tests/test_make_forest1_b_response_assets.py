@@ -6,6 +6,7 @@ from tools.make_forest1_b_response_assets import (
     boxes_overlap,
     compute_response_guide,
     footprint_density,
+    gaussian_projection_centroids,
     local_gaussian_count,
     select_response_rois,
 )
@@ -68,6 +69,26 @@ class Forest1BResponseAssetTests(unittest.TestCase):
 
         self.assertEqual(local_gaussian_count(identifiers, box), 3)
         self.assertAlmostEqual(float(density.sum()), 3.0, places=6)
+
+    def test_projection_centroids_emit_one_point_per_unique_gaussian(self):
+        identifiers = np.asarray(
+            [
+                [1, 1, -1],
+                [-1, -1, 2],
+                [-1, -1, 2],
+            ],
+            dtype=np.int32,
+        )
+
+        points = gaussian_projection_centroids(
+            identifiers,
+            (0, 0, 3, 3),
+        )
+
+        np.testing.assert_allclose(
+            points,
+            np.asarray([[0.5, 0.0], [2.0, 1.5]]),
+        )
 
 
 if __name__ == "__main__":

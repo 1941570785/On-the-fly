@@ -336,6 +336,106 @@ def footprint_density(
     return density
 
 
+def gaussian_projection_centroids(
+    id_map: np.ndarray,
+    box: tuple[int, int, int, int],
+) -> np.ndarray:
+    """Return one local screen-space centroid per dominant Gaussian ID."""
+
+    x0, y0, x1, y1 = box
+    local_ids = id_map[y0:y1, x0:x1]
+    valid = local_ids >= 0
+    if not np.any(valid):
+        return np.empty((0, 2), dtype=np.float64)
+
+    y_coordinates, x_coordinates = np.nonzero(valid)
+    identifiers = local_ids[valid]
+    _, inverse = np.unique(identifiers, return_inverse=True)
+    counts = np.bincount(inverse).astype(np.float64)
+    x_centroids = np.bincount(
+        inverse,
+        weights=x_coordinates.astype(np.float64),
+    ) / counts
+    y_centroids = np.bincount(
+        inverse,
+        weights=y_coordinates.astype(np.float64),
+    ) / counts
+    return np.column_stack((x_centroids, y_centroids))
+
+
+def choose_representative_repeat(
+    run_records: dict[tuple[str, str, int], dict[str, float]],
+    repeat_count: int,
+) -> int:
+    """Choose one common run nearest to the multi-metric run means."""
+
+    scores = {repeat: 0.0 for repeat in range(1, repeat_count + 1)}
+    region_methods = sorted(
+        {(region, method) for region, method, _ in run_records}
+    )
+    for region, method in region_methods:
+        for metric in ("gaussian_count", "local_psnr"):
+            values = np.asarray(
+                [
+                    run_records[(region, method, repeat)][metric]
+                    for repeat in range(1, repeat_count + 1)
+                ],
+                dtype=np.float64,
+            )
+            scale = max(float(values.std(ddof=1)), 1e-8)
+            mean = float(values.mean())
+            for repeat, value in enumerate(values, start=1):
+                scores[repeat] += abs(float(value) - mean) / scale
+    return min(scores, key=lambda repeat: (scores[repeat], repeat))
+
+
+def save_gaussian_scatter(
+    points: np.ndarray,
+    shape: tuple[int, int],
+    output_path: Path,
+) -> None:
+    """Draw a publication-ready discrete projected-Gaussian distribution."""
+
+    height, width = shape
+    figure = plt.figure(
+        figsize=(width / 100.0, height / 100.0),
+        dpi=600,
+        facecolor="white",
+        frameon=False,
+    )
+    axis = figure.add_axes([0.035, 0.045, 0.93, 0.91])
+    axis.set_facecolor("white")
+    if points.size:
+        axis.scatter(
+            points[:, 0],
+            points[:, 1],
+            s=0.22,
+            marker="s",
+            c="#FF3B5C",
+            edgecolors="none",
+            alpha=0.90,
+            rasterized=True,
+        )
+    axis.set_xlim(-0.5, width - 0.5)
+    axis.set_ylim(height - 0.5, -0.5)
+    axis.set_aspect("equal", adjustable="box")
+    axis.set_xticks([])
+    axis.set_yticks([])
+    for spine in axis.spines.values():
+        spine.set_visible(True)
+        spine.set_color("#8A8A8A")
+        spine.set_linewidth(0.75)
+    figure.savefig(
+        output_path,
+        dpi=600,
+        facecolor="white",
+        edgecolor="none",
+        bbox_inches=None,
+        pad_inches=0,
+    )
+    plt.close(figure)
+
+
 def _muted_background(crop: np.ndarray) -> np.ndarray:
     rgb = crop.astype(np.float64) / 255.0
     gray = np.sum(rgb * np.asarray([0.2126, 0.7152, 0.0722]), axis=2)
@@ -632,6 +732,10 @@ def main() -> int:
     )
 
     rows: list[dict[str, object]] = []
+    run_records: dict[
+        tuple[str, str, int],
+        dict[str, float],
+    ] = {}
     density_maps: dict[tuple[str, str], np.ndarray] = {}
     for roi in rois:
         x0, y0, x1, y1 = roi["box"]
@@ -647,8 +751,18 @@ def main() -> int:
                 prefix = f"{method}_repeat_{repeat}"
                 render = arrays[f"{prefix}_render"]
                 id_map = arrays[f"{prefix}_ids"]
-                counts.append(local_gaussian_count(id_map, roi["box"]))
-                psnrs.append(local_psnr(ground_truth, render, roi["box"]))
+                gaussian_count = local_gaussian_count(id_map, roi["box"])
+                local_quality = local_psnr(
+                    ground_truth,
+                    render,
+                    roi["box"],
+                )
+                counts.append(gaussian_count)
+                psnrs.append(local_quality)
+                run_records[(roi["name"], method, repeat)] = {
+                    "gaussian_count": float(gaussian_count),
+                    "local_psnr": local_quality,
+                }
                 densities.append(
                     footprint_density(
                         id_map,
@@ -684,6 +798,10 @@ def main() -> int:
     )
     density_vmax = float(np.percentile(positive_density, 99.5))
     density_norm = Normalize(vmin=0.0, vmax=max(density_vmax, 1e-12))
+    representative_repeat = choose_representative_repeat(
+        run_records,
+        args.repeat,
+    )
     for roi in rois:
         x0, y0, x1, y1 = roi["box"]
         crop = ground_truth[y0:y1, x0:x1]
@@ -692,9 +810,27 @@ def main() -> int:
                 crop,
                 density_maps[(roi["name"], method)],
                 args.output_dir
-                / f"region_{roi['name']}_density_{method}.png",
+                / f"region_{roi['name']}_footprint_density_{method}.png",
                 density_norm,
             )
+            id_map = arrays[
+                f"{method}_repeat_{representative_repeat}_ids"
+            ]
+            points = gaussian_projection_centroids(id_map, roi["box"])
+            save_gaussian_scatter(
+                points,
+                (y1 - y0, x1 - x0),
+                args.output_dir
+                / f"region_{roi['name']}_density_{method}.png",
+            )
+            row = next(
+                candidate
+                for candidate in rows
+                if candidate["region"] == roi["name"]
+                and candidate["method"] == method
+            )
+            row["scatter_representative_repeat"] = representative_repeat
+            row["scatter_point_count"] = int(points.shape[0])
 
     for roi in rois:
         region_rows = [
@@ -788,6 +924,19 @@ def main() -> int:
             "shared_vmin": 0.0,
             "shared_vmax_percentile_99_5": density_vmax,
             "repeat_aggregation": "pixel-wise arithmetic mean",
+        },
+        "scatter": {
+            "definition": (
+                "One red square is drawn at the ROI-local screen-space "
+                "centroid of each unique dominant visible Gaussian ID."
+            ),
+            "representative_repeat": representative_repeat,
+            "representative_repeat_selection": (
+                "One common repeat minimizes the summed standardized "
+                "distance to the three-run means of Gaussian count and "
+                "local PSNR over both ROIs and all variants."
+            ),
+            "point_subsampling": False,
         },
         "bar_statistics": {
             "repeat_aggregation": "arithmetic mean over complete runs",
