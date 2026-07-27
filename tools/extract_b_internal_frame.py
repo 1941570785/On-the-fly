@@ -18,7 +18,12 @@ if str(ROOT) not in sys.path:
 
 from args import get_args
 from scene.scene_model import SceneModel
-from tools.run_b_internal_ablation import B_SIGNAL_MODES
+from tools.run_b_internal_ablation import (
+    B_SIGNAL_MODES,
+    SCENES,
+    Scene,
+    XYZ_SCENE,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,6 +35,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--experiment-root", type=Path, required=True)
     parser.add_argument("--source-image", type=Path, required=True)
+    parser.add_argument(
+        "--scene",
+        choices=tuple(SCENES),
+        default=XYZ_SCENE.name,
+    )
     parser.add_argument("--frame-name", default="001441.png")
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--output", type=Path, required=True)
@@ -37,8 +47,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _scene_path(root: Path, mode: str, repeat: int) -> Path:
-    return root / mode / f"repeat_{repeat}" / "TUM_RGB-D" / "xyz"
+def _scene_path(
+    root: Path,
+    mode: str,
+    repeat: int,
+    scene: Scene,
+) -> Path:
+    dataset_directory = scene.dataset.replace(" ", "_")
+    return (
+        root
+        / mode
+        / f"repeat_{repeat}"
+        / dataset_directory
+        / scene.name
+    )
 
 
 def _find_keyframe_id(scene_model: SceneModel, frame_name: str) -> int:
@@ -103,6 +125,7 @@ def extract_scene(
 
 def main() -> int:
     args = parse_args()
+    scene = SCENES[args.scene]
     ground_truth = np.asarray(
         Image.open(args.source_image).convert("RGB"),
         dtype=np.uint8,
@@ -115,6 +138,7 @@ def main() -> int:
                 args.experiment_root,
                 mode,
                 repeat,
+                scene,
             )
             if not (scene_path / "metadata.json").is_file():
                 raise FileNotFoundError(scene_path / "metadata.json")

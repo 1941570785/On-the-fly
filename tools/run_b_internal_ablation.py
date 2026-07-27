@@ -48,15 +48,32 @@ XYZ_SCENE = Scene(
     30,
 )
 
+FOREST1_SCENE = Scene(
+    "StaticHikes",
+    "forest1",
+    "StaticHikes/forest1",
+    10,
+)
+
+SCENES = {
+    XYZ_SCENE.name: XYZ_SCENE,
+    FOREST1_SCENE.name: FOREST1_SCENE,
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the five-way internal B-module ablation on TUM RGB-D xyz."
+            "Run the five-way internal B-module ablation on one scene."
         )
     )
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument(
+        "--scene",
+        choices=tuple(SCENES),
+        default=XYZ_SCENE.name,
+    )
     parser.add_argument("--gpus", nargs="+", default=["0"])
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--seed", type=int, default=0)
@@ -72,6 +89,23 @@ def validate_gpus(gpus: Iterable[str]) -> tuple[str, ...]:
     if len(set(values)) != len(values):
         raise ValueError("GPU identifiers must be unique")
     return values
+
+
+def scene_output_path(
+    output_root: Path,
+    *,
+    signal_mode: str,
+    repeat: int,
+    scene: Scene,
+) -> Path:
+    dataset_directory = scene.dataset.replace(" ", "_")
+    return (
+        output_root
+        / signal_mode
+        / f"repeat_{repeat}"
+        / dataset_directory
+        / scene.name
+    )
 
 
 def build_jobs(*, repeat: int, base_seed: int) -> list[Job]:
@@ -257,7 +291,8 @@ def main() -> int:
     args = parse_args()
     gpus = validate_gpus(args.gpus)
     jobs_to_run = build_jobs(repeat=args.repeat, base_seed=args.seed)
-    source_path = args.data_root / XYZ_SCENE.relative_path
+    scene = SCENES[args.scene]
+    source_path = args.data_root / scene.relative_path
     if not (source_path / "images").is_dir():
         raise FileNotFoundError(f"missing scene images: {source_path}")
 
@@ -284,7 +319,7 @@ def main() -> int:
         "config_fingerprints": {
             mode: configs[mode].fingerprint for mode in B_SIGNAL_MODES
         },
-        "scene": asdict(XYZ_SCENE),
+        "scene": asdict(scene),
         "repeat": args.repeat,
         "base_seed": args.seed,
         "gpus": list(gpus),
@@ -311,12 +346,11 @@ def main() -> int:
             if job is None:
                 jobs.task_done()
                 return
-            output_path = (
-                args.output_root
-                / job.signal_mode
-                / f"repeat_{job.repeat}"
-                / "TUM_RGB-D"
-                / XYZ_SCENE.name
+            output_path = scene_output_path(
+                args.output_root,
+                signal_mode=job.signal_mode,
+                repeat=job.repeat,
+                scene=scene,
             )
             try:
                 metadata_path = output_path / "metadata.json"
@@ -327,7 +361,7 @@ def main() -> int:
                         force=True,
                     )
                     command = build_train_command(
-                        scene=XYZ_SCENE,
+                        scene=scene,
                         source_path=source_path,
                         output_path=output_path,
                         signal_mode=job.signal_mode,

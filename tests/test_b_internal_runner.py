@@ -3,9 +3,11 @@ from pathlib import Path
 
 from tools.run_b_internal_ablation import (
     B_SIGNAL_MODES,
+    SCENES,
     XYZ_SCENE,
     build_jobs,
     build_train_command,
+    scene_output_path,
     validate_gpus,
 )
 
@@ -49,6 +51,21 @@ class BInternalRunnerTests(unittest.TestCase):
             validate_gpus(["0", "1", "2", "3"])
         with self.assertRaises(ValueError):
             validate_gpus(["0", "0"])
+
+    def test_runner_supports_static_hikes_forest1(self):
+        scene = SCENES["forest1"]
+        self.assertEqual(scene.dataset, "StaticHikes")
+        self.assertEqual(scene.relative_path, "StaticHikes/forest1")
+        self.assertEqual(scene.test_hold, 10)
+        self.assertEqual(
+            scene_output_path(
+                Path("/results"),
+                signal_mode="r_e_d",
+                repeat=2,
+                scene=scene,
+            ),
+            Path("/results/r_e_d/repeat_2/StaticHikes/forest1"),
+        )
 
 
 if __name__ == "__main__":
