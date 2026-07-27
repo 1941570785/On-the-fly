@@ -189,6 +189,39 @@ def stratified_display_subset(
     return selected[final_order]
 
 
+def proportional_display_targets(
+    gaussian_counts: dict[str, float],
+    *,
+    maximum_points: int,
+) -> dict[str, int]:
+    """Scale display-point counts to the complete Gaussian-count ratios."""
+
+    if maximum_points < 1:
+        raise ValueError("maximum_points must be positive")
+    if not gaussian_counts:
+        raise ValueError("gaussian_counts must not be empty")
+    maximum_count = max(float(value) for value in gaussian_counts.values())
+    if maximum_count <= 0:
+        raise ValueError("at least one Gaussian count must be positive")
+    return {
+        method: (
+            0
+            if float(count) <= 0
+            else max(
+                1,
+                int(
+                    round(
+                        maximum_points
+                        * float(count)
+                        / maximum_count
+                    )
+                ),
+            )
+        )
+        for method, count in gaussian_counts.items()
+    }
+
+
 def _integral(values: np.ndarray) -> np.ndarray:
     return np.pad(
         values.cumsum(axis=0).cumsum(axis=1),
@@ -551,14 +584,23 @@ def main() -> int:
     for roi in rois:
         height = roi["box"][3] - roi["box"][1]
         width = roi["box"][2] - roi["box"][0]
-        region_rows = []
-        for method in METHODS:
-            row = next(
+        region_rows = [
+            next(
                 record
                 for record in rows
                 if record["region"] == roi["name"]
                 and record["method"] == method
             )
+            for method in METHODS
+        ]
+        display_targets = proportional_display_targets(
+            {
+                row["method"]: float(row["gaussian_count_mean_raw"])
+                for row in region_rows
+            },
+            maximum_points=args.scatter_target,
+        )
+        for method, row in zip(METHODS, region_rows):
             id_map = arrays[
                 f"{method}_repeat_{representative_repeat}_ids"
             ]
@@ -569,7 +611,7 @@ def main() -> int:
             display_points = stratified_display_subset(
                 all_points,
                 shape=(height, width),
-                target_count=args.scatter_target,
+                target_count=display_targets[method],
                 grid_shape=(
                     args.scatter_grid_x,
                     args.scatter_grid_y,
@@ -585,8 +627,8 @@ def main() -> int:
             )
             row["scatter_representative_repeat"] = representative_repeat
             row["scatter_actual_points"] = int(len(all_points))
+            row["scatter_proportional_target"] = display_targets[method]
             row["scatter_displayed_points"] = int(len(display_points))
-            region_rows.append(row)
 
         count_values = np.asarray(
             [
@@ -680,15 +722,17 @@ def main() -> int:
         },
         "scatter": {
             "representative_repeat": representative_repeat,
-            "target_display_points": args.scatter_target,
+            "maximum_display_points_per_region": args.scatter_target,
             "sampling": (
                 "Deterministic density-preserving spatial stratification "
                 "over real projected Gaussian centroids; no synthetic "
                 "points are introduced."
             ),
             "display_normalization": (
-                "Each method panel displays the same target number of "
-                "real centroids unless the ROI contains fewer centroids."
+                "Within each ROI, the method with the largest complete "
+                "three-run mean Gaussian count displays the configured "
+                "maximum number of points. The other method panels are "
+                "scaled proportionally to their complete mean counts."
             ),
             "note": (
                 "The sparse scatter is a distribution summary. The bar "
