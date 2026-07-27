@@ -1,8 +1,12 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 from tools.make_xyz2521_b_positive_assets import (
+    _save_sparse_scatter,
     select_spatially_separated_positive_candidates,
     stratified_display_subset,
 )
@@ -81,6 +85,21 @@ class XYZ2521PositiveAssetTests(unittest.TestCase):
         np.testing.assert_array_equal(first, second)
         source = {tuple(point) for point in points}
         self.assertTrue(all(tuple(point) in source for point in first))
+
+    def test_sparse_scatter_uses_bold_nine_pixel_markers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "scatter.png"
+            _save_sparse_scatter(
+                np.asarray([[5.0, 5.0]]),
+                shape=(12, 12),
+                output_path=output_path,
+            )
+            pixels = np.asarray(Image.open(output_path).convert("RGB"))
+
+        red = np.all(pixels == np.asarray([255, 59, 92]), axis=2)
+        y_coordinates, x_coordinates = np.nonzero(red)
+        self.assertEqual(x_coordinates.max() - x_coordinates.min() + 1, 9)
+        self.assertEqual(y_coordinates.max() - y_coordinates.min() + 1, 9)
 
 
 if __name__ == "__main__":

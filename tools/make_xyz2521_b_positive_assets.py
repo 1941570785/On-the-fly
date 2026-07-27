@@ -407,7 +407,7 @@ def _save_sparse_scatter(
         outline="#888888",
         width=3,
     )
-    radius = 2
+    radius = 4
     for x, y in points:
         px = int(round(margin + x * scale))
         py = int(round(margin + y * scale))
