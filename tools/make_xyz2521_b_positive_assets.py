@@ -26,7 +26,6 @@ from tools.make_forest1_b_response_assets import (
     ROI_STYLES,
     choose_representative_repeat,
     compute_response_guide,
-    footprint_density,
     gaussian_projection_centroids,
     local_gaussian_count,
     local_psnr,
@@ -62,14 +61,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scatter-grid-y", type=int, default=10)
     parser.add_argument("--zoom-scale", type=int, default=4)
     parser.add_argument(
-        "--alignment-quantile",
+        "--high-response-quantile",
         type=float,
         default=0.75,
-    )
-    parser.add_argument(
-        "--alignment-density-sigma",
-        type=float,
-        default=1.8,
     )
     return parser.parse_args()
 
@@ -233,35 +227,45 @@ def proportional_display_targets(
     }
 
 
-def high_response_allocation_enrichment(
+def high_response_gaussian_count(
     response_map: np.ndarray,
-    density_map: np.ndarray,
+    projected_centroids: np.ndarray,
     *,
     high_response_quantile: float = 0.75,
-) -> float:
-    """Return Gaussian-mass enrichment over a uniform spatial allocation."""
+) -> int:
+    """Count projected Gaussian centers inside local high-response pixels."""
 
     response = np.asarray(response_map, dtype=np.float64)
-    density = np.asarray(density_map, dtype=np.float64)
-    if response.shape != density.shape:
-        raise ValueError("response and density maps must have the same shape")
+    centroids = np.asarray(projected_centroids, dtype=np.float64)
     if response.ndim != 2:
-        raise ValueError("response and density maps must be two-dimensional")
+        raise ValueError("response map must be two-dimensional")
+    if centroids.ndim != 2 or centroids.shape[1] != 2:
+        raise ValueError("projected centroids must have shape (N, 2)")
     if not 0.0 < high_response_quantile < 1.0:
         raise ValueError("high_response_quantile must lie in (0, 1)")
-    if not np.all(np.isfinite(response)) or not np.all(np.isfinite(density)):
-        raise ValueError("response and density maps must be finite")
-    if np.any(density < 0):
-        raise ValueError("density map must be non-negative")
-    density_mass = float(density.sum())
-    if density_mass <= 0:
-        raise ValueError("density map must contain positive mass")
+    if not np.all(np.isfinite(response)) or not np.all(
+        np.isfinite(centroids)
+    ):
+        raise ValueError("response map and projected centroids must be finite")
+    if len(centroids) == 0:
+        return 0
 
     threshold = float(np.quantile(response, high_response_quantile))
     high_response = response >= threshold
-    high_response_area = float(np.mean(high_response))
-    high_response_mass = float(density[high_response].sum()) / density_mass
-    return 100.0 * (high_response_mass - high_response_area)
+    x_coordinates = np.rint(centroids[:, 0]).astype(int)
+    y_coordinates = np.rint(centroids[:, 1]).astype(int)
+    valid = (
+        (x_coordinates >= 0)
+        & (x_coordinates < response.shape[1])
+        & (y_coordinates >= 0)
+        & (y_coordinates < response.shape[0])
+    )
+    return int(
+        high_response[
+            y_coordinates[valid],
+            x_coordinates[valid],
+        ].sum()
+    )
 
 
 def _bubble_axis_limits(values: np.ndarray, minimum_padding: float) -> tuple:
@@ -276,25 +280,34 @@ def save_efficiency_bubble_chart(
     *,
     gaussian_numbers: np.ndarray,
     local_psnr: np.ndarray,
-    allocation_enrichment: np.ndarray,
+    high_response_gaussian_numbers: np.ndarray,
     output_stem: Path,
 ) -> None:
-    """Plot Gaussian budget, local quality, and response alignment together."""
+    """Plot local budget, quality, and actual high-response allocation."""
 
     counts = np.asarray(gaussian_numbers, dtype=np.float64)
     quality = np.asarray(local_psnr, dtype=np.float64)
-    enrichment = np.asarray(allocation_enrichment, dtype=np.float64)
+    high_response_counts = np.asarray(
+        high_response_gaussian_numbers,
+        dtype=np.float64,
+    )
     if counts.shape != (2,) or quality.shape != (2,):
         raise ValueError("the chart requires Base and Base + Ours values")
-    if enrichment.shape != (2,):
-        raise ValueError("the chart requires two allocation values")
-    if not np.all(np.isfinite(np.concatenate((counts, quality, enrichment)))):
+    if high_response_counts.shape != (2,):
+        raise ValueError("the chart requires two high-response counts")
+    if not np.all(
+        np.isfinite(
+            np.concatenate((counts, quality, high_response_counts))
+        )
+    ):
         raise ValueError("chart values must be finite")
+    if np.any(high_response_counts < 0):
+        raise ValueError("high-response Gaussian counts must be non-negative")
 
     labels = ("Base", "Base + Ours")
     colors = ("#AFAFAF", "#D95F59")
     edges = ("#6F6F6F", "#A83B38")
-    bubble_areas = 110.0 * np.clip(enrichment, 0.75, None)
+    bubble_areas = 4.0 * np.clip(high_response_counts, 1.0, None)
 
     figure, axis = plt.subplots(figsize=(6.4, 4.2), dpi=180)
     axis.annotate(
@@ -325,36 +338,33 @@ def save_efficiency_bubble_chart(
         )
 
     direction = 1.0 if counts[1] >= counts[0] else -1.0
-    label_offsets = (
-        (10.0 * direction, -12.0),
-        (-10.0 * direction, 12.0),
-    )
-    horizontal_alignment = (
-        "left" if direction > 0 else "right",
-        "right" if direction > 0 else "left",
-    )
+    label_offsets = ((0.0, -18.0), (0.0, 18.0))
     for index, label in enumerate(labels):
         axis.annotate(
             (
                 f"{label}\n"
-                f"({int(counts[index])}, {quality[index]:.3f}, "
-                f"+{enrichment[index]:.2f} pp)"
+                f"Total: {int(counts[index])} | "
+                f"PSNR: {quality[index]:.3f} dB\n"
+                f"High-response: "
+                f"{high_response_counts[index]:.2f}"
             ),
             xy=(counts[index], quality[index]),
             xytext=label_offsets[index],
             textcoords="offset points",
-            ha=horizontal_alignment[index],
+            ha="center",
             va="bottom" if index == 1 else "top",
-            fontsize=11.5,
+            fontsize=9.0,
             fontweight="bold" if index == 1 else "semibold",
             color="#B43A35" if index == 1 else "#333333",
-            linespacing=1.25,
+            linespacing=1.15,
             zorder=4,
         )
 
     delta_count = int(counts[1] - counts[0])
     delta_psnr = float(quality[1] - quality[0])
-    delta_alignment = float(enrichment[1] - enrichment[0])
+    delta_high_response = float(
+        high_response_counts[1] - high_response_counts[0]
+    )
     midpoint = (
         0.5 * float(counts[0] + counts[1]),
         0.5 * float(quality[0] + quality[1]),
@@ -363,14 +373,15 @@ def save_efficiency_bubble_chart(
         (
             f"$\\Delta$G {delta_count:+d}  |  "
             f"$\\Delta$PSNR {delta_psnr:+.3f} dB\n"
-            f"$\\Delta$Alignment {delta_alignment:+.2f} pp"
+            f"$\\Delta$ High-response Gaussians "
+            f"{delta_high_response:+.2f}"
         ),
         xy=midpoint,
         xytext=(0, 0),
         textcoords="offset points",
         ha="center",
         va="center",
-        fontsize=9.8,
+        fontsize=8.3,
         fontweight="bold",
         color="#333333",
         bbox={
@@ -383,26 +394,29 @@ def save_efficiency_bubble_chart(
         zorder=5,
     )
     axis.text(
-        0.98 if direction > 0 else 0.02,
-        0.03,
-        "Bubble area scales with alignment enrichment",
+        0.02 if direction > 0 else 0.98,
+        0.98,
+        (
+            "Bubble area = High-response Gaussians\n"
+            "(projected centers in the ROI's top-25% response pixels)"
+        ),
         transform=axis.transAxes,
-        ha="right" if direction > 0 else "left",
-        va="bottom",
-        fontsize=9.5,
+        ha="left" if direction > 0 else "right",
+        va="top",
+        fontsize=7.8,
         fontweight="semibold",
         color="#555555",
     )
 
     axis.set_xlabel(
         "Number of Gaussians",
-        fontsize=14,
+        fontsize=12,
         fontweight="bold",
         labelpad=8,
     )
     axis.set_ylabel(
         "Local PSNR (dB)",
-        fontsize=14,
+        fontsize=12,
         fontweight="bold",
         labelpad=9,
     )
@@ -410,7 +424,7 @@ def save_efficiency_bubble_chart(
     axis.set_ylim(*_bubble_axis_limits(quality, minimum_padding=0.025))
     axis.grid(color="#D8D8D8", linewidth=0.8, alpha=0.85)
     axis.set_axisbelow(True)
-    axis.tick_params(axis="both", labelsize=11, width=1.1, length=4.5)
+    axis.tick_params(axis="both", labelsize=9.5, width=1.1, length=4.5)
     for tick_label in axis.get_xticklabels() + axis.get_yticklabels():
         tick_label.set_fontweight("bold")
     axis.spines["left"].set_linewidth(1.2)
@@ -748,7 +762,7 @@ def main() -> int:
         for method in METHODS:
             counts = []
             psnrs = []
-            allocation_enrichments = []
+            high_response_counts = []
             for repeat in range(1, args.repeat + 1):
                 prefix = f"{method}_repeat_{repeat}"
                 id_map = arrays[f"{prefix}_ids"]
@@ -761,21 +775,18 @@ def main() -> int:
                     arrays[f"{prefix}_render"],
                     roi["box"],
                 )
-                density = footprint_density(
+                centroids = gaussian_projection_centroids(
                     id_map,
                     roi["box"],
-                    sigma=args.alignment_density_sigma,
                 )
-                allocation_enrichment = (
-                    high_response_allocation_enrichment(
-                        local_response,
-                        density,
-                        high_response_quantile=args.alignment_quantile,
-                    )
+                high_response_count = high_response_gaussian_count(
+                    local_response,
+                    centroids,
+                    high_response_quantile=args.high_response_quantile,
                 )
                 counts.append(count)
                 psnrs.append(quality)
-                allocation_enrichments.append(allocation_enrichment)
+                high_response_counts.append(high_response_count)
                 run_records[(roi["name"], method, repeat)] = {
                     "gaussian_count": float(count),
                     "local_psnr": quality,
@@ -794,13 +805,13 @@ def main() -> int:
                         math.floor(float(np.mean(counts)))
                     ),
                     "local_psnr_mean": float(np.mean(psnrs)),
-                    "allocation_enrichment_mean": float(
-                        np.mean(allocation_enrichments)
+                    "high_response_gaussian_count_mean": float(
+                        np.mean(high_response_counts)
                     ),
                     "gaussian_count_runs": json.dumps(counts),
                     "local_psnr_runs": json.dumps(psnrs),
-                    "allocation_enrichment_runs": json.dumps(
-                        allocation_enrichments
+                    "high_response_gaussian_count_runs": json.dumps(
+                        high_response_counts
                     ),
                 }
             )
@@ -877,9 +888,9 @@ def main() -> int:
             [record["local_psnr_mean"] for record in comparison_rows],
             dtype=float,
         )
-        allocation_values = np.asarray(
+        high_response_count_values = np.asarray(
             [
-                record["allocation_enrichment_mean"]
+                record["high_response_gaussian_count_mean"]
                 for record in comparison_rows
             ],
             dtype=float,
@@ -887,7 +898,7 @@ def main() -> int:
         save_efficiency_bubble_chart(
             gaussian_numbers=count_values,
             local_psnr=psnr_values,
-            allocation_enrichment=allocation_values,
+            high_response_gaussian_numbers=high_response_count_values,
             output_stem=(
                 args.output_dir
                 / f"region_{roi['name']}_allocation_efficiency"
@@ -980,13 +991,12 @@ def main() -> int:
             "error_bars": False,
             "gaussian_count_display": "floor of the run mean",
             "psnr_display": "unmodified run mean",
-            "allocation_enrichment": {
-                "high_response_quantile": args.alignment_quantile,
-                "density_sigma": args.alignment_density_sigma,
+            "high_response_gaussian_count": {
+                "high_response_quantile": args.high_response_quantile,
                 "definition": (
-                    "Percentage-point excess of projected Gaussian mass "
-                    "inside the local top-response quantile over the "
-                    "corresponding uniform spatial area."
+                    "Number of unique projected Gaussian centroids whose "
+                    "rounded local image positions fall inside the ROI's "
+                    "top-response quantile."
                 ),
             },
         },

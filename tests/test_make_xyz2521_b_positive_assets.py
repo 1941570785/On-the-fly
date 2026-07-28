@@ -20,35 +20,30 @@ class XYZ2521PositiveAssetTests(unittest.TestCase):
             "Base + Ours",
         )
 
-    def test_allocation_enrichment_uses_uniform_top_quartile_as_zero(self):
+    def test_high_response_gaussian_count_uses_real_projected_centroids(self):
         function = getattr(
             xyz_assets,
-            "high_response_allocation_enrichment",
+            "high_response_gaussian_count",
             None,
         )
         self.assertIsNotNone(function)
         response = np.arange(16, dtype=np.float64).reshape(4, 4)
-        uniform_density = np.ones((4, 4), dtype=np.float64)
-        focused_density = uniform_density.copy()
-        focused_density[-1] = 3.0
-
-        self.assertAlmostEqual(
-            function(
-                response,
-                uniform_density,
-                high_response_quantile=0.75,
-            ),
-            0.0,
-            places=6,
+        centroids = np.asarray(
+            [
+                [0.0, 3.0],
+                [2.0, 3.0],
+                [1.0, 1.0],
+            ],
+            dtype=np.float64,
         )
-        self.assertAlmostEqual(
+
+        self.assertEqual(
             function(
                 response,
-                focused_density,
+                centroids,
                 high_response_quantile=0.75,
             ),
-            25.0,
-            places=6,
+            2,
         )
 
     def test_efficiency_bubble_chart_exports_two_method_comparison(self):
@@ -63,7 +58,9 @@ class XYZ2521PositiveAssetTests(unittest.TestCase):
             function(
                 gaussian_numbers=np.asarray([251.0, 261.0]),
                 local_psnr=np.asarray([26.770, 26.821]),
-                allocation_enrichment=np.asarray([3.17, 3.79]),
+                high_response_gaussian_numbers=np.asarray(
+                    [68.67, 73.67]
+                ),
                 output_stem=output_stem,
             )
             for suffix in (".png", ".pdf", ".svg"):
@@ -79,7 +76,10 @@ class XYZ2521PositiveAssetTests(unittest.TestCase):
         self.assertNotIn("R + E + D", svg)
         self.assertNotIn("G = ", svg)
         self.assertNotIn("PSNR = ", svg)
-        self.assertIn("(251, 26.770, +3.17 pp)", svg)
+        self.assertIn("High-response Gaussians", svg)
+        self.assertIn("68.67", svg)
+        self.assertNotIn("enrichment", svg.lower())
+        self.assertNotIn("pp", svg)
 
     def test_selection_requires_positive_full_gain_and_spatial_separation(self):
         candidates = [
