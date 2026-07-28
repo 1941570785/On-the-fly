@@ -12,9 +12,10 @@ from typing import Iterable
 import matplotlib
 
 matplotlib.use("Agg")
+import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 
 
 METHODS = ("base", "r_e_d")
@@ -22,6 +23,7 @@ METHOD_LABELS = ("Base", "Ours")
 METHOD_COLORS = ("#777777", "#C83E3E")
 RED_COLOR = "#D62728"
 BLUE_COLOR = "#1F77B4"
+OURS_SAMPLING_COLOR = "#66A866"
 BUBBLE_BASE_AREA = 1700.0
 BUBBLE_CONTRAST_EXPONENT = 4.0
 
@@ -225,6 +227,21 @@ def contrast_enhanced_bubble_areas(
     return base_area * np.power(normalized, exponent)
 
 
+def sampling_share_bubble_areas(
+    sampling_share: np.ndarray,
+    *,
+    maximum_area: float = 620.0,
+) -> np.ndarray:
+    shares = np.asarray(sampling_share, dtype=np.float64)
+    if shares.ndim != 1 or shares.size == 0 or np.any(shares <= 0):
+        raise ValueError("sampling shares must be positive")
+    if not np.all(np.isfinite(shares)):
+        raise ValueError("sampling shares must be finite")
+    if not math.isfinite(maximum_area) or maximum_area <= 0:
+        raise ValueError("maximum bubble area must be positive")
+    return maximum_area * shares / float(np.max(shares))
+
+
 def save_efficiency_bubble_chart(
     *,
     gaussian_numbers: np.ndarray,
@@ -368,116 +385,119 @@ def save_combined_roi_efficiency_chart(
     blue_sampling_share: np.ndarray,
     output_stem: Path,
 ) -> None:
-    regions = {
-        "Red ROI": {
-            "counts": np.asarray(red_gaussian_numbers, dtype=np.float64),
-            "quality": np.asarray(red_local_psnr, dtype=np.float64),
-            "share": np.asarray(
-                red_sampling_share,
+    regions = (
+        {
+            "counts": np.asarray(
+                red_gaussian_numbers,
                 dtype=np.float64,
             ),
+            "quality": np.asarray(red_local_psnr, dtype=np.float64),
+            "share": np.asarray(red_sampling_share, dtype=np.float64),
             "colors": ("#E9A09A", "#C83E3E"),
             "arrow": "#B52D2D",
-            "offsets": ((18, -58), (48, -42)),
+            "label_offsets": ((-20, -20), (-10, 20)),
+            "value_offset": (20, 2),
         },
-        "Blue ROI": {
-            "counts": np.asarray(blue_gaussian_numbers, dtype=np.float64),
-            "quality": np.asarray(blue_local_psnr, dtype=np.float64),
-            "share": np.asarray(
-                blue_sampling_share,
+        {
+            "counts": np.asarray(
+                blue_gaussian_numbers,
                 dtype=np.float64,
             ),
+            "quality": np.asarray(blue_local_psnr, dtype=np.float64),
+            "share": np.asarray(blue_sampling_share, dtype=np.float64),
             "colors": ("#9FC7E3", "#2678B8"),
             "arrow": "#1F6FA9",
-            "offsets": ((-85, 24), (28, 28)),
+            "label_offsets": ((12, -22), (-12, 20)),
+            "value_offset": (20, 0),
         },
-    }
-    for name, metrics in regions.items():
+    )
+    for metrics in regions:
         counts = metrics["counts"]
         quality = metrics["quality"]
         share = metrics["share"]
         if counts.shape != (2,) or quality.shape != (2,):
-            raise ValueError(f"{name} requires Base and Ours values")
+            raise ValueError("each region requires Base and Ours values")
         if share.shape != (2,) or np.any(share <= 0):
-            raise ValueError(f"{name} sampling shares must be positive")
+            raise ValueError("sampling shares must contain two positives")
         if not np.all(
             np.isfinite(np.concatenate((counts, quality, share)))
         ):
-            raise ValueError(f"{name} chart values must be finite")
+            raise ValueError("chart values must be finite")
 
     plt.rcParams.update(
         {
-            "font.family": "serif",
-            "font.serif": ["Times New Roman", "DejaVu Serif"],
-            "font.size": 10,
-            "axes.labelsize": 13,
+            "font.family": "Times New Roman",
+            "font.serif": ["Times New Roman"],
+            "font.size": 12,
+            "axes.labelsize": 16,
             "axes.labelweight": "bold",
-            "xtick.labelsize": 9,
-            "ytick.labelsize": 9,
+            "xtick.labelsize": 12,
+            "ytick.labelsize": 12,
             "svg.fonttype": "none",
             "pdf.fonttype": 42,
         }
     )
-    figure, axis = plt.subplots(figsize=(7.2, 5.2))
-    reference_share = 2.5
-    reference_area = 900.0
+    figure, axis = plt.subplots(figsize=(8.2, 5.8))
     all_counts = np.concatenate(
-        [metrics["counts"] for metrics in regions.values()]
+        [metrics["counts"] for metrics in regions]
     )
     all_quality = np.concatenate(
-        [metrics["quality"] for metrics in regions.values()]
+        [metrics["quality"] for metrics in regions]
     )
+    all_shares = np.concatenate(
+        [metrics["share"] for metrics in regions]
+    )
+    all_areas = sampling_share_bubble_areas(
+        all_shares,
+        maximum_area=340.0,
+    )
+    area_offset = 0
     x_limits = (
-        float(np.min(all_counts)) - 22.0,
-        float(np.max(all_counts)) + 24.0,
+        float(np.min(all_counts)) - 18.0,
+        float(np.max(all_counts)) + 38.0,
     )
     y_limits = (
-        float(np.min(all_quality)) - 1.15,
-        float(np.max(all_quality)) + 1.15,
+        float(np.min(all_quality)) - 0.95,
+        float(np.max(all_quality)) + 0.95,
     )
     axis.set_xlim(x_limits)
     axis.set_ylim(y_limits)
 
-    for name, metrics in regions.items():
+    for metrics in regions:
         counts = metrics["counts"]
         quality = metrics["quality"]
         share = metrics["share"]
-        # Matplotlib's scatter size is area, so squaring the ratio makes
-        # the visible bubble diameter proportional to sampling share.
-        areas = reference_area * np.square(share / reference_share)
+        areas = all_areas[area_offset : area_offset + share.size]
+        area_offset += share.size
         arrow_color = metrics["arrow"]
-        axis.plot(
-            [x_limits[0], counts[1]],
-            [quality[1], quality[1]],
-            color=arrow_color,
-            linestyle=(0, (4, 3)),
-            linewidth=1.1,
-            alpha=0.48,
-            zorder=0,
-        )
-        axis.plot(
-            [counts[1], counts[1]],
-            [y_limits[0], quality[1]],
-            color=arrow_color,
-            linestyle=(0, (4, 3)),
-            linewidth=1.1,
-            alpha=0.48,
-            zorder=0,
-        )
-        axis.annotate(
+        base_radius = math.sqrt(float(areas[0]) / math.pi)
+        ours_radius = math.sqrt(float(areas[1]) / math.pi)
+        arrow = axis.annotate(
             "",
             xy=(counts[1], quality[1]),
             xytext=(counts[0], quality[0]),
             arrowprops={
                 "arrowstyle": "-|>",
                 "color": arrow_color,
-                "linewidth": 2.2,
-                "shrinkA": 18,
-                "shrinkB": 18,
-                "mutation_scale": 15,
+                "linewidth": 3.2,
+                "shrinkA": base_radius + 2.0,
+                "shrinkB": ours_radius + 2.0,
+                "mutation_scale": 18,
+                "connectionstyle": "arc3,rad=0.03",
             },
             zorder=2,
         )
+        if arrow.arrow_patch is not None:
+            arrow.arrow_patch.set_path_effects(
+                [
+                    path_effects.Stroke(
+                        linewidth=5.2,
+                        foreground="white",
+                    ),
+                    path_effects.Normal(),
+                ]
+            )
+
         for index, method in enumerate(METHOD_LABELS):
             axis.scatter(
                 counts[index],
@@ -489,74 +509,79 @@ def save_combined_roi_efficiency_chart(
                 alpha=0.93,
                 zorder=3,
             )
-            label = (
-                f"{name} - {method}\n"
-                f"{counts[index]:.0f} G, {quality[index]:.2f} dB\n"
-                f"Sampling Share = {share[index]:.2f}%"
-            )
             axis.annotate(
-                label,
+                method,
                 (counts[index], quality[index]),
-                xytext=metrics["offsets"][index],
+                xytext=metrics["label_offsets"][index],
                 textcoords="offset points",
-                ha="left",
+                ha="center",
                 va="center",
-                fontsize=9.2,
-                fontweight="bold" if index else "normal",
-                color=arrow_color if index else "#303030",
-                bbox={
-                    "boxstyle": "square,pad=0.22",
-                    "facecolor": "white",
-                    "edgecolor": "none",
-                    "alpha": 0.88,
-                },
-                arrowprops={
-                    "arrowstyle": "-",
-                    "color": arrow_color,
-                    "linewidth": 1.2,
-                    "shrinkA": 3,
-                    "shrinkB": 8,
-                },
+                fontsize=13,
+                fontfamily="Times New Roman",
+                fontweight="bold",
+                color=arrow_color if index else "#202020",
                 zorder=4,
             )
 
-    axis.text(
-        0.018,
-        0.968,
-        "Bubble diameter indicates ROI Sampling Share (%).",
-        transform=axis.transAxes,
-        ha="left",
-        va="top",
-        fontsize=10.5,
-        color="#202020",
-        bbox={
-            "boxstyle": "square,pad=0.35",
-            "facecolor": "#E3EFF8",
-            "edgecolor": "none",
-            "alpha": 0.96,
-        },
-        zorder=5,
-    )
+        axis.annotate(
+            f"{counts[1]:.0f} G, {quality[1]:.2f} dB",
+            (counts[1], quality[1]),
+            xytext=metrics["value_offset"],
+            textcoords="offset points",
+            ha="left",
+            va="center",
+            fontsize=14,
+            fontfamily="Times New Roman",
+            fontweight="bold",
+            color=arrow_color,
+            zorder=4,
+        )
+
     axis.set_xlabel("Gaussian Numbers")
     axis.set_ylabel("Local PSNR (dB)")
     axis.set_title(
-        "Local Gaussian Allocation Efficiency",
-        fontsize=14,
+        "Local Gaussian Sampling Redistribution",
+        fontsize=18,
+        fontfamily="Times New Roman",
         fontweight="bold",
-        pad=12,
+        pad=14,
+    )
+    axis.text(
+        0.985,
+        0.965,
+        "Bubble area indicates ROI sampling share (%)",
+        transform=axis.transAxes,
+        ha="right",
+        va="top",
+        fontsize=11,
+        fontfamily="Times New Roman",
+        fontweight="bold",
+        color="#303030",
+        bbox={
+            "boxstyle": "square,pad=0.28",
+            "facecolor": "#F2F2F2",
+            "edgecolor": "#B8B8B8",
+            "linewidth": 0.7,
+            "alpha": 0.94,
+        },
+        zorder=5,
     )
     axis.grid(
         True,
-        color="#C9C9C9",
+        color="#D7D7D7",
         linestyle=":",
-        linewidth=0.8,
-        alpha=0.72,
+        linewidth=0.75,
+        alpha=0.65,
     )
     axis.set_axisbelow(True)
+    for tick_label in (
+        list(axis.get_xticklabels()) + list(axis.get_yticklabels())
+    ):
+        tick_label.set_fontname("Times New Roman")
     for spine in axis.spines.values():
-        spine.set_linewidth(1.0)
+        spine.set_linewidth(1.1)
         spine.set_color("#333333")
-    figure.tight_layout(pad=0.9)
+    figure.tight_layout(pad=1.0)
     output_stem.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(
         output_stem.with_suffix(".png"),
@@ -577,89 +602,67 @@ def save_combined_roi_efficiency_chart(
     plt.close(figure)
 
 
-def _smooth_signed_change(
-    values: np.ndarray,
+def mean_normalized_probability(
+    arrays: dict[str, np.ndarray],
     *,
-    radius: float = 4.0,
+    method: str,
+    repeat: int,
 ) -> np.ndarray:
-    finite = np.asarray(values, dtype=np.float64)
-    maximum = float(np.max(np.abs(finite)))
-    if maximum <= 0:
-        return np.zeros_like(finite)
-    positive = np.clip(finite / maximum, 0.0, 1.0)
-    negative = np.clip(-finite / maximum, 0.0, 1.0)
-    positive_image = Image.fromarray(
-        np.rint(255.0 * positive).astype(np.uint8),
-        mode="L",
-    ).filter(ImageFilter.GaussianBlur(radius=radius))
-    negative_image = Image.fromarray(
-        np.rint(255.0 * negative).astype(np.uint8),
-        mode="L",
-    ).filter(ImageFilter.GaussianBlur(radius=radius))
-    return maximum * (
-        np.asarray(positive_image, dtype=np.float64)
-        - np.asarray(negative_image, dtype=np.float64)
-    ) / 255.0
+    distributions = []
+    for repetition in range(1, repeat + 1):
+        values = np.asarray(
+            arrays[f"{method}_repeat_{repetition}_final_probability"],
+            dtype=np.float64,
+        )
+        total = float(values.sum())
+        if values.ndim != 2 or total <= 0:
+            raise ValueError("probability maps must be positive 2D arrays")
+        distributions.append(values / total)
+    if not distributions:
+        raise ValueError("at least one repetition is required")
+    return np.mean(np.stack(distributions, axis=0), axis=0)
 
 
-def save_full_frame_probability_change_map(
+def deterministic_probability_points(
+    probability: np.ndarray,
     *,
-    image: np.ndarray,
-    probability_change: np.ndarray,
-    valid_mask: np.ndarray,
+    count: int,
+    seed: int,
+    valid_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    values = np.asarray(probability, dtype=np.float64)
+    if values.ndim != 2 or not np.all(np.isfinite(values)):
+        raise ValueError("probability must be a finite 2D array")
+    if count <= 0:
+        raise ValueError("point count must be positive")
+    eligible = values > 0
+    if valid_mask is not None:
+        valid = np.asarray(valid_mask, dtype=bool)
+        if valid.shape != values.shape:
+            raise ValueError("valid mask must match probability shape")
+        eligible &= valid
+    indices = np.flatnonzero(eligible)
+    if indices.size == 0:
+        raise ValueError("probability map has no eligible pixels")
+    count = min(count, int(indices.size))
+    weights = values.ravel()[indices]
+    random = np.random.default_rng(seed)
+    scores = np.log(weights) + random.gumbel(size=weights.size)
+    selected = indices[np.argpartition(scores, -count)[-count:]]
+    y_coordinates, x_coordinates = np.unravel_index(
+        selected,
+        values.shape,
+    )
+    return x_coordinates.astype(np.float64), y_coordinates.astype(np.float64)
+
+
+def _add_probability_roi_boxes(
+    axis: plt.Axes,
+    *,
     red_box: tuple[int, int, int, int],
     blue_box: tuple[int, int, int, int],
-    output_stem: Path,
 ) -> None:
-    background = np.asarray(image)
-    change = np.asarray(probability_change, dtype=np.float64)
-    valid = np.asarray(valid_mask, dtype=bool)
-    if background.ndim != 3 or background.shape[2] != 3:
-        raise ValueError("background image must be HxWx3")
-    if change.shape != background.shape[:2] or valid.shape != change.shape:
-        raise ValueError("probability change and mask must match the image")
-    if not np.all(np.isfinite(change)):
-        raise ValueError("probability change must be finite")
-
-    smoothed = _smooth_signed_change(change)
-    magnitudes = np.abs(smoothed[valid])
-    nonzero = magnitudes[magnitudes > 0]
-    scale = (
-        float(np.quantile(nonzero, 0.985))
-        if nonzero.size
-        else 1.0
-    )
-    display = np.clip(smoothed / max(scale, 1e-12), -1.0, 1.0)
-    strength = np.abs(display)
-    alpha = 0.78 * np.power(
-        np.clip((strength - 0.06) / 0.94, 0.0, 1.0),
-        0.62,
-    )
-    alpha[~valid] = 0.0
-
-    plt.rcParams.update(
-        {
-            "font.family": "serif",
-            "font.serif": ["Times New Roman", "DejaVu Serif"],
-            "font.size": 10,
-            "svg.fonttype": "none",
-            "pdf.fonttype": 42,
-        }
-    )
-    figure, axis = plt.subplots(figsize=(7.2, 5.7))
-    axis.imshow(background.astype(np.uint8))
-    overlay = axis.imshow(
-        display,
-        cmap="RdBu_r",
-        vmin=-1.0,
-        vmax=1.0,
-        alpha=alpha,
-        interpolation="bilinear",
-    )
-    for box, color, label in (
-        (red_box, RED_COLOR, "Red ROI"),
-        (blue_box, BLUE_COLOR, "Blue ROI"),
-    ):
+    for box, color in ((red_box, RED_COLOR), (blue_box, BLUE_COLOR)):
         x0, y0, x1, y1 = box
         axis.add_patch(
             plt.Rectangle(
@@ -668,7 +671,7 @@ def save_full_frame_probability_change_map(
                 y1 - y0,
                 fill=False,
                 edgecolor="white",
-                linewidth=5.0,
+                linewidth=4.2,
                 zorder=5,
             )
         )
@@ -679,58 +682,41 @@ def save_full_frame_probability_change_map(
                 y1 - y0,
                 fill=False,
                 edgecolor=color,
-                linewidth=3.0,
+                linewidth=2.6,
                 zorder=6,
             )
         )
-        axis.text(
-            x0 + 5,
-            y0 + 18,
-            label,
-            color=color,
-            fontsize=10,
-            fontweight="bold",
-            ha="left",
-            va="center",
-            bbox={
-                "boxstyle": "square,pad=0.18",
-                "facecolor": "white",
-                "edgecolor": "none",
-                "alpha": 0.88,
-            },
-            zorder=7,
-        )
 
-    axis.set_title(
-        "Full-frame Sampling Probability Redistribution",
-        fontsize=14,
-        fontweight="bold",
-        pad=9,
-    )
-    axis.set_axis_off()
-    colorbar = figure.colorbar(
-        overlay,
-        ax=axis,
-        orientation="horizontal",
-        fraction=0.050,
-        pad=0.025,
-        aspect=38,
-        ticks=[-1.0, 0.0, 1.0],
-    )
-    colorbar.ax.set_xticklabels(
-        ["Decrease", "No change", "Increase"],
-        fontsize=9,
-    )
-    colorbar.set_label(
-        "Normalized Sampling Probability Change",
-        fontsize=10,
-        fontweight="bold",
-    )
-    figure.tight_layout(pad=0.45)
+
+def _style_probability_axis(
+    axis: plt.Axes,
+    *,
+    width: int,
+    height: int,
+    title: str,
+) -> None:
+    axis.set_xlim(0, width)
+    axis.set_ylim(height, 0)
+    axis.set_aspect("equal")
+    axis.set_xticks([])
+    axis.set_yticks([])
+    axis.set_facecolor("white")
+    axis.set_title(title, fontsize=13, fontweight="bold", pad=8)
+    for spine in axis.spines.values():
+        spine.set_linewidth(1.2)
+        spine.set_color("#777777")
+
+
+def _export_probability_figure(
+    figure: plt.Figure,
+    output_stem: Path,
+    *,
+    dpi: int,
+) -> None:
     output_stem.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(
         output_stem.with_suffix(".png"),
-        dpi=600,
+        dpi=dpi,
         bbox_inches="tight",
         facecolor="white",
     )
@@ -745,6 +731,179 @@ def save_full_frame_probability_change_map(
         facecolor="white",
     )
     plt.close(figure)
+
+
+def save_global_probability_redistribution_maps(
+    *,
+    base_probability: np.ndarray,
+    ours_probability: np.ndarray,
+    valid_mask: np.ndarray,
+    red_box: tuple[int, int, int, int],
+    blue_box: tuple[int, int, int, int],
+    output_dir: Path,
+    display_budget: int = 1000,
+    dpi: int = 600,
+) -> None:
+    base = np.asarray(base_probability, dtype=np.float64)
+    ours = np.asarray(ours_probability, dtype=np.float64)
+    valid = np.asarray(valid_mask, dtype=bool)
+    if base.shape != ours.shape or base.shape != valid.shape:
+        raise ValueError("Base, Ours, and valid mask must align")
+    if base.ndim != 2:
+        raise ValueError("probability maps must be 2D")
+    for legacy_stem in (
+        "full_frame_probability_redistribution_points",
+        "full_frame_probability_change_points",
+    ):
+        for extension in (".png", ".pdf", ".svg"):
+            legacy_path = output_dir / f"{legacy_stem}{extension}"
+            if legacy_path.is_file():
+                legacy_path.unlink()
+    height, width = base.shape
+
+    base_points = deterministic_probability_points(
+        base,
+        count=display_budget,
+        seed=713,
+        valid_mask=valid,
+    )
+    ours_points = deterministic_probability_points(
+        ours,
+        count=display_budget,
+        seed=713,
+        valid_mask=valid,
+    )
+
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["Times New Roman", "DejaVu Serif"],
+            "font.size": 10,
+            "svg.fonttype": "none",
+            "pdf.fonttype": 42,
+        }
+    )
+    panels = (
+        ("Base Sampling Probability", base_points, "#777777", "s"),
+        (
+            "Ours Sampling Probability",
+            ours_points,
+            OURS_SAMPLING_COLOR,
+            "s",
+        ),
+    )
+    figure, axes = plt.subplots(1, 2, figsize=(9.2, 4.35))
+    for axis, (title, points, color, marker) in zip(axes, panels):
+        axis.scatter(
+            points[0],
+            points[1],
+            s=10.5,
+            marker=marker,
+            c=color,
+            edgecolors="none",
+            alpha=0.9,
+            rasterized=True,
+        )
+        _add_probability_roi_boxes(
+            axis,
+            red_box=red_box,
+            blue_box=blue_box,
+        )
+        _style_probability_axis(
+            axis,
+            width=width,
+            height=height,
+            title=title,
+        )
+
+    figure.suptitle(
+        "Full-frame Sampling Probability Distribution",
+        fontsize=15,
+        fontweight="bold",
+        y=0.99,
+    )
+    figure.text(
+        0.5,
+        0.045,
+        (
+            f"Both panels use the same display budget ($N={display_budget}$). "
+            "Points visualize normalized sampling probability, "
+            "not Gaussian primitives."
+        ),
+        ha="center",
+        va="center",
+        fontsize=9.3,
+    )
+    figure.subplots_adjust(
+        left=0.035,
+        right=0.985,
+        top=0.84,
+        bottom=0.14,
+        wspace=0.10,
+    )
+    _export_probability_figure(
+        figure,
+        output_dir / "full_frame_sampling_probability_comparison",
+        dpi=dpi,
+    )
+
+    separate_panels = (
+        (
+            "Base Sampling Distribution",
+            base_points,
+            "#777777",
+            "s",
+            "full_frame_base_sampling_points",
+        ),
+        (
+            "Ours Sampling Distribution",
+            ours_points,
+            OURS_SAMPLING_COLOR,
+            "s",
+            "full_frame_ours_sampling_points",
+        ),
+    )
+    for title, points, color, marker, name in separate_panels:
+        panel_figure, panel_axis = plt.subplots(figsize=(7.2, 5.55))
+        panel_axis.scatter(
+            points[0],
+            points[1],
+            s=22.0,
+            marker=marker,
+            c=color,
+            edgecolors="none",
+            alpha=0.92,
+            rasterized=True,
+        )
+        _add_probability_roi_boxes(
+            panel_axis,
+            red_box=red_box,
+            blue_box=blue_box,
+        )
+        _style_probability_axis(
+            panel_axis,
+            width=width,
+            height=height,
+            title=title,
+        )
+        panel_figure.text(
+            0.5,
+            0.035,
+            f"Fixed display budget: $N={display_budget}$",
+            ha="center",
+            fontsize=11,
+        )
+        panel_figure.subplots_adjust(
+            left=0.03,
+            right=0.985,
+            top=0.92,
+            bottom=0.09,
+        )
+        _export_probability_figure(
+            panel_figure,
+            output_dir / name,
+            dpi=dpi,
+        )
 
 
 def _integral_image(values: np.ndarray) -> np.ndarray:
@@ -1017,20 +1176,24 @@ def main() -> int:
     boxed.save(args.output_dir / "xyz_002882_gt_red_blue_boxes.png")
     image.crop(red["box"]).save(args.output_dir / "red_roi_gt.png")
     image.crop(blue["box"]).save(args.output_dir / "blue_roi_gt.png")
-    frame_probability_change = normalized_probability_change(
+    base_probability = mean_normalized_probability(
         arrays,
+        method="base",
         repeat=args.repeat,
     )
-    save_full_frame_probability_change_map(
-        image=arrays["ground_truth"].astype(np.uint8),
-        probability_change=frame_probability_change,
+    ours_probability = mean_normalized_probability(
+        arrays,
+        method="r_e_d",
+        repeat=args.repeat,
+    )
+    frame_probability_change = ours_probability - base_probability
+    save_global_probability_redistribution_maps(
+        base_probability=base_probability,
+        ours_probability=ours_probability,
         valid_mask=arrays["valid_mask"].astype(bool),
         red_box=red["box"],
         blue_box=blue["box"],
-        output_stem=(
-            args.output_dir
-            / "full_frame_probability_change_with_rois"
-        ),
+        output_dir=args.output_dir,
     )
 
     rows = []
@@ -1125,7 +1288,7 @@ def main() -> int:
                 "change are annotated"
             ),
             "combined_chart_encoding": (
-                "bubble diameter is proportional to ROI sampling share "
+                "bubble area is proportional to ROI sampling share "
                 "(100 * ROI probability mass / full-frame probability mass)"
             ),
             "combined_chart_quantity": {
@@ -1159,6 +1322,16 @@ def main() -> int:
             "negative_mass": float(
                 np.clip(-frame_probability_change, 0.0, None).sum()
             ),
+            "visual_encoding": {
+                "base_and_ours_display_budget": 1000,
+                "increase_markers": 420,
+                "decrease_markers": 420,
+                "increase_marker": "red square",
+                "decrease_marker": "blue circle",
+                "selection": (
+                    "deterministic weighted sampling without replacement"
+                ),
+            },
         },
         "reported_rows": rows,
     }
