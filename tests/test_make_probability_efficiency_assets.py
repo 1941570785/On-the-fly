@@ -8,6 +8,7 @@ from tools.make_probability_efficiency_assets import (
     choose_redistribution_rois,
     contrast_enhanced_bubble_areas,
     roi_expected_samples,
+    save_combined_roi_efficiency_chart,
     save_efficiency_bubble_chart,
 )
 
@@ -107,6 +108,22 @@ class ProbabilityEfficiencyAssetTests(unittest.TestCase):
             decreased,
             np.array([1500.0, 1500.0 * 0.8**4]),
         )
+
+    def test_combined_chart_exports_both_regions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stem = Path(directory) / "combined"
+            save_combined_roi_efficiency_chart(
+                red_gaussian_numbers=np.array([409.0, 419.0]),
+                red_local_psnr=np.array([22.99, 23.72]),
+                red_expected_samples=np.array([262.4, 291.9]),
+                blue_gaussian_numbers=np.array([537.0, 532.0]),
+                blue_local_psnr=np.array([18.48, 21.12]),
+                blue_expected_samples=np.array([206.0, 114.7]),
+                output_stem=stem,
+            )
+            self.assertTrue(stem.with_suffix(".png").is_file())
+            self.assertTrue(stem.with_suffix(".pdf").is_file())
+            self.assertTrue(stem.with_suffix(".svg").is_file())
 
 
 if __name__ == "__main__":

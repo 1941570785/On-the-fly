@@ -320,6 +320,229 @@ def save_efficiency_bubble_chart(
     plt.close(figure)
 
 
+def save_combined_roi_efficiency_chart(
+    *,
+    red_gaussian_numbers: np.ndarray,
+    red_local_psnr: np.ndarray,
+    red_expected_samples: np.ndarray,
+    blue_gaussian_numbers: np.ndarray,
+    blue_local_psnr: np.ndarray,
+    blue_expected_samples: np.ndarray,
+    output_stem: Path,
+) -> None:
+    regions = {
+        "Red ROI": {
+            "counts": np.asarray(red_gaussian_numbers, dtype=np.float64),
+            "quality": np.asarray(red_local_psnr, dtype=np.float64),
+            "expected": np.asarray(
+                red_expected_samples,
+                dtype=np.float64,
+            ),
+            "colors": ("#E9A09A", "#C83E3E"),
+            "arrow": "#B52D2D",
+            "offsets": ((18, -58), (48, -42)),
+        },
+        "Blue ROI": {
+            "counts": np.asarray(blue_gaussian_numbers, dtype=np.float64),
+            "quality": np.asarray(blue_local_psnr, dtype=np.float64),
+            "expected": np.asarray(
+                blue_expected_samples,
+                dtype=np.float64,
+            ),
+            "colors": ("#9FC7E3", "#2678B8"),
+            "arrow": "#1F6FA9",
+            "offsets": ((-85, 24), (28, 28)),
+        },
+    }
+    for name, metrics in regions.items():
+        counts = metrics["counts"]
+        quality = metrics["quality"]
+        expected = metrics["expected"]
+        if counts.shape != (2,) or quality.shape != (2,):
+            raise ValueError(f"{name} requires Base and Ours values")
+        if expected.shape != (2,) or np.any(expected <= 0):
+            raise ValueError(f"{name} expected samples must be positive")
+        if not np.all(
+            np.isfinite(np.concatenate((counts, quality, expected)))
+        ):
+            raise ValueError(f"{name} chart values must be finite")
+
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["Times New Roman", "DejaVu Serif"],
+            "font.size": 10,
+            "axes.labelsize": 13,
+            "axes.labelweight": "bold",
+            "xtick.labelsize": 9,
+            "ytick.labelsize": 9,
+            "svg.fonttype": "none",
+            "pdf.fonttype": 42,
+        }
+    )
+    figure, axis = plt.subplots(figsize=(7.2, 5.2))
+    base_area = 1050.0
+    all_counts = np.concatenate(
+        [metrics["counts"] for metrics in regions.values()]
+    )
+    all_quality = np.concatenate(
+        [metrics["quality"] for metrics in regions.values()]
+    )
+    x_limits = (
+        float(np.min(all_counts)) - 22.0,
+        float(np.max(all_counts)) + 24.0,
+    )
+    y_limits = (
+        float(np.min(all_quality)) - 1.15,
+        float(np.max(all_quality)) + 1.15,
+    )
+    axis.set_xlim(x_limits)
+    axis.set_ylim(y_limits)
+
+    for name, metrics in regions.items():
+        counts = metrics["counts"]
+        quality = metrics["quality"]
+        expected = metrics["expected"]
+        ratios = expected / expected[0]
+        # Matplotlib's scatter size is area, so squaring the ratio makes
+        # the visible bubble diameter proportional to normalized mass.
+        areas = base_area * np.square(ratios)
+        arrow_color = metrics["arrow"]
+        axis.plot(
+            [x_limits[0], counts[1]],
+            [quality[1], quality[1]],
+            color=arrow_color,
+            linestyle=(0, (4, 3)),
+            linewidth=1.1,
+            alpha=0.48,
+            zorder=0,
+        )
+        axis.plot(
+            [counts[1], counts[1]],
+            [y_limits[0], quality[1]],
+            color=arrow_color,
+            linestyle=(0, (4, 3)),
+            linewidth=1.1,
+            alpha=0.48,
+            zorder=0,
+        )
+        axis.annotate(
+            "",
+            xy=(counts[1], quality[1]),
+            xytext=(counts[0], quality[0]),
+            arrowprops={
+                "arrowstyle": "-|>",
+                "color": arrow_color,
+                "linewidth": 2.2,
+                "shrinkA": 18,
+                "shrinkB": 18,
+                "mutation_scale": 15,
+            },
+            zorder=2,
+        )
+        for index, method in enumerate(METHOD_LABELS):
+            axis.scatter(
+                counts[index],
+                quality[index],
+                s=areas[index],
+                c=metrics["colors"][index],
+                edgecolors=arrow_color if index else "#4A4A4A",
+                linewidths=2.0 if index else 1.5,
+                alpha=0.93,
+                zorder=3,
+            )
+            ratio = ratios[index]
+            label = (
+                f"{name} - {method}\n"
+                f"{counts[index]:.0f} G, {quality[index]:.2f} dB\n"
+                f"$\\mu/\\mu_{{\\mathrm{{Base}}}}={ratio:.3f}$"
+            )
+            axis.annotate(
+                label,
+                (counts[index], quality[index]),
+                xytext=metrics["offsets"][index],
+                textcoords="offset points",
+                ha="left",
+                va="center",
+                fontsize=9.2,
+                fontweight="bold" if index else "normal",
+                color=arrow_color if index else "#303030",
+                bbox={
+                    "boxstyle": "square,pad=0.22",
+                    "facecolor": "white",
+                    "edgecolor": "none",
+                    "alpha": 0.88,
+                },
+                arrowprops={
+                    "arrowstyle": "-",
+                    "color": arrow_color,
+                    "linewidth": 1.2,
+                    "shrinkA": 3,
+                    "shrinkB": 8,
+                },
+                zorder=4,
+            )
+
+    axis.text(
+        0.018,
+        0.968,
+        (
+            "Bubble diameter indicates normalized expected sampling mass "
+            "$\\mu(\\mathcal{R})/\\mu_{\\mathrm{Base}}(\\mathcal{R})$."
+        ),
+        transform=axis.transAxes,
+        ha="left",
+        va="top",
+        fontsize=10.5,
+        color="#202020",
+        bbox={
+            "boxstyle": "square,pad=0.35",
+            "facecolor": "#E3EFF8",
+            "edgecolor": "none",
+            "alpha": 0.96,
+        },
+        zorder=5,
+    )
+    axis.set_xlabel("Gaussian Numbers")
+    axis.set_ylabel("Local PSNR (dB)")
+    axis.set_title(
+        "Local Gaussian Allocation Efficiency",
+        fontsize=14,
+        fontweight="bold",
+        pad=12,
+    )
+    axis.grid(
+        True,
+        color="#C9C9C9",
+        linestyle=":",
+        linewidth=0.8,
+        alpha=0.72,
+    )
+    axis.set_axisbelow(True)
+    for spine in axis.spines.values():
+        spine.set_linewidth(1.0)
+        spine.set_color("#333333")
+    figure.tight_layout(pad=0.9)
+    output_stem.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(
+        output_stem.with_suffix(".png"),
+        dpi=600,
+        bbox_inches="tight",
+        facecolor="white",
+    )
+    figure.savefig(
+        output_stem.with_suffix(".pdf"),
+        bbox_inches="tight",
+        facecolor="white",
+    )
+    figure.savefig(
+        output_stem.with_suffix(".svg"),
+        bbox_inches="tight",
+        facecolor="white",
+    )
+    plt.close(figure)
+
+
 def _integral_image(values: np.ndarray) -> np.ndarray:
     integral = np.asarray(values, dtype=np.float64).cumsum(0).cumsum(1)
     return np.pad(integral, ((1, 0), (1, 0)))
@@ -574,8 +797,10 @@ def main() -> int:
     image.crop(blue["box"]).save(args.output_dir / "blue_roi_gt.png")
 
     rows = []
+    region_rows: dict[str, list[dict[str, object]]] = {}
     for name, record in (("Red ROI", red), ("Blue ROI", blue)):
         selected_rows = _metric_summary(name, record)
+        region_rows[name] = selected_rows
         rows.extend(selected_rows)
         save_efficiency_bubble_chart(
             gaussian_numbers=np.array(
@@ -598,6 +823,53 @@ def main() -> int:
                 / f"{name.lower().replace(' ', '_')}_base_ours_bubble"
             ),
         )
+    save_combined_roi_efficiency_chart(
+        red_gaussian_numbers=np.array(
+            [
+                row["Gaussian Numbers"]
+                for row in region_rows["Red ROI"]
+            ],
+            dtype=np.float64,
+        ),
+        red_local_psnr=np.array(
+            [
+                row["Local PSNR (dB)"]
+                for row in region_rows["Red ROI"]
+            ],
+            dtype=np.float64,
+        ),
+        red_expected_samples=np.array(
+            [
+                row["Expected Samples in ROI"]
+                for row in region_rows["Red ROI"]
+            ],
+            dtype=np.float64,
+        ),
+        blue_gaussian_numbers=np.array(
+            [
+                row["Gaussian Numbers"]
+                for row in region_rows["Blue ROI"]
+            ],
+            dtype=np.float64,
+        ),
+        blue_local_psnr=np.array(
+            [
+                row["Local PSNR (dB)"]
+                for row in region_rows["Blue ROI"]
+            ],
+            dtype=np.float64,
+        ),
+        blue_expected_samples=np.array(
+            [
+                row["Expected Samples in ROI"]
+                for row in region_rows["Blue ROI"]
+            ],
+            dtype=np.float64,
+        ),
+        output_stem=(
+            args.output_dir / "combined_red_blue_roi_efficiency"
+        ),
+    )
 
     csv_path = args.output_dir / "roi_metrics.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as output:
@@ -614,6 +886,10 @@ def main() -> int:
             "bubble_area_encoding": (
                 "A = A_base * (mu / mu_base)^4; exact mu and relative "
                 "change are annotated"
+            ),
+            "combined_chart_encoding": (
+                "bubble diameter = D_base * (mu / mu_base), normalized "
+                "independently within each ROI"
             ),
         },
         "selection_rules": {
