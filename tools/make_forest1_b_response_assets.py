@@ -28,7 +28,7 @@ METHOD_LABELS = {
     "r": "R",
     "r_e": "R + E",
     "r_d": "R + D",
-    "r_e_d": "R + E + D",
+    "r_e_d": "Base + Ours",
 }
 METHOD_COLORS = {
     "base": "#B7B7B7",

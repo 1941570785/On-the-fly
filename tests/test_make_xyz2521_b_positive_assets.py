@@ -14,6 +14,73 @@ from tools.make_xyz2521_b_positive_assets import (
 
 
 class XYZ2521PositiveAssetTests(unittest.TestCase):
+    def test_complete_method_uses_base_plus_ours_label(self):
+        self.assertEqual(
+            xyz_assets.METHOD_LABELS["r_e_d"],
+            "Base + Ours",
+        )
+
+    def test_allocation_enrichment_uses_uniform_top_quartile_as_zero(self):
+        function = getattr(
+            xyz_assets,
+            "high_response_allocation_enrichment",
+            None,
+        )
+        self.assertIsNotNone(function)
+        response = np.arange(16, dtype=np.float64).reshape(4, 4)
+        uniform_density = np.ones((4, 4), dtype=np.float64)
+        focused_density = uniform_density.copy()
+        focused_density[-1] = 3.0
+
+        self.assertAlmostEqual(
+            function(
+                response,
+                uniform_density,
+                high_response_quantile=0.75,
+            ),
+            0.0,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            function(
+                response,
+                focused_density,
+                high_response_quantile=0.75,
+            ),
+            25.0,
+            places=6,
+        )
+
+    def test_efficiency_bubble_chart_exports_two_method_comparison(self):
+        function = getattr(
+            xyz_assets,
+            "save_efficiency_bubble_chart",
+            None,
+        )
+        self.assertIsNotNone(function)
+        with tempfile.TemporaryDirectory() as directory:
+            output_stem = Path(directory) / "efficiency"
+            function(
+                gaussian_numbers=np.asarray([251.0, 261.0]),
+                local_psnr=np.asarray([26.770, 26.821]),
+                allocation_enrichment=np.asarray([3.17, 3.79]),
+                output_stem=output_stem,
+            )
+            for suffix in (".png", ".pdf", ".svg"):
+                self.assertTrue(output_stem.with_suffix(suffix).is_file())
+            svg = output_stem.with_suffix(".svg").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertIn("Base", svg)
+        self.assertIn("Base + Ours", svg)
+        self.assertIn("Number of Gaussians", svg)
+        self.assertIn("Local PSNR", svg)
+        self.assertNotIn("R + E + D", svg)
+        self.assertNotIn("G = ", svg)
+        self.assertNotIn("PSNR = ", svg)
+        self.assertIn("(251, 26.770, +3.17 pp)", svg)
+
     def test_selection_requires_positive_full_gain_and_spatial_separation(self):
         candidates = [
             {

@@ -11,6 +11,7 @@ import math
 import sys
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image, ImageDraw
 
@@ -25,10 +26,10 @@ from tools.make_forest1_b_response_assets import (
     ROI_STYLES,
     choose_representative_repeat,
     compute_response_guide,
+    footprint_density,
     gaussian_projection_centroids,
     local_gaussian_count,
     local_psnr,
-    save_bar_chart,
     save_response_audit,
 )
 
@@ -60,6 +61,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scatter-grid-x", type=int, default=14)
     parser.add_argument("--scatter-grid-y", type=int, default=10)
     parser.add_argument("--zoom-scale", type=int, default=4)
+    parser.add_argument(
+        "--alignment-quantile",
+        type=float,
+        default=0.75,
+    )
+    parser.add_argument(
+        "--alignment-density-sigma",
+        type=float,
+        default=1.8,
+    )
     return parser.parse_args()
 
 
@@ -220,6 +231,200 @@ def proportional_display_targets(
         )
         for method, count in gaussian_counts.items()
     }
+
+
+def high_response_allocation_enrichment(
+    response_map: np.ndarray,
+    density_map: np.ndarray,
+    *,
+    high_response_quantile: float = 0.75,
+) -> float:
+    """Return Gaussian-mass enrichment over a uniform spatial allocation."""
+
+    response = np.asarray(response_map, dtype=np.float64)
+    density = np.asarray(density_map, dtype=np.float64)
+    if response.shape != density.shape:
+        raise ValueError("response and density maps must have the same shape")
+    if response.ndim != 2:
+        raise ValueError("response and density maps must be two-dimensional")
+    if not 0.0 < high_response_quantile < 1.0:
+        raise ValueError("high_response_quantile must lie in (0, 1)")
+    if not np.all(np.isfinite(response)) or not np.all(np.isfinite(density)):
+        raise ValueError("response and density maps must be finite")
+    if np.any(density < 0):
+        raise ValueError("density map must be non-negative")
+    density_mass = float(density.sum())
+    if density_mass <= 0:
+        raise ValueError("density map must contain positive mass")
+
+    threshold = float(np.quantile(response, high_response_quantile))
+    high_response = response >= threshold
+    high_response_area = float(np.mean(high_response))
+    high_response_mass = float(density[high_response].sum()) / density_mass
+    return 100.0 * (high_response_mass - high_response_area)
+
+
+def _bubble_axis_limits(values: np.ndarray, minimum_padding: float) -> tuple:
+    lower = float(values.min())
+    upper = float(values.max())
+    span = upper - lower
+    padding = max(minimum_padding, 0.55 * span)
+    return lower - padding, upper + padding
+
+
+def save_efficiency_bubble_chart(
+    *,
+    gaussian_numbers: np.ndarray,
+    local_psnr: np.ndarray,
+    allocation_enrichment: np.ndarray,
+    output_stem: Path,
+) -> None:
+    """Plot Gaussian budget, local quality, and response alignment together."""
+
+    counts = np.asarray(gaussian_numbers, dtype=np.float64)
+    quality = np.asarray(local_psnr, dtype=np.float64)
+    enrichment = np.asarray(allocation_enrichment, dtype=np.float64)
+    if counts.shape != (2,) or quality.shape != (2,):
+        raise ValueError("the chart requires Base and Base + Ours values")
+    if enrichment.shape != (2,):
+        raise ValueError("the chart requires two allocation values")
+    if not np.all(np.isfinite(np.concatenate((counts, quality, enrichment)))):
+        raise ValueError("chart values must be finite")
+
+    labels = ("Base", "Base + Ours")
+    colors = ("#AFAFAF", "#D95F59")
+    edges = ("#6F6F6F", "#A83B38")
+    bubble_areas = 110.0 * np.clip(enrichment, 0.75, None)
+
+    figure, axis = plt.subplots(figsize=(6.4, 4.2), dpi=180)
+    axis.annotate(
+        "",
+        xy=(counts[1], quality[1]),
+        xytext=(counts[0], quality[0]),
+        arrowprops={
+            "arrowstyle": "-|>",
+            "color": "#666666",
+            "linewidth": 1.8,
+            "shrinkA": 16,
+            "shrinkB": 18,
+            "mutation_scale": 15,
+        },
+        zorder=2,
+    )
+    for index, label in enumerate(labels):
+        axis.scatter(
+            counts[index],
+            quality[index],
+            s=bubble_areas[index],
+            marker="o",
+            color=colors[index],
+            edgecolor=edges[index],
+            linewidth=2.0,
+            alpha=0.94,
+            zorder=3,
+        )
+
+    direction = 1.0 if counts[1] >= counts[0] else -1.0
+    label_offsets = (
+        (10.0 * direction, -12.0),
+        (-10.0 * direction, 12.0),
+    )
+    horizontal_alignment = (
+        "left" if direction > 0 else "right",
+        "right" if direction > 0 else "left",
+    )
+    for index, label in enumerate(labels):
+        axis.annotate(
+            (
+                f"{label}\n"
+                f"({int(counts[index])}, {quality[index]:.3f}, "
+                f"+{enrichment[index]:.2f} pp)"
+            ),
+            xy=(counts[index], quality[index]),
+            xytext=label_offsets[index],
+            textcoords="offset points",
+            ha=horizontal_alignment[index],
+            va="bottom" if index == 1 else "top",
+            fontsize=11.5,
+            fontweight="bold" if index == 1 else "semibold",
+            color="#B43A35" if index == 1 else "#333333",
+            linespacing=1.25,
+            zorder=4,
+        )
+
+    delta_count = int(counts[1] - counts[0])
+    delta_psnr = float(quality[1] - quality[0])
+    delta_alignment = float(enrichment[1] - enrichment[0])
+    midpoint = (
+        0.5 * float(counts[0] + counts[1]),
+        0.5 * float(quality[0] + quality[1]),
+    )
+    axis.annotate(
+        (
+            f"$\\Delta$G {delta_count:+d}  |  "
+            f"$\\Delta$PSNR {delta_psnr:+.3f} dB\n"
+            f"$\\Delta$Alignment {delta_alignment:+.2f} pp"
+        ),
+        xy=midpoint,
+        xytext=(0, 0),
+        textcoords="offset points",
+        ha="center",
+        va="center",
+        fontsize=9.8,
+        fontweight="bold",
+        color="#333333",
+        bbox={
+            "boxstyle": "round,pad=0.32",
+            "facecolor": "white",
+            "edgecolor": "#CFCFCF",
+            "linewidth": 0.8,
+            "alpha": 0.94,
+        },
+        zorder=5,
+    )
+    axis.text(
+        0.98 if direction > 0 else 0.02,
+        0.03,
+        "Bubble area scales with alignment enrichment",
+        transform=axis.transAxes,
+        ha="right" if direction > 0 else "left",
+        va="bottom",
+        fontsize=9.5,
+        fontweight="semibold",
+        color="#555555",
+    )
+
+    axis.set_xlabel(
+        "Number of Gaussians",
+        fontsize=14,
+        fontweight="bold",
+        labelpad=8,
+    )
+    axis.set_ylabel(
+        "Local PSNR (dB)",
+        fontsize=14,
+        fontweight="bold",
+        labelpad=9,
+    )
+    axis.set_xlim(*_bubble_axis_limits(counts, minimum_padding=6.0))
+    axis.set_ylim(*_bubble_axis_limits(quality, minimum_padding=0.025))
+    axis.grid(color="#D8D8D8", linewidth=0.8, alpha=0.85)
+    axis.set_axisbelow(True)
+    axis.tick_params(axis="both", labelsize=11, width=1.1, length=4.5)
+    for tick_label in axis.get_xticklabels() + axis.get_yticklabels():
+        tick_label.set_fontweight("bold")
+    axis.spines["left"].set_linewidth(1.2)
+    axis.spines["bottom"].set_linewidth(1.2)
+    figure.tight_layout(pad=0.9)
+    for suffix, dpi in ((".png", 600), (".pdf", 300), (".svg", 300)):
+        figure.savefig(
+            output_stem.with_suffix(suffix),
+            dpi=dpi,
+            bbox_inches="tight",
+            pad_inches=0.04,
+            facecolor="white",
+        )
+    plt.close(figure)
 
 
 def _integral(values: np.ndarray) -> np.ndarray:
@@ -538,13 +743,17 @@ def main() -> int:
         dict[str, float],
     ] = {}
     for roi in rois:
+        x0, y0, x1, y1 = roi["box"]
+        local_response = guide[y0:y1, x0:x1]
         for method in METHODS:
             counts = []
             psnrs = []
+            allocation_enrichments = []
             for repeat in range(1, args.repeat + 1):
                 prefix = f"{method}_repeat_{repeat}"
+                id_map = arrays[f"{prefix}_ids"]
                 count = local_gaussian_count(
-                    arrays[f"{prefix}_ids"],
+                    id_map,
                     roi["box"],
                 )
                 quality = local_psnr(
@@ -552,8 +761,21 @@ def main() -> int:
                     arrays[f"{prefix}_render"],
                     roi["box"],
                 )
+                density = footprint_density(
+                    id_map,
+                    roi["box"],
+                    sigma=args.alignment_density_sigma,
+                )
+                allocation_enrichment = (
+                    high_response_allocation_enrichment(
+                        local_response,
+                        density,
+                        high_response_quantile=args.alignment_quantile,
+                    )
+                )
                 counts.append(count)
                 psnrs.append(quality)
+                allocation_enrichments.append(allocation_enrichment)
                 run_records[(roi["name"], method, repeat)] = {
                     "gaussian_count": float(count),
                     "local_psnr": quality,
@@ -572,8 +794,14 @@ def main() -> int:
                         math.floor(float(np.mean(counts)))
                     ),
                     "local_psnr_mean": float(np.mean(psnrs)),
+                    "allocation_enrichment_mean": float(
+                        np.mean(allocation_enrichments)
+                    ),
                     "gaussian_count_runs": json.dumps(counts),
                     "local_psnr_runs": json.dumps(psnrs),
+                    "allocation_enrichment_runs": json.dumps(
+                        allocation_enrichments
+                    ),
                 }
             )
 
@@ -630,33 +858,40 @@ def main() -> int:
             row["scatter_proportional_target"] = display_targets[method]
             row["scatter_displayed_points"] = int(len(display_points))
 
+        comparison_rows = [
+            next(
+                record
+                for record in region_rows
+                if record["method"] == method
+            )
+            for method in ("base", "r_e_d")
+        ]
         count_values = np.asarray(
             [
                 record["gaussian_count_mean_floor"]
-                for record in region_rows
+                for record in comparison_rows
             ],
             dtype=float,
         )
         psnr_values = np.asarray(
-            [record["local_psnr_mean"] for record in region_rows],
+            [record["local_psnr_mean"] for record in comparison_rows],
             dtype=float,
         )
-        save_bar_chart(
-            count_values,
-            ylabel="Number of Gaussians",
+        allocation_values = np.asarray(
+            [
+                record["allocation_enrichment_mean"]
+                for record in comparison_rows
+            ],
+            dtype=float,
+        )
+        save_efficiency_bubble_chart(
+            gaussian_numbers=count_values,
+            local_psnr=psnr_values,
+            allocation_enrichment=allocation_values,
             output_stem=(
                 args.output_dir
-                / f"region_{roi['name']}_gaussian_numbers"
+                / f"region_{roi['name']}_allocation_efficiency"
             ),
-            metric="count",
-        )
-        save_bar_chart(
-            psnr_values,
-            ylabel="Local PSNR (dB)",
-            output_stem=(
-                args.output_dir / f"region_{roi['name']}_local_psnr"
-            ),
-            metric="psnr",
         )
 
     for region, _ in ROI_STYLES:
@@ -700,7 +935,8 @@ def main() -> int:
         },
         "selection": {
             "policy": (
-                "Highest Base-render response among windows where Full "
+                "Highest Base-render response among windows where "
+                "Base + Ours "
                 "has positive mean PSNR gain, is the best of all five "
                 "variants, improves in at least the configured number of "
                 "paired repeats, and retains a comparable Gaussian count."
@@ -744,6 +980,15 @@ def main() -> int:
             "error_bars": False,
             "gaussian_count_display": "floor of the run mean",
             "psnr_display": "unmodified run mean",
+            "allocation_enrichment": {
+                "high_response_quantile": args.alignment_quantile,
+                "density_sigma": args.alignment_density_sigma,
+                "definition": (
+                    "Percentage-point excess of projected Gaussian mass "
+                    "inside the local top-response quantile over the "
+                    "corresponding uniform spatial area."
+                ),
+            },
         },
     }
     with (args.output_dir / "xyz2521_audit.json").open(
