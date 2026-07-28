@@ -211,8 +211,11 @@ class ProbabilityEfficiencyAssetTests(unittest.TestCase):
             )
             self.assertNotIn("Red ROI", svg)
             self.assertNotIn("Blue ROI", svg)
-            self.assertIn("419 G, 23.72 dB", svg)
-            self.assertIn("532 G, 21.12 dB", svg)
+            self.assertIn("409, 22.99 dB", svg)
+            self.assertIn("419, 23.72 dB", svg)
+            self.assertIn("537, 18.48 dB", svg)
+            self.assertIn("532, 21.12 dB", svg)
+            self.assertNotIn(" G,", svg)
 
     def test_global_probability_maps_export_base_and_ours_only(self):
         with tempfile.TemporaryDirectory() as directory:

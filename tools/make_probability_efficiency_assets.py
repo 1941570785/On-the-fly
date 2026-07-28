@@ -396,6 +396,8 @@ def save_combined_roi_efficiency_chart(
             "colors": ("#E9A09A", "#C83E3E"),
             "arrow": "#B52D2D",
             "label_offsets": ((-20, -20), (-10, 20)),
+            "base_value_offset": (18, -7),
+            "base_value_alignment": "left",
             "value_offset": (20, 2),
         },
         {
@@ -408,6 +410,8 @@ def save_combined_roi_efficiency_chart(
             "colors": ("#9FC7E3", "#2678B8"),
             "arrow": "#1F6FA9",
             "label_offsets": ((12, -22), (-12, 20)),
+            "base_value_offset": (-20, 0),
+            "base_value_alignment": "right",
             "value_offset": (20, 0),
         },
     )
@@ -524,7 +528,20 @@ def save_combined_roi_efficiency_chart(
             )
 
         axis.annotate(
-            f"{counts[1]:.0f} G, {quality[1]:.2f} dB",
+            f"{counts[0]:.0f}, {quality[0]:.2f} dB",
+            (counts[0], quality[0]),
+            xytext=metrics["base_value_offset"],
+            textcoords="offset points",
+            ha=metrics["base_value_alignment"],
+            va="center",
+            fontsize=13,
+            fontfamily="Times New Roman",
+            fontweight="bold",
+            color="#303030",
+            zorder=4,
+        )
+        axis.annotate(
+            f"{counts[1]:.0f}, {quality[1]:.2f} dB",
             (counts[1], quality[1]),
             xytext=metrics["value_offset"],
             textcoords="offset points",
