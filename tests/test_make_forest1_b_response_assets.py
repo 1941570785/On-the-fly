@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 
+from tools import make_forest1_b_response_assets as forest_assets
 from tools.make_forest1_b_response_assets import (
     boxes_overlap,
     compute_response_guide,
@@ -89,6 +90,20 @@ class Forest1BResponseAssetTests(unittest.TestCase):
             points,
             np.asarray([[0.5, 0.0], [2.0, 1.5]]),
         )
+
+    def test_psnr_bar_limits_tightly_bracket_small_metric_changes(self):
+        function = getattr(forest_assets, "bar_chart_limits", None)
+        self.assertIsNotNone(function)
+        values = np.asarray(
+            [26.770, 26.772, 26.814, 26.770, 26.821],
+            dtype=np.float64,
+        )
+
+        lower, upper = function(values, metric="psnr")
+
+        self.assertLess(lower, float(values.min()))
+        self.assertGreater(upper, float(values.max()))
+        self.assertLessEqual(upper - lower, 0.20)
 
 
 if __name__ == "__main__":

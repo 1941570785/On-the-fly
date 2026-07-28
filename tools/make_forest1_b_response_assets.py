@@ -17,6 +17,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from matplotlib.colors import Normalize
+from matplotlib.ticker import MaxNLocator
 from PIL import Image, ImageDraw, ImageFont
 from scipy.ndimage import gaussian_filter
 
@@ -504,6 +505,27 @@ def _save_figure_formats(
         )
 
 
+def bar_chart_limits(
+    values: np.ndarray,
+    *,
+    metric: str,
+) -> tuple[float, float]:
+    if metric == "count":
+        return 0.0, max(float(values.max()) * 1.18, 1.0)
+    spread = float(values.max() - values.min())
+    lower_padding = max(0.025, 0.22 * spread)
+    upper_padding = max(0.035, 0.30 * spread)
+    lower = math.floor(
+        (float(values.min()) - lower_padding) * 100.0
+    ) / 100.0
+    upper = math.ceil(
+        (float(values.max()) + upper_padding) * 100.0
+    ) / 100.0
+    if upper <= lower:
+        upper = lower + 0.1
+    return lower, upper
+
+
 def save_bar_chart(
     values: np.ndarray,
     *,
@@ -514,46 +536,62 @@ def save_bar_chart(
     positions = np.arange(len(METHODS))
     colors = [METHOD_COLORS[method] for method in METHODS]
     edges = [METHOD_EDGES[method] for method in METHODS]
-    figure, axis = plt.subplots(figsize=(5.25, 2.75), dpi=180)
+    figure, axis = plt.subplots(figsize=(6.4, 3.7), dpi=180)
     bars = axis.bar(
         positions,
         values,
-        width=0.58,
+        width=0.60,
         color=colors,
         edgecolor=edges,
-        linewidth=0.9,
+        linewidth=1.15,
     )
     axis.set_xticks(positions, [METHOD_LABELS[method] for method in METHODS])
-    axis.set_ylabel(ylabel)
-    axis.grid(axis="y", color="#D7D7D7", linewidth=0.65, alpha=0.9)
+    axis.set_ylabel(
+        ylabel,
+        fontsize=15,
+        fontweight="bold",
+        labelpad=10,
+    )
+    axis.tick_params(
+        axis="both",
+        labelsize=12,
+        width=1.15,
+        length=4.5,
+    )
+    for label in axis.get_xticklabels():
+        label.set_fontsize(13)
+        label.set_fontweight("bold")
+    for label in axis.get_yticklabels():
+        label.set_fontsize(12)
+        label.set_fontweight("bold")
+    axis.grid(axis="y", color="#D2D2D2", linewidth=0.8, alpha=0.9)
     axis.set_axisbelow(True)
+    axis.yaxis.set_major_locator(MaxNLocator(nbins=5))
+    axis.spines["left"].set_linewidth(1.2)
+    axis.spines["bottom"].set_linewidth(1.2)
 
+    lower, upper = bar_chart_limits(values, metric=metric)
+    axis.set_ylim(lower, upper)
     if metric == "count":
-        axis.set_ylim(0, max(float(values.max()) * 1.24, 1.0))
         labels = [f"{int(value)}" for value in values]
     else:
-        spread = max(float(values.max() - values.min()), 0.25)
-        lower = math.floor((float(values.min()) - 0.24 * spread) * 2.0) / 2.0
-        upper = math.ceil((float(values.max()) + 0.36 * spread) * 2.0) / 2.0
-        if upper <= lower:
-            upper = lower + 1.0
-        axis.set_ylim(lower, upper)
         labels = [f"{value:.3f}" for value in values]
 
     y0, y1 = axis.get_ylim()
-    offset = 0.025 * (y1 - y0)
+    offset = 0.022 * (y1 - y0)
     for method, bar, label in zip(METHODS, bars, labels):
+        is_full = method == "r_e_d"
         axis.text(
             bar.get_x() + bar.get_width() / 2,
             bar.get_height() + offset,
             label,
             ha="center",
             va="bottom",
-            fontsize=8.2,
-            fontweight="bold" if method == "r_e_d" else "normal",
-            color="#A83B38" if method == "r_e_d" else "#242424",
+            fontsize=14 if is_full else 12.5,
+            fontweight="bold" if is_full else "semibold",
+            color="#B43A35" if is_full else "#242424",
         )
-    figure.tight_layout(pad=0.55)
+    figure.tight_layout(pad=0.8)
     _save_figure_formats(figure, output_stem)
     plt.close(figure)
 
