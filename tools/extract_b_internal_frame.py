@@ -76,6 +76,37 @@ def _find_keyframe_id(scene_model: SceneModel, frame_name: str) -> int:
     return matches[0]
 
 
+def load_ground_truth(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    rgba = np.asarray(Image.open(path).convert("RGBA"), dtype=np.uint8)
+    return rgba[..., :3], rgba[..., 3] > 0
+
+
+def _load_render(
+    render_path: Path,
+    package: dict[str, torch.Tensor],
+) -> tuple[np.ndarray, str]:
+    if render_path.is_file():
+        return (
+            np.asarray(
+                Image.open(render_path).convert("RGB"),
+                dtype=np.uint8,
+            ),
+            "saved_test_image",
+        )
+    render = (
+        package["render"]
+        .detach()
+        .clamp(0.0, 1.0)
+        .permute(1, 2, 0)
+        .mul(255.0)
+        .round()
+        .byte()
+        .cpu()
+        .numpy()
+    )
+    return render, "rasterizer"
+
+
 @torch.inference_mode()
 def extract_scene(
     scene_path: Path,
@@ -102,18 +133,18 @@ def extract_scene(
     keyframe_id = _find_keyframe_id(scene_model, frame_name)
     package = scene_model.render_from_id(keyframe_id, pyr_lvl=0)
     render_path = scene_path / "test_images" / frame_name
-    render = np.asarray(
-        Image.open(render_path).convert("RGB"),
-        dtype=np.uint8,
-    )
+    render, render_source = _load_render(render_path, package)
     id_map = package["mainGaussID"][0].int().cpu().numpy()
+    if render.shape[:2] != id_map.shape:
+        raise ValueError("render and Gaussian-ID map shapes differ")
     valid_ids = id_map[id_map >= 0]
     record = {
         "scene_dir": str(scene_path),
         "keyframe_id": keyframe_id,
         "keyframe_name": frame_name,
         "restored_focal_pixels": scene_model.f,
-        "render_path": str(render_path),
+        "render_source": render_source,
+        "render_path": str(render_path) if render_path.is_file() else None,
         "visible_unique_gaussians": int(np.unique(valid_ids).size),
         "total_blended_gaussians": int(scene_model.xyz.shape[0]),
     }
@@ -126,11 +157,11 @@ def extract_scene(
 def main() -> int:
     args = parse_args()
     scene = SCENES[args.scene]
-    ground_truth = np.asarray(
-        Image.open(args.source_image).convert("RGB"),
-        dtype=np.uint8,
-    )
-    arrays: dict[str, np.ndarray] = {"ground_truth": ground_truth}
+    ground_truth, valid_mask = load_ground_truth(args.source_image)
+    arrays: dict[str, np.ndarray] = {
+        "ground_truth": ground_truth,
+        "valid_mask": valid_mask,
+    }
     manifest = []
     for mode in B_SIGNAL_MODES:
         for repeat in range(1, args.repeat + 1):
