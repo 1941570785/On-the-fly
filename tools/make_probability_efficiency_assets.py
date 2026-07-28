@@ -22,6 +22,8 @@ METHOD_LABELS = ("Base", "Ours")
 METHOD_COLORS = ("#777777", "#C83E3E")
 RED_COLOR = "#D62728"
 BLUE_COLOR = "#1F77B4"
+BUBBLE_BASE_AREA = 1700.0
+BUBBLE_CONTRAST_EXPONENT = 4.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -108,9 +110,11 @@ def choose_redistribution_rois(
     ]
     red_candidates.sort(
         key=lambda record: (
-            -float(record["mu_delta"])
+            -float(record["mu_relative_change"])
             * float(record["psnr_gain"])
-            * max(float(record["redistribution_l1"]), 1e-9),
+            * math.sqrt(
+                max(float(record["redistribution_l1"]), 1e-9)
+            ),
             record["box"][1],
             record["box"][0],
         )
@@ -136,10 +140,12 @@ def choose_redistribution_rois(
         blue_candidates.sort(
             key=lambda record: (
                 -(
-                    -float(record["mu_delta"])
+                    -float(record["mu_relative_change"])
                     * float(record["psnr_gain"])
                     * math.sqrt(float(record["gaussian_reduction"]))
-                    * max(float(record["redistribution_l1"]), 1e-9)
+                    * math.sqrt(
+                        max(float(record["redistribution_l1"]), 1e-9)
+                    )
                 ),
                 record["box"][1],
                 record["box"][0],
@@ -160,6 +166,25 @@ def _axis_limits(
     upper = float(np.max(values))
     padding = max(minimum_padding, relative_padding * (upper - lower))
     return lower - padding, upper + padding
+
+
+def contrast_enhanced_bubble_areas(
+    expected_samples: np.ndarray,
+    *,
+    base_area: float = BUBBLE_BASE_AREA,
+    exponent: float = BUBBLE_CONTRAST_EXPONENT,
+) -> np.ndarray:
+    expected = np.asarray(expected_samples, dtype=np.float64)
+    if expected.shape != (2,) or np.any(expected <= 0):
+        raise ValueError("expected sample counts must contain two positives")
+    if not np.all(np.isfinite(expected)):
+        raise ValueError("expected sample counts must be finite")
+    if not math.isfinite(base_area) or base_area <= 0:
+        raise ValueError("base bubble area must be positive")
+    if not math.isfinite(exponent) or exponent <= 0:
+        raise ValueError("bubble contrast exponent must be positive")
+    normalized = expected / expected[0]
+    return base_area * np.power(normalized, exponent)
 
 
 def save_efficiency_bubble_chart(
@@ -193,8 +218,7 @@ def save_efficiency_bubble_chart(
         }
     )
     figure, axis = plt.subplots(figsize=(5.4, 4.5))
-    maximum_area = 2300.0
-    areas = maximum_area * expected / float(expected.max())
+    areas = contrast_enhanced_bubble_areas(expected)
     axis.annotate(
         "",
         xy=(counts[1], quality[1]),
@@ -223,9 +247,15 @@ def save_efficiency_bubble_chart(
             zorder=3,
         )
         horizontal = -14 if index == 0 else 14
-        vertical = -17 if index == 0 else 17
+        vertical = -19 if index == 0 else 19
+        relative_change = 100.0 * (expected[index] / expected[0] - 1.0)
+        change_text = "reference" if index == 0 else f"{relative_change:+.1f}%"
         axis.annotate(
-            f"{label}\n$\\mu(\\mathcal{{R}})$ = {expected[index]:.1f}",
+            (
+                f"{label}\n"
+                f"$\\mu(\\mathcal{{R}})$ = {expected[index]:.1f}\n"
+                f"({change_text})"
+            ),
             (counts[index], quality[index]),
             xytext=(horizontal, vertical),
             textcoords="offset points",
@@ -259,15 +289,15 @@ def save_efficiency_bubble_chart(
     axis.spines["right"].set_visible(False)
     axis.spines["left"].set_linewidth(1.2)
     axis.spines["bottom"].set_linewidth(1.2)
-    axis.text(
-        0.02,
-        0.98,
-        "Bubble area $\\propto$ Expected Samples in ROI",
-        transform=axis.transAxes,
-        ha="left",
-        va="top",
+    axis.set_title(
+        (
+            "Bubble area $\\propto "
+            "[\\mu(\\mathcal{R})/\\mu_{\\mathrm{Base}}(\\mathcal{R})]^4$"
+        ),
+        loc="left",
         fontsize=10.5,
         color="#444444",
+        pad=8.0,
     )
     figure.tight_layout(pad=0.8)
     output_stem.parent.mkdir(parents=True, exist_ok=True)
@@ -417,6 +447,8 @@ def build_candidates(
                 np.mean(mu_values["r_e_d"])
                 - np.mean(mu_values["base"])
             )
+            base_mu = float(np.mean(mu_values["base"]))
+            mu_relative_change = mu_delta / max(base_mu, 1e-12)
             if abs(mu_delta) < 1e-12 or positive_psnr_repeats == 0:
                 continue
             gaussian_values: dict[str, list[int]] = {
@@ -442,6 +474,7 @@ def build_candidates(
                     "psnr_gain": psnr_gain,
                     "positive_psnr_repeats": positive_psnr_repeats,
                     "mu_delta": mu_delta,
+                    "mu_relative_change": mu_relative_change,
                     "redistribution_l1": float(
                         np.mean(
                             [
@@ -578,6 +611,10 @@ def main() -> int:
             "name": "Expected Samples in ROI",
             "symbol": "mu_t(R)",
             "definition": "sum of final Bernoulli probabilities inside ROI",
+            "bubble_area_encoding": (
+                "A = A_base * (mu / mu_base)^4; exact mu and relative "
+                "change are annotated"
+            ),
         },
         "selection_rules": {
             "minimum_psnr_gain": args.minimum_psnr_gain,
