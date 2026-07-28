@@ -7,9 +7,12 @@ import numpy as np
 from tools.make_probability_efficiency_assets import (
     choose_redistribution_rois,
     contrast_enhanced_bubble_areas,
+    normalized_probability_change,
     roi_expected_samples,
+    roi_sampling_share,
     save_combined_roi_efficiency_chart,
     save_efficiency_bubble_chart,
+    save_full_frame_probability_change_map,
 )
 
 
@@ -20,6 +23,30 @@ class ProbabilityEfficiencyAssetTests(unittest.TestCase):
             roi_expected_samples(probability, (1, 1, 5, 3)),
             float(probability[1:3, 1:5].sum()),
         )
+
+    def test_roi_sampling_share_reports_percentage_of_frame_mass(self):
+        probability = np.arange(1, 25, dtype=np.float64).reshape(4, 6)
+        box = (1, 1, 5, 3)
+        expected = 100.0 * probability[1:3, 1:5].sum() / probability.sum()
+        self.assertAlmostEqual(
+            roi_sampling_share(probability, box),
+            expected,
+        )
+
+    def test_normalized_probability_change_conserves_frame_mass(self):
+        arrays = {
+            "base_repeat_1_final_probability": np.array(
+                [[1.0, 3.0], [2.0, 4.0]]
+            ),
+            "r_e_d_repeat_1_final_probability": np.array(
+                [[2.0, 2.0], [4.0, 2.0]]
+            ),
+        }
+        change = normalized_probability_change(arrays, repeat=1)
+        self.assertEqual(change.shape, (2, 2))
+        self.assertAlmostEqual(float(change.sum()), 0.0)
+        self.assertGreater(change[1, 0], 0.0)
+        self.assertLess(change[1, 1], 0.0)
 
     def test_roi_selection_requires_complementary_probability_changes(self):
         candidates = [
@@ -115,10 +142,29 @@ class ProbabilityEfficiencyAssetTests(unittest.TestCase):
             save_combined_roi_efficiency_chart(
                 red_gaussian_numbers=np.array([409.0, 419.0]),
                 red_local_psnr=np.array([22.99, 23.72]),
-                red_expected_samples=np.array([262.4, 291.9]),
+                red_sampling_share=np.array([3.03, 3.48]),
                 blue_gaussian_numbers=np.array([537.0, 532.0]),
                 blue_local_psnr=np.array([18.48, 21.12]),
-                blue_expected_samples=np.array([206.0, 114.7]),
+                blue_sampling_share=np.array([2.40, 1.37]),
+                output_stem=stem,
+            )
+            self.assertTrue(stem.with_suffix(".png").is_file())
+            self.assertTrue(stem.with_suffix(".pdf").is_file())
+            self.assertTrue(stem.with_suffix(".svg").is_file())
+
+    def test_full_frame_change_map_exports_roi_overlay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stem = Path(directory) / "change_map"
+            image = np.full((24, 32, 3), 160, dtype=np.uint8)
+            change = np.zeros((24, 32), dtype=np.float64)
+            change[3:10, 3:12] = 0.4
+            change[12:21, 18:29] = -0.3
+            save_full_frame_probability_change_map(
+                image=image,
+                probability_change=change,
+                valid_mask=np.ones((24, 32), dtype=bool),
+                red_box=(3, 3, 12, 10),
+                blue_box=(18, 12, 29, 21),
                 output_stem=stem,
             )
             self.assertTrue(stem.with_suffix(".png").is_file())

@@ -14,7 +14,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 
 METHODS = ("base", "r_e_d")
@@ -70,6 +70,44 @@ def roi_expected_samples(
     return float(
         np.asarray(probability, dtype=np.float64)[y0:y1, x0:x1].sum()
     )
+
+
+def roi_sampling_share(
+    probability: np.ndarray,
+    box: tuple[int, int, int, int],
+) -> float:
+    values = np.asarray(probability, dtype=np.float64)
+    total = float(values.sum())
+    if not math.isfinite(total) or total <= 0:
+        raise ValueError("frame sampling mass must be positive")
+    return 100.0 * roi_expected_samples(values, box) / total
+
+
+def normalized_probability_change(
+    arrays: dict[str, np.ndarray],
+    *,
+    repeat: int,
+) -> np.ndarray:
+    changes = []
+    for repetition in range(1, repeat + 1):
+        base = np.asarray(
+            arrays[f"base_repeat_{repetition}_final_probability"],
+            dtype=np.float64,
+        )
+        ours = np.asarray(
+            arrays[f"r_e_d_repeat_{repetition}_final_probability"],
+            dtype=np.float64,
+        )
+        if base.shape != ours.shape or base.ndim != 2:
+            raise ValueError("Base and Ours probability maps must align")
+        base_total = float(base.sum())
+        ours_total = float(ours.sum())
+        if base_total <= 0 or ours_total <= 0:
+            raise ValueError("probability maps must have positive mass")
+        changes.append(ours / ours_total - base / base_total)
+    if not changes:
+        raise ValueError("at least one repetition is required")
+    return np.mean(np.stack(changes, axis=0), axis=0)
 
 
 def _center(box: tuple[int, int, int, int]) -> tuple[float, float]:
@@ -324,18 +362,18 @@ def save_combined_roi_efficiency_chart(
     *,
     red_gaussian_numbers: np.ndarray,
     red_local_psnr: np.ndarray,
-    red_expected_samples: np.ndarray,
+    red_sampling_share: np.ndarray,
     blue_gaussian_numbers: np.ndarray,
     blue_local_psnr: np.ndarray,
-    blue_expected_samples: np.ndarray,
+    blue_sampling_share: np.ndarray,
     output_stem: Path,
 ) -> None:
     regions = {
         "Red ROI": {
             "counts": np.asarray(red_gaussian_numbers, dtype=np.float64),
             "quality": np.asarray(red_local_psnr, dtype=np.float64),
-            "expected": np.asarray(
-                red_expected_samples,
+            "share": np.asarray(
+                red_sampling_share,
                 dtype=np.float64,
             ),
             "colors": ("#E9A09A", "#C83E3E"),
@@ -345,8 +383,8 @@ def save_combined_roi_efficiency_chart(
         "Blue ROI": {
             "counts": np.asarray(blue_gaussian_numbers, dtype=np.float64),
             "quality": np.asarray(blue_local_psnr, dtype=np.float64),
-            "expected": np.asarray(
-                blue_expected_samples,
+            "share": np.asarray(
+                blue_sampling_share,
                 dtype=np.float64,
             ),
             "colors": ("#9FC7E3", "#2678B8"),
@@ -357,13 +395,13 @@ def save_combined_roi_efficiency_chart(
     for name, metrics in regions.items():
         counts = metrics["counts"]
         quality = metrics["quality"]
-        expected = metrics["expected"]
+        share = metrics["share"]
         if counts.shape != (2,) or quality.shape != (2,):
             raise ValueError(f"{name} requires Base and Ours values")
-        if expected.shape != (2,) or np.any(expected <= 0):
-            raise ValueError(f"{name} expected samples must be positive")
+        if share.shape != (2,) or np.any(share <= 0):
+            raise ValueError(f"{name} sampling shares must be positive")
         if not np.all(
-            np.isfinite(np.concatenate((counts, quality, expected)))
+            np.isfinite(np.concatenate((counts, quality, share)))
         ):
             raise ValueError(f"{name} chart values must be finite")
 
@@ -381,7 +419,8 @@ def save_combined_roi_efficiency_chart(
         }
     )
     figure, axis = plt.subplots(figsize=(7.2, 5.2))
-    base_area = 1050.0
+    reference_share = 2.5
+    reference_area = 900.0
     all_counts = np.concatenate(
         [metrics["counts"] for metrics in regions.values()]
     )
@@ -402,11 +441,10 @@ def save_combined_roi_efficiency_chart(
     for name, metrics in regions.items():
         counts = metrics["counts"]
         quality = metrics["quality"]
-        expected = metrics["expected"]
-        ratios = expected / expected[0]
+        share = metrics["share"]
         # Matplotlib's scatter size is area, so squaring the ratio makes
-        # the visible bubble diameter proportional to normalized mass.
-        areas = base_area * np.square(ratios)
+        # the visible bubble diameter proportional to sampling share.
+        areas = reference_area * np.square(share / reference_share)
         arrow_color = metrics["arrow"]
         axis.plot(
             [x_limits[0], counts[1]],
@@ -451,11 +489,10 @@ def save_combined_roi_efficiency_chart(
                 alpha=0.93,
                 zorder=3,
             )
-            ratio = ratios[index]
             label = (
                 f"{name} - {method}\n"
                 f"{counts[index]:.0f} G, {quality[index]:.2f} dB\n"
-                f"$\\mu/\\mu_{{\\mathrm{{Base}}}}={ratio:.3f}$"
+                f"Sampling Share = {share[index]:.2f}%"
             )
             axis.annotate(
                 label,
@@ -486,10 +523,7 @@ def save_combined_roi_efficiency_chart(
     axis.text(
         0.018,
         0.968,
-        (
-            "Bubble diameter indicates normalized expected sampling mass "
-            "$\\mu(\\mathcal{R})/\\mu_{\\mathrm{Base}}(\\mathcal{R})$."
-        ),
+        "Bubble diameter indicates ROI Sampling Share (%).",
         transform=axis.transAxes,
         ha="left",
         va="top",
@@ -523,6 +557,176 @@ def save_combined_roi_efficiency_chart(
         spine.set_linewidth(1.0)
         spine.set_color("#333333")
     figure.tight_layout(pad=0.9)
+    output_stem.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(
+        output_stem.with_suffix(".png"),
+        dpi=600,
+        bbox_inches="tight",
+        facecolor="white",
+    )
+    figure.savefig(
+        output_stem.with_suffix(".pdf"),
+        bbox_inches="tight",
+        facecolor="white",
+    )
+    figure.savefig(
+        output_stem.with_suffix(".svg"),
+        bbox_inches="tight",
+        facecolor="white",
+    )
+    plt.close(figure)
+
+
+def _smooth_signed_change(
+    values: np.ndarray,
+    *,
+    radius: float = 4.0,
+) -> np.ndarray:
+    finite = np.asarray(values, dtype=np.float64)
+    maximum = float(np.max(np.abs(finite)))
+    if maximum <= 0:
+        return np.zeros_like(finite)
+    positive = np.clip(finite / maximum, 0.0, 1.0)
+    negative = np.clip(-finite / maximum, 0.0, 1.0)
+    positive_image = Image.fromarray(
+        np.rint(255.0 * positive).astype(np.uint8),
+        mode="L",
+    ).filter(ImageFilter.GaussianBlur(radius=radius))
+    negative_image = Image.fromarray(
+        np.rint(255.0 * negative).astype(np.uint8),
+        mode="L",
+    ).filter(ImageFilter.GaussianBlur(radius=radius))
+    return maximum * (
+        np.asarray(positive_image, dtype=np.float64)
+        - np.asarray(negative_image, dtype=np.float64)
+    ) / 255.0
+
+
+def save_full_frame_probability_change_map(
+    *,
+    image: np.ndarray,
+    probability_change: np.ndarray,
+    valid_mask: np.ndarray,
+    red_box: tuple[int, int, int, int],
+    blue_box: tuple[int, int, int, int],
+    output_stem: Path,
+) -> None:
+    background = np.asarray(image)
+    change = np.asarray(probability_change, dtype=np.float64)
+    valid = np.asarray(valid_mask, dtype=bool)
+    if background.ndim != 3 or background.shape[2] != 3:
+        raise ValueError("background image must be HxWx3")
+    if change.shape != background.shape[:2] or valid.shape != change.shape:
+        raise ValueError("probability change and mask must match the image")
+    if not np.all(np.isfinite(change)):
+        raise ValueError("probability change must be finite")
+
+    smoothed = _smooth_signed_change(change)
+    magnitudes = np.abs(smoothed[valid])
+    nonzero = magnitudes[magnitudes > 0]
+    scale = (
+        float(np.quantile(nonzero, 0.985))
+        if nonzero.size
+        else 1.0
+    )
+    display = np.clip(smoothed / max(scale, 1e-12), -1.0, 1.0)
+    strength = np.abs(display)
+    alpha = 0.78 * np.power(
+        np.clip((strength - 0.06) / 0.94, 0.0, 1.0),
+        0.62,
+    )
+    alpha[~valid] = 0.0
+
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["Times New Roman", "DejaVu Serif"],
+            "font.size": 10,
+            "svg.fonttype": "none",
+            "pdf.fonttype": 42,
+        }
+    )
+    figure, axis = plt.subplots(figsize=(7.2, 5.7))
+    axis.imshow(background.astype(np.uint8))
+    overlay = axis.imshow(
+        display,
+        cmap="RdBu_r",
+        vmin=-1.0,
+        vmax=1.0,
+        alpha=alpha,
+        interpolation="bilinear",
+    )
+    for box, color, label in (
+        (red_box, RED_COLOR, "Red ROI"),
+        (blue_box, BLUE_COLOR, "Blue ROI"),
+    ):
+        x0, y0, x1, y1 = box
+        axis.add_patch(
+            plt.Rectangle(
+                (x0, y0),
+                x1 - x0,
+                y1 - y0,
+                fill=False,
+                edgecolor="white",
+                linewidth=5.0,
+                zorder=5,
+            )
+        )
+        axis.add_patch(
+            plt.Rectangle(
+                (x0, y0),
+                x1 - x0,
+                y1 - y0,
+                fill=False,
+                edgecolor=color,
+                linewidth=3.0,
+                zorder=6,
+            )
+        )
+        axis.text(
+            x0 + 5,
+            y0 + 18,
+            label,
+            color=color,
+            fontsize=10,
+            fontweight="bold",
+            ha="left",
+            va="center",
+            bbox={
+                "boxstyle": "square,pad=0.18",
+                "facecolor": "white",
+                "edgecolor": "none",
+                "alpha": 0.88,
+            },
+            zorder=7,
+        )
+
+    axis.set_title(
+        "Full-frame Sampling Probability Redistribution",
+        fontsize=14,
+        fontweight="bold",
+        pad=9,
+    )
+    axis.set_axis_off()
+    colorbar = figure.colorbar(
+        overlay,
+        ax=axis,
+        orientation="horizontal",
+        fraction=0.050,
+        pad=0.025,
+        aspect=38,
+        ticks=[-1.0, 0.0, 1.0],
+    )
+    colorbar.ax.set_xticklabels(
+        ["Decrease", "No change", "Increase"],
+        fontsize=9,
+    )
+    colorbar.set_label(
+        "Normalized Sampling Probability Change",
+        fontsize=10,
+        fontweight="bold",
+    )
+    figure.tight_layout(pad=0.45)
     output_stem.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(
         output_stem.with_suffix(".png"),
@@ -587,6 +791,7 @@ def build_candidates(
     valid_integral = _integral_image(valid)
     error_integrals: dict[tuple[str, int], np.ndarray] = {}
     probability_integrals: dict[tuple[str, int], np.ndarray] = {}
+    probability_totals: dict[tuple[str, int], float] = {}
     redistribution_integrals: dict[int, np.ndarray] = {}
     for method in METHODS:
         for repetition in range(1, repeat + 1):
@@ -596,8 +801,12 @@ def build_candidates(
             error_integrals[method, repetition] = _integral_image(
                 squared_error * valid
             )
+            probability = arrays[f"{prefix}_final_probability"]
             probability_integrals[method, repetition] = _integral_image(
-                arrays[f"{prefix}_final_probability"]
+                probability
+            )
+            probability_totals[method, repetition] = float(
+                np.asarray(probability, dtype=np.float64).sum()
             )
     for repetition in range(1, repeat + 1):
         prefix = f"r_e_d_repeat_{repetition}"
@@ -637,6 +846,9 @@ def build_candidates(
             mu_values: dict[str, list[float]] = {
                 method: [] for method in METHODS
             }
+            share_values: dict[str, list[float]] = {
+                method: [] for method in METHODS
+            }
             for method in METHODS:
                 for repetition in range(1, repeat + 1):
                     mse = (
@@ -649,10 +861,17 @@ def build_candidates(
                     psnr_values[method].append(
                         -10.0 * math.log10(max(mse, 1e-12))
                     )
-                    mu_values[method].append(
-                        _integral_sum(
-                            probability_integrals[method, repetition],
-                            box,
+                    roi_mass = _integral_sum(
+                        probability_integrals[method, repetition],
+                        box,
+                    )
+                    mu_values[method].append(roi_mass)
+                    share_values[method].append(
+                        100.0
+                        * roi_mass
+                        / max(
+                            probability_totals[method, repetition],
+                            1e-12,
                         )
                     )
             psnr_gain = float(
@@ -693,6 +912,7 @@ def build_candidates(
                     "box": box,
                     "local_psnr": psnr_values,
                     "expected_samples": mu_values,
+                    "sampling_share": share_values,
                     "gaussian_numbers": gaussian_values,
                     "psnr_gain": psnr_gain,
                     "positive_psnr_repeats": positive_psnr_repeats,
@@ -733,6 +953,7 @@ def _metric_summary(
         )
         psnr_mean = float(np.mean(record["local_psnr"][method]))
         mu_mean = float(np.mean(record["expected_samples"][method]))
+        share_mean = float(np.mean(record["sampling_share"][method]))
         output.append(
             {
                 "ROI": name,
@@ -741,6 +962,7 @@ def _metric_summary(
                 "Gaussian Mean (raw)": gaussian_mean,
                 "Local PSNR (dB)": psnr_mean,
                 "Expected Samples in ROI": mu_mean,
+                "Sampling Share (%)": share_mean,
             }
         )
     return output
@@ -795,6 +1017,21 @@ def main() -> int:
     boxed.save(args.output_dir / "xyz_002882_gt_red_blue_boxes.png")
     image.crop(red["box"]).save(args.output_dir / "red_roi_gt.png")
     image.crop(blue["box"]).save(args.output_dir / "blue_roi_gt.png")
+    frame_probability_change = normalized_probability_change(
+        arrays,
+        repeat=args.repeat,
+    )
+    save_full_frame_probability_change_map(
+        image=arrays["ground_truth"].astype(np.uint8),
+        probability_change=frame_probability_change,
+        valid_mask=arrays["valid_mask"].astype(bool),
+        red_box=red["box"],
+        blue_box=blue["box"],
+        output_stem=(
+            args.output_dir
+            / "full_frame_probability_change_with_rois"
+        ),
+    )
 
     rows = []
     region_rows: dict[str, list[dict[str, object]]] = {}
@@ -838,9 +1075,9 @@ def main() -> int:
             ],
             dtype=np.float64,
         ),
-        red_expected_samples=np.array(
+        red_sampling_share=np.array(
             [
-                row["Expected Samples in ROI"]
+                row["Sampling Share (%)"]
                 for row in region_rows["Red ROI"]
             ],
             dtype=np.float64,
@@ -859,9 +1096,9 @@ def main() -> int:
             ],
             dtype=np.float64,
         ),
-        blue_expected_samples=np.array(
+        blue_sampling_share=np.array(
             [
-                row["Expected Samples in ROI"]
+                row["Sampling Share (%)"]
                 for row in region_rows["Blue ROI"]
             ],
             dtype=np.float64,
@@ -888,9 +1125,17 @@ def main() -> int:
                 "change are annotated"
             ),
             "combined_chart_encoding": (
-                "bubble diameter = D_base * (mu / mu_base), normalized "
-                "independently within each ROI"
+                "bubble diameter is proportional to ROI sampling share "
+                "(100 * ROI probability mass / full-frame probability mass)"
             ),
+            "combined_chart_quantity": {
+                "name": "ROI Sampling Share",
+                "unit": "%",
+                "definition": (
+                    "100 * sum of final sampling probabilities inside ROI "
+                    "/ sum over the full frame"
+                ),
+            },
         },
         "selection_rules": {
             "minimum_psnr_gain": args.minimum_psnr_gain,
@@ -906,6 +1151,15 @@ def main() -> int:
         },
         "red_roi": _json_ready(red),
         "blue_roi": _json_ready(blue),
+        "full_frame_probability_change": {
+            "normalized_sum": float(frame_probability_change.sum()),
+            "positive_mass": float(
+                np.clip(frame_probability_change, 0.0, None).sum()
+            ),
+            "negative_mass": float(
+                np.clip(-frame_probability_change, 0.0, None).sum()
+            ),
+        },
         "reported_rows": rows,
     }
     (args.output_dir / "selection_audit.json").write_text(
