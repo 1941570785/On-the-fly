@@ -94,6 +94,14 @@ def _parser() -> argparse.ArgumentParser:
     evaluation.add_argument("--display_runtimes", action="store_true")
     evaluation.add_argument("-m", "--model_path", default="")
     evaluation.add_argument("--save_every", type=int, default=-1)
+    evaluation.add_argument(
+        "--trace-sampling-frame",
+        default="",
+        help=(
+            "Optional B-module evidence trace: a frame name, 'applied', "
+            "or 'all'. Empty keeps tracing disabled."
+        ),
+    )
 
     viewer = parser.add_argument_group("viewer")
     viewer.add_argument(

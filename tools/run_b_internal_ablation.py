@@ -77,6 +77,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpus", nargs="+", default=["0"])
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--modes",
+        nargs="+",
+        choices=B_SIGNAL_MODES,
+        default=list(B_SIGNAL_MODES),
+    )
+    parser.add_argument("--trace-sampling-frame", default="")
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
@@ -88,6 +95,18 @@ def validate_gpus(gpus: Iterable[str]) -> tuple[str, ...]:
         raise ValueError("B ablation requires between one and three GPUs")
     if len(set(values)) != len(values):
         raise ValueError("GPU identifiers must be unique")
+    return values
+
+
+def validate_modes(modes: Iterable[str]) -> tuple[str, ...]:
+    values = tuple(str(mode) for mode in modes)
+    if not values:
+        raise ValueError("at least one B signal mode is required")
+    if len(set(values)) != len(values):
+        raise ValueError("B signal modes must be unique")
+    unsupported = set(values) - set(B_SIGNAL_MODES)
+    if unsupported:
+        raise ValueError(f"unsupported B signal modes: {sorted(unsupported)}")
     return values
 
 
@@ -108,15 +127,21 @@ def scene_output_path(
     )
 
 
-def build_jobs(*, repeat: int, base_seed: int) -> list[Job]:
+def build_jobs(
+    *,
+    repeat: int,
+    base_seed: int,
+    modes: Iterable[str] = B_SIGNAL_MODES,
+) -> list[Job]:
     if repeat < 1:
         raise ValueError("--repeat must be positive")
+    selected_modes = validate_modes(modes)
     jobs = []
     for repeat_index in range(repeat):
         seed = base_seed + repeat_index
         ordered_modes = (
-            B_SIGNAL_MODES[repeat_index % len(B_SIGNAL_MODES) :]
-            + B_SIGNAL_MODES[: repeat_index % len(B_SIGNAL_MODES)]
+            selected_modes[repeat_index % len(selected_modes) :]
+            + selected_modes[: repeat_index % len(selected_modes)]
         )
         jobs.extend(
             Job(mode, repeat_index + 1, seed) for mode in ordered_modes
@@ -132,6 +157,7 @@ def build_train_command(
     signal_mode: str,
     seed: int,
     deterministic: bool,
+    trace_sampling_frame: str = "",
 ) -> list[str]:
     if signal_mode not in B_SIGNAL_MODES:
         raise ValueError(f"unsupported B signal mode: {signal_mode}")
@@ -157,6 +183,10 @@ def build_train_command(
         "--experiment-seed",
         str(seed),
     ]
+    if trace_sampling_frame:
+        command.extend(
+            ["--trace-sampling-frame", str(trace_sampling_frame)]
+        )
     if deterministic:
         command.append("--deterministic")
     return command
@@ -290,7 +320,12 @@ def aggregate_rows(
 def main() -> int:
     args = parse_args()
     gpus = validate_gpus(args.gpus)
-    jobs_to_run = build_jobs(repeat=args.repeat, base_seed=args.seed)
+    selected_modes = validate_modes(args.modes)
+    jobs_to_run = build_jobs(
+        repeat=args.repeat,
+        base_seed=args.seed,
+        modes=selected_modes,
+    )
     scene = SCENES[args.scene]
     source_path = args.data_root / scene.relative_path
     if not (source_path / "images").is_dir():
@@ -302,7 +337,7 @@ def main() -> int:
             {"c"},
             sampling_mode=mode,
         )
-        for mode in B_SIGNAL_MODES
+        for mode in selected_modes
     }
     args.output_root.mkdir(parents=True, exist_ok=True)
     manifest = {
@@ -314,11 +349,13 @@ def main() -> int:
         },
         "B_signal_modes": {
             mode: asdict(configs[mode].sampling)
-            for mode in B_SIGNAL_MODES
+            for mode in selected_modes
         },
         "config_fingerprints": {
-            mode: configs[mode].fingerprint for mode in B_SIGNAL_MODES
+            mode: configs[mode].fingerprint for mode in selected_modes
         },
+        "selected_modes": list(selected_modes),
+        "trace_sampling_frame": args.trace_sampling_frame,
         "scene": asdict(scene),
         "repeat": args.repeat,
         "base_seed": args.seed,
@@ -367,6 +404,7 @@ def main() -> int:
                         signal_mode=job.signal_mode,
                         seed=job.seed,
                         deterministic=args.deterministic,
+                        trace_sampling_frame=args.trace_sampling_frame,
                     )
                     environment = os.environ.copy()
                     environment["CUDA_VISIBLE_DEVICES"] = gpu

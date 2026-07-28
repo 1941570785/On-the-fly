@@ -9,6 +9,7 @@ from tools.run_b_internal_ablation import (
     build_train_command,
     scene_output_path,
     validate_gpus,
+    validate_modes,
 )
 
 
@@ -27,6 +28,24 @@ class BInternalRunnerTests(unittest.TestCase):
             self.assertEqual(len(selected), 5)
             self.assertEqual({job.seed for job in selected}, {16 + repeat})
 
+    def test_runner_can_restrict_jobs_to_base_and_complete_b(self):
+        modes = validate_modes(["base", "r_e_d"])
+        jobs = build_jobs(repeat=3, base_seed=17, modes=modes)
+        self.assertEqual(len(jobs), 6)
+        self.assertEqual(
+            {(job.signal_mode, job.repeat) for job in jobs},
+            {
+                ("base", 1),
+                ("base", 2),
+                ("base", 3),
+                ("r_e_d", 1),
+                ("r_e_d", 2),
+                ("r_e_d", 3),
+            },
+        )
+        with self.assertRaises(ValueError):
+            validate_modes(["base", "base"])
+
     def test_command_freezes_a_and_disables_c(self):
         command = build_train_command(
             scene=XYZ_SCENE,
@@ -35,6 +54,7 @@ class BInternalRunnerTests(unittest.TestCase):
             signal_mode="r_e",
             seed=4,
             deterministic=True,
+            trace_sampling_frame="000123.png",
         )
         self.assertIn("--method", command)
         self.assertIn("asr-gs", command)
@@ -44,6 +64,8 @@ class BInternalRunnerTests(unittest.TestCase):
         self.assertNotIn("--ablate-a", command)
         self.assertNotIn("--ablate-b", command)
         self.assertIn("--deterministic", command)
+        self.assertIn("--trace-sampling-frame", command)
+        self.assertIn("000123.png", command)
 
     def test_runner_allows_at_most_three_unique_gpus(self):
         self.assertEqual(validate_gpus(["0", "1", "2"]), ("0", "1", "2"))

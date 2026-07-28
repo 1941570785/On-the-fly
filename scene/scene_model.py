@@ -19,6 +19,7 @@ import math
 import threading
 import time
 import warnings
+from pathlib import Path
 import cv2
 import torch
 import torch.nn.functional as F
@@ -61,6 +62,10 @@ from asr_gs.response_sampling import (
     response_guided_sampling_probability,
     sampling_response_verdict,
     sampling_scene_guard,
+)
+from asr_gs.sampling_trace import (
+    effective_bernoulli_probability,
+    write_sampling_trace,
 )
 from asr_gs.transaction import (
     overwrite_selected_gaussian_value_snapshot,
@@ -126,6 +131,12 @@ class SceneModel:
         )
         self.sampling_config = self.asr_gs_config.sampling
         self.refinement_config = self.asr_gs_config.refinement
+        self.trace_sampling_frame = str(
+            getattr(args, "trace_sampling_frame", "") or ""
+        ).strip()
+        self.sampling_trace_root = (
+            Path(args.model_path) / "sampling_trace"
+        )
         self.response_sampling_stats = {
             "events": 0,
             "applied": 0,
@@ -1570,6 +1581,15 @@ class SceneModel:
         init_proba *= self.init_proba_scaler
         penalty *= self.init_proba_scaler
         sample_probability = (init_proba - penalty).clamp_min(0.0)
+        sampling_debug = {
+            "applied": False,
+            "reason": "response_unavailable",
+        }
+        base_sample_probability = (
+            sample_probability.detach().clone()
+            if self.trace_sampling_frame
+            else None
+        )
         if residual_edge_response is not None:
             sample_probability, sampling_debug = (
                 response_guided_sampling_probability(
@@ -1608,6 +1628,20 @@ class SceneModel:
                 sampling_debug.get("coverage_deficit", 0.0)
             )
         sample_mask = torch.rand_like(init_proba) < sample_probability
+        if base_sample_probability is not None:
+            write_sampling_trace(
+                output_root=self.sampling_trace_root,
+                target=self.trace_sampling_frame,
+                frame_name=str(keyframe.info["name"]),
+                base_probability=effective_bernoulli_probability(
+                    base_sample_probability
+                ),
+                final_probability=effective_bernoulli_probability(
+                    sample_probability
+                ),
+                sample_mask=sample_mask,
+                debug=sampling_debug,
+            )
 
         # ========== 深度估计 ==========
         sampled_uv = self.uv[sample_mask]  # 采样像素坐标
