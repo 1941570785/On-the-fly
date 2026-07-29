@@ -404,6 +404,7 @@ def save_combined_roi_efficiency_chart(
             "share": np.asarray(red_sampling_share, dtype=np.float64),
             "colors": ("#E9A09A", "#C83E3E"),
             "arrow": "#B52D2D",
+            "arrow_curvature": -0.95,
             "label_offsets": ((-20, -20), (-10, 20)),
             "base_value_offset": (18, -7),
             "base_value_alignment": "left",
@@ -418,6 +419,7 @@ def save_combined_roi_efficiency_chart(
             "share": np.asarray(blue_sampling_share, dtype=np.float64),
             "colors": ("#9FC7E3", "#2678B8"),
             "arrow": "#1F6FA9",
+            "arrow_curvature": 0.03,
             "label_offsets": ((12, -22), (-12, 20)),
             "base_value_offset": (-20, 0),
             "base_value_alignment": "right",
@@ -496,8 +498,10 @@ def save_combined_roi_efficiency_chart(
                 "linewidth": 3.2,
                 "shrinkA": base_radius + 2.0,
                 "shrinkB": ours_radius + 2.0,
-                "mutation_scale": 18,
-                "connectionstyle": "arc3,rad=0.03",
+                "mutation_scale": 20,
+                "connectionstyle": (
+                    f"arc3,rad={metrics['arrow_curvature']}"
+                ),
             },
             zorder=2,
         )
