@@ -26,7 +26,7 @@ BLUE_COLOR = "#1F77B4"
 OURS_SAMPLING_COLOR = "#66A866"
 BUBBLE_BASE_AREA = 1700.0
 BUBBLE_CONTRAST_EXPONENT = 4.0
-SAMPLING_SHARE_BUBBLE_MAX_AREA = 480.0
+SAMPLING_SHARE_BUBBLE_MAX_AREA = 760.0
 SAMPLING_SHARE_BUBBLE_CONTRAST_EXPONENT = 2.5
 
 
@@ -1316,7 +1316,7 @@ def main() -> int:
             ),
             "combined_chart_encoding": (
                 "bubble area uses one global monotonic power mapping of "
-                "ROI sampling share (exponent 2.5; maximum area 480 pt^2)"
+                "ROI sampling share (exponent 2.5; maximum area 760 pt^2)"
             ),
             "combined_chart_quantity": {
                 "name": "ROI Sampling Share",
