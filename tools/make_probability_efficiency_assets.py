@@ -1168,6 +1168,31 @@ def _json_ready(value: object) -> object:
     return value
 
 
+def box_image_with_rois(
+    image: Image.Image,
+    *,
+    red_box: tuple[int, int, int, int],
+    blue_box: tuple[int, int, int, int],
+    width: int = 8,
+) -> Image.Image:
+    if width <= 0:
+        raise ValueError("ROI box width must be positive")
+    boxed = image.copy()
+    drawing = ImageDraw.Draw(boxed)
+    for box, color in ((red_box, RED_COLOR), (blue_box, BLUE_COLOR)):
+        x0, y0, x1, y1 = box
+        if x0 < 0 or y0 < 0 or x1 > image.width or y1 > image.height:
+            raise ValueError("ROI box must stay inside the image")
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError("ROI box must have positive area")
+        drawing.rectangle(
+            (x0, y0, x1 - 1, y1 - 1),
+            outline=color,
+            width=width,
+        )
+    return boxed
+
+
 def main() -> int:
     args = parse_args()
     with np.load(args.input) as archive:
@@ -1195,16 +1220,24 @@ def main() -> int:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     image = Image.fromarray(arrays["ground_truth"].astype(np.uint8), mode="RGB")
-    boxed = image.copy()
-    drawing = ImageDraw.Draw(boxed)
-    for record, color in ((red, RED_COLOR), (blue, BLUE_COLOR)):
-        x0, y0, x1, y1 = record["box"]
-        drawing.rectangle(
-            (x0, y0, x1 - 1, y1 - 1),
-            outline=color,
-            width=8,
-        )
+    boxed = box_image_with_rois(
+        image,
+        red_box=red["box"],
+        blue_box=blue["box"],
+    )
     boxed.save(args.output_dir / "xyz_002882_gt_red_blue_boxes.png")
+    selected_render = Image.fromarray(
+        arrays["base_repeat_1_render"].astype(np.uint8),
+        mode="RGB",
+    )
+    boxed_render = box_image_with_rois(
+        selected_render,
+        red_box=red["box"],
+        blue_box=blue["box"],
+    )
+    boxed_render.save(
+        args.output_dir / "xyz_002882_render_red_blue_boxes.png"
+    )
     image.crop(red["box"]).save(args.output_dir / "red_roi_gt.png")
     image.crop(blue["box"]).save(args.output_dir / "blue_roi_gt.png")
     base_probability = mean_normalized_probability(

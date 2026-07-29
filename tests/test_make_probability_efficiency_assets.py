@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+import tools.make_probability_efficiency_assets as probability_assets
 from tools.make_probability_efficiency_assets import (
     OURS_SAMPLING_COLOR,
     choose_redistribution_rois,
@@ -22,6 +23,27 @@ from tools.make_probability_efficiency_assets import (
 
 
 class ProbabilityEfficiencyAssetTests(unittest.TestCase):
+    def test_box_image_with_rois_preserves_the_selected_render(self):
+        self.assertTrue(
+            hasattr(probability_assets, "box_image_with_rois")
+        )
+        if not hasattr(probability_assets, "box_image_with_rois"):
+            return
+        source = Image.fromarray(
+            np.full((24, 32, 3), 17, dtype=np.uint8),
+            mode="RGB",
+        )
+        boxed = probability_assets.box_image_with_rois(
+            source,
+            red_box=(2, 2, 14, 14),
+            blue_box=(16, 4, 28, 16),
+            width=4,
+        )
+        self.assertEqual(source.getpixel((2, 2)), (17, 17, 17))
+        self.assertEqual(boxed.getpixel((2, 2)), (214, 39, 40))
+        self.assertEqual(boxed.getpixel((16, 4)), (31, 119, 180))
+        self.assertEqual(boxed.getpixel((8, 8)), (17, 17, 17))
+
     def test_ours_sampling_color_uses_light_green(self):
         self.assertEqual(OURS_SAMPLING_COLOR, "#66A866")
 
