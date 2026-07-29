@@ -344,6 +344,11 @@ class ProbabilityEfficiencyAssetTests(unittest.TestCase):
             600.0 * np.power(shares / shares.max(), 2.5),
         )
 
+    def test_red_and_orange_arrows_use_detoured_routes(self):
+        curvatures = probability_assets.ROI_ARROW_CURVATURES
+        self.assertLessEqual(curvatures["red"], -1.2)
+        self.assertLessEqual(curvatures["orange"], -1.4)
+
     def test_combined_chart_exports_both_regions(self):
         with tempfile.TemporaryDirectory() as directory:
             stem = Path(directory) / "combined"

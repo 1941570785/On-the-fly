@@ -30,6 +30,12 @@ BUBBLE_BASE_AREA = 1700.0
 BUBBLE_CONTRAST_EXPONENT = 4.0
 SAMPLING_SHARE_BUBBLE_MAX_AREA = 760.0
 SAMPLING_SHARE_BUBBLE_CONTRAST_EXPONENT = 2.5
+ROI_ARROW_CURVATURES = {
+    "red": -2.00,
+    "blue": 0.04,
+    "orange": -2.45,
+    "purple": 0.42,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -556,7 +562,7 @@ def save_combined_roi_efficiency_chart(
             "share": np.asarray(red_sampling_share, dtype=np.float64),
             "colors": ("#E9A09A", "#C83E3E"),
             "arrow": "#B52D2D",
-            "arrow_curvature": -0.50,
+            "arrow_curvature": ROI_ARROW_CURVATURES["red"],
             "label_offsets": ((-8, -14), (-2, 15)),
             "base_value_offset": (13, -2),
             "base_value_alignment": "left",
@@ -572,7 +578,7 @@ def save_combined_roi_efficiency_chart(
             "share": np.asarray(blue_sampling_share, dtype=np.float64),
             "colors": ("#9FC7E3", "#2678B8"),
             "arrow": "#1F6FA9",
-            "arrow_curvature": 0.04,
+            "arrow_curvature": ROI_ARROW_CURVATURES["blue"],
             "label_offsets": ((0, -14), (0, 15)),
             "base_value_offset": (-13, -1),
             "base_value_alignment": "right",
@@ -590,7 +596,7 @@ def save_combined_roi_efficiency_chart(
             {
                 "colors": ("#F4C979", ORANGE_COLOR),
                 "arrow": "#B97700",
-                "arrow_curvature": -0.62,
+                "arrow_curvature": ROI_ARROW_CURVATURES["orange"],
                 "label_offsets": ((-5, -14), (0, 15)),
                 "base_value_offset": (13, -2),
                 "base_value_alignment": "left",
@@ -607,7 +613,7 @@ def save_combined_roi_efficiency_chart(
             {
                 "colors": ("#C9B5DC", PURPLE_COLOR),
                 "arrow": "#76509A",
-                "arrow_curvature": 0.42,
+                "arrow_curvature": ROI_ARROW_CURVATURES["purple"],
                 "label_offsets": ((0, -14), (0, 15)),
                 "base_value_offset": (13, -2),
                 "base_value_alignment": "left",
