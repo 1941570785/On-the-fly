@@ -556,11 +556,12 @@ def save_combined_roi_efficiency_chart(
             "share": np.asarray(red_sampling_share, dtype=np.float64),
             "colors": ("#E9A09A", "#C83E3E"),
             "arrow": "#B52D2D",
-            "arrow_curvature": -0.95,
-            "label_offsets": ((-20, -20), (-10, 20)),
-            "base_value_offset": (18, -7),
+            "arrow_curvature": -0.50,
+            "label_offsets": ((-8, -14), (-2, 15)),
+            "base_value_offset": (13, -2),
             "base_value_alignment": "left",
-            "value_offset": (20, 2),
+            "value_offset": (14, 1),
+            "value_alignment": "left",
         },
         {
             "counts": np.asarray(
@@ -571,11 +572,12 @@ def save_combined_roi_efficiency_chart(
             "share": np.asarray(blue_sampling_share, dtype=np.float64),
             "colors": ("#9FC7E3", "#2678B8"),
             "arrow": "#1F6FA9",
-            "arrow_curvature": 0.03,
-            "label_offsets": ((12, -22), (-12, 20)),
-            "base_value_offset": (-20, 0),
+            "arrow_curvature": 0.04,
+            "label_offsets": ((0, -14), (0, 15)),
+            "base_value_offset": (-13, -1),
             "base_value_alignment": "right",
-            "value_offset": (20, 0),
+            "value_offset": (-13, 1),
+            "value_alignment": "right",
         },
     ]
     optional_regions = (
@@ -588,11 +590,12 @@ def save_combined_roi_efficiency_chart(
             {
                 "colors": ("#F4C979", ORANGE_COLOR),
                 "arrow": "#B97700",
-                "arrow_curvature": -0.28,
-                "label_offsets": ((-15, -20), (-13, 21)),
-                "base_value_offset": (20, -3),
+                "arrow_curvature": -0.62,
+                "label_offsets": ((-5, -14), (0, 15)),
+                "base_value_offset": (13, -2),
                 "base_value_alignment": "left",
-                "value_offset": (20, 2),
+                "value_offset": (14, 1),
+                "value_alignment": "left",
             },
         ),
         (
@@ -604,11 +607,12 @@ def save_combined_roi_efficiency_chart(
             {
                 "colors": ("#C9B5DC", PURPLE_COLOR),
                 "arrow": "#76509A",
-                "arrow_curvature": 0.18,
-                "label_offsets": ((15, -20), (-12, 20)),
-                "base_value_offset": (20, -3),
+                "arrow_curvature": 0.42,
+                "label_offsets": ((0, -14), (0, 15)),
+                "base_value_offset": (13, -2),
                 "base_value_alignment": "left",
-                "value_offset": (20, 2),
+                "value_offset": (14, 1),
+                "value_alignment": "left",
             },
         ),
     )
@@ -665,10 +669,6 @@ def save_combined_roi_efficiency_chart(
             relative_sampling_share_bubble_areas(metrics["share"])
             for metrics in regions
         ]
-        area_label = (
-            "Bubble area indicates relative ROI sampling share "
-            "(Base = 1)"
-        )
     else:
         all_shares = np.concatenate(
             [metrics["share"] for metrics in regions]
@@ -682,18 +682,19 @@ def save_combined_roi_efficiency_chart(
             all_areas[index : index + 2]
             for index in range(0, all_areas.size, 2)
         ]
-        area_label = "Bubble area indicates ROI sampling share (%)"
+    area_label = "Bubble area = ROI sampling share (%)"
     x_limits = (
-        float(np.min(all_counts)) - 18.0,
-        float(np.max(all_counts)) + 38.0,
+        float(np.min(all_counts)) - 24.0,
+        float(np.max(all_counts)) + 32.0,
     )
     y_limits = (
-        float(np.min(all_quality)) - 0.95,
-        float(np.max(all_quality)) + 0.95,
+        float(np.min(all_quality)) - 1.10,
+        float(np.max(all_quality)) + 1.15,
     )
     axis.set_xlim(x_limits)
     axis.set_ylim(y_limits)
 
+    metric_annotations = []
     for metrics, areas in zip(regions, region_areas):
         counts = metrics["counts"]
         quality = metrics["quality"]
@@ -707,10 +708,10 @@ def save_combined_roi_efficiency_chart(
             arrowprops={
                 "arrowstyle": "-|>",
                 "color": arrow_color,
-                "linewidth": 3.2,
-                "shrinkA": base_radius + 2.0,
-                "shrinkB": ours_radius + 2.0,
-                "mutation_scale": 20,
+                "linewidth": 3.4,
+                "shrinkA": max(base_radius * 0.72, 2.0),
+                "shrinkB": max(ours_radius * 0.72, 2.0),
+                "mutation_scale": 22,
                 "connectionstyle": (
                     f"arc3,rad={metrics['arrow_curvature']}"
                 ),
@@ -721,7 +722,7 @@ def save_combined_roi_efficiency_chart(
             arrow.arrow_patch.set_path_effects(
                 [
                     path_effects.Stroke(
-                        linewidth=5.2,
+                        linewidth=5.4,
                         foreground="white",
                     ),
                     path_effects.Normal(),
@@ -739,7 +740,7 @@ def save_combined_roi_efficiency_chart(
                 alpha=0.93,
                 zorder=3,
             )
-            axis.annotate(
+            metric_annotations.append(axis.annotate(
                 method,
                 (counts[index], quality[index]),
                 xytext=metrics["label_offsets"][index],
@@ -750,10 +751,12 @@ def save_combined_roi_efficiency_chart(
                 fontfamily="Times New Roman",
                 fontweight="bold",
                 color=arrow_color if index else "#202020",
+                annotation_clip=True,
+                clip_on=True,
                 zorder=4,
-            )
+            ))
 
-        axis.annotate(
+        metric_annotations.append(axis.annotate(
             f"{counts[0]:.0f}, {quality[0]:.2f} dB",
             (counts[0], quality[0]),
             xytext=metrics["base_value_offset"],
@@ -764,21 +767,25 @@ def save_combined_roi_efficiency_chart(
             fontfamily="Times New Roman",
             fontweight="bold",
             color="#303030",
+            annotation_clip=True,
+            clip_on=True,
             zorder=4,
-        )
-        axis.annotate(
+        ))
+        metric_annotations.append(axis.annotate(
             f"{counts[1]:.0f}, {quality[1]:.2f} dB",
             (counts[1], quality[1]),
             xytext=metrics["value_offset"],
             textcoords="offset points",
-            ha="left",
+            ha=metrics["value_alignment"],
             va="center",
             fontsize=14,
             fontfamily="Times New Roman",
             fontweight="bold",
             color=arrow_color,
+            annotation_clip=True,
+            clip_on=True,
             zorder=4,
-        )
+        ))
 
     axis.set_xlabel("Gaussian Numbers")
     axis.set_ylabel("Local PSNR (dB)")
@@ -789,14 +796,14 @@ def save_combined_roi_efficiency_chart(
         fontweight="bold",
         pad=14,
     )
-    axis.text(
+    area_note = axis.text(
         0.985,
-        0.965,
+        0.970,
         area_label,
         transform=axis.transAxes,
         ha="right",
         va="top",
-        fontsize=11,
+        fontsize=14,
         fontfamily="Times New Roman",
         fontweight="bold",
         color="#303030",
@@ -825,6 +832,18 @@ def save_combined_roi_efficiency_chart(
         spine.set_linewidth(1.1)
         spine.set_color("#333333")
     figure.tight_layout(pad=1.0)
+    figure.canvas.draw()
+    renderer = figure.canvas.get_renderer()
+    axis_bounds = axis.get_window_extent(renderer=renderer)
+    for annotation in metric_annotations + [area_note]:
+        bounds = annotation.get_window_extent(renderer=renderer)
+        if (
+            bounds.x0 < axis_bounds.x0 - 1.0
+            or bounds.y0 < axis_bounds.y0 - 1.0
+            or bounds.x1 > axis_bounds.x1 + 1.0
+            or bounds.y1 > axis_bounds.y1 + 1.0
+        ):
+            raise RuntimeError("chart annotation exceeds the coordinate box")
     output_stem.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(
         output_stem.with_suffix(".png"),

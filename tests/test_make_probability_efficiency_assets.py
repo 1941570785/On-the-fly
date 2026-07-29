@@ -365,9 +365,10 @@ class ProbabilityEfficiencyAssetTests(unittest.TestCase):
                 svg,
             )
             self.assertIn(
-                "Bubble area indicates ROI sampling share (%)",
+                "Bubble area = ROI sampling share (%)",
                 svg,
             )
+            self.assertNotIn("Bubble area indicates", svg)
             self.assertNotIn("Red ROI", svg)
             self.assertNotIn("Blue ROI", svg)
             self.assertIn("409, 22.99 dB", svg)
