@@ -1202,7 +1202,7 @@ def main() -> int:
         drawing.rectangle(
             (x0, y0, x1 - 1, y1 - 1),
             outline=color,
-            width=5,
+            width=8,
         )
     boxed.save(args.output_dir / "xyz_002882_gt_red_blue_boxes.png")
     image.crop(red["box"]).save(args.output_dir / "red_roi_gt.png")
