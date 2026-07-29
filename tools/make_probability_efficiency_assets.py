@@ -23,6 +23,8 @@ METHOD_LABELS = ("Base", "Ours")
 METHOD_COLORS = ("#777777", "#C83E3E")
 RED_COLOR = "#D62728"
 BLUE_COLOR = "#1F77B4"
+ORANGE_COLOR = "#E69F00"
+PURPLE_COLOR = "#9467BD"
 OURS_SAMPLING_COLOR = "#66A866"
 BUBBLE_BASE_AREA = 1700.0
 BUBBLE_CONTRAST_EXPONENT = 4.0
@@ -198,6 +200,131 @@ def choose_redistribution_rois(
     raise RuntimeError("no separated lower-budget ROI satisfies the rules")
 
 
+def _boxes_overlap(
+    first: tuple[int, int, int, int],
+    second: tuple[int, int, int, int],
+) -> bool:
+    return (
+        max(first[0], second[0]) < min(first[2], second[2])
+        and max(first[1], second[1]) < min(first[3], second[3])
+    )
+
+
+def choose_additional_redistribution_rois(
+    candidates: Iterable[dict[str, object]],
+    *,
+    protected_boxes: Iterable[tuple[int, int, int, int]],
+    minimum_center_distance: float,
+    minimum_psnr_gain: float,
+    minimum_negative_psnr_gain: float,
+    minimum_positive_repeats: int,
+    minimum_mu_change: float,
+    minimum_sampling_share: float,
+    maximum_sampling_share: float,
+    maximum_positive_gaussian_change: float,
+    minimum_gaussian_reduction: float,
+    minimum_lower_gaussian_repeats: int,
+) -> tuple[dict[str, object], dict[str, object]]:
+    records = list(candidates)
+    protected = tuple(protected_boxes)
+
+    def separated(
+        record: dict[str, object],
+        boxes: Iterable[tuple[int, int, int, int]],
+    ) -> bool:
+        return all(
+            not _boxes_overlap(record["box"], box)
+            and _center_distance(record["box"], box)
+            >= minimum_center_distance
+            for box in boxes
+        )
+
+    def mean_value(
+        record: dict[str, object],
+        field: str,
+        method: str,
+    ) -> float:
+        return float(np.mean(record[field][method]))
+
+    def shares_are_local(record: dict[str, object]) -> bool:
+        shares = (
+            mean_value(record, "sampling_share", "base"),
+            mean_value(record, "sampling_share", "r_e_d"),
+        )
+        return (
+            min(shares) >= minimum_sampling_share
+            and max(shares) <= maximum_sampling_share
+        )
+
+    positive_candidates = []
+    for record in records:
+        gaussian_change = (
+            mean_value(record, "gaussian_numbers", "r_e_d")
+            - mean_value(record, "gaussian_numbers", "base")
+        )
+        if (
+            float(record["psnr_gain"]) >= minimum_psnr_gain
+            and int(record["positive_psnr_repeats"])
+            >= minimum_positive_repeats
+            and float(record["mu_delta"]) >= minimum_mu_change
+            and abs(gaussian_change)
+            <= maximum_positive_gaussian_change
+            and shares_are_local(record)
+            and separated(record, protected)
+        ):
+            positive_candidates.append(record)
+    positive_candidates.sort(
+        key=lambda record: (
+            -(
+                float(record["psnr_gain"])
+                * float(record["mu_relative_change"])
+                * math.sqrt(
+                    max(float(record["redistribution_l1"]), 1e-9)
+                )
+            ),
+            record["box"][1],
+            record["box"][0],
+        )
+    )
+    if not positive_candidates:
+        raise RuntimeError("no additional positive-mass ROI satisfies the rules")
+    orange = positive_candidates[0]
+
+    protected_with_orange = protected + (orange["box"],)
+    negative_candidates = [
+        record
+        for record in records
+        if float(record["psnr_gain"])
+        >= max(minimum_psnr_gain, minimum_negative_psnr_gain)
+        and int(record["positive_psnr_repeats"])
+        >= minimum_positive_repeats
+        and float(record["mu_delta"]) <= -minimum_mu_change
+        and float(record["gaussian_reduction"])
+        >= minimum_gaussian_reduction
+        and int(record["lower_gaussian_repeats"])
+        >= minimum_lower_gaussian_repeats
+        and shares_are_local(record)
+        and separated(record, protected_with_orange)
+    ]
+    negative_candidates.sort(
+        key=lambda record: (
+            -(
+                -float(record["mu_relative_change"])
+                * float(record["psnr_gain"])
+                * math.sqrt(float(record["gaussian_reduction"]))
+                * math.sqrt(
+                    max(float(record["redistribution_l1"]), 1e-9)
+                )
+            ),
+            record["box"][1],
+            record["box"][0],
+        )
+    )
+    if not negative_candidates:
+        raise RuntimeError("no additional negative-mass ROI satisfies the rules")
+    return orange, negative_candidates[0]
+
+
 def _axis_limits(
     values: np.ndarray,
     *,
@@ -249,6 +376,24 @@ def sampling_share_bubble_areas(
         raise ValueError("bubble contrast exponent must be positive")
     normalized = shares / float(np.max(shares))
     return maximum_area * np.power(normalized, contrast_exponent)
+
+
+def relative_sampling_share_bubble_areas(
+    sampling_share: np.ndarray,
+    *,
+    base_area: float = 360.0,
+    contrast_exponent: float = 2.5,
+) -> np.ndarray:
+    shares = np.asarray(sampling_share, dtype=np.float64)
+    if shares.shape != (2,) or np.any(shares <= 0):
+        raise ValueError("sampling shares must contain Base and Ours positives")
+    if not np.all(np.isfinite(shares)):
+        raise ValueError("sampling shares must be finite")
+    if not math.isfinite(base_area) or base_area <= 0:
+        raise ValueError("base bubble area must be positive")
+    if not math.isfinite(contrast_exponent) or contrast_exponent <= 0:
+        raise ValueError("bubble contrast exponent must be positive")
+    return base_area * np.power(shares / shares[0], contrast_exponent)
 
 
 def save_efficiency_bubble_chart(
@@ -393,8 +538,15 @@ def save_combined_roi_efficiency_chart(
     blue_local_psnr: np.ndarray,
     blue_sampling_share: np.ndarray,
     output_stem: Path,
+    orange_gaussian_numbers: np.ndarray | None = None,
+    orange_local_psnr: np.ndarray | None = None,
+    orange_sampling_share: np.ndarray | None = None,
+    purple_gaussian_numbers: np.ndarray | None = None,
+    purple_local_psnr: np.ndarray | None = None,
+    purple_sampling_share: np.ndarray | None = None,
+    relative_share_area: bool = False,
 ) -> None:
-    regions = (
+    regions = [
         {
             "counts": np.asarray(
                 red_gaussian_numbers,
@@ -425,7 +577,56 @@ def save_combined_roi_efficiency_chart(
             "base_value_alignment": "right",
             "value_offset": (20, 0),
         },
+    ]
+    optional_regions = (
+        (
+            (
+                orange_gaussian_numbers,
+                orange_local_psnr,
+                orange_sampling_share,
+            ),
+            {
+                "colors": ("#F4C979", ORANGE_COLOR),
+                "arrow": "#B97700",
+                "arrow_curvature": -0.28,
+                "label_offsets": ((-15, -20), (-13, 21)),
+                "base_value_offset": (20, -3),
+                "base_value_alignment": "left",
+                "value_offset": (20, 2),
+            },
+        ),
+        (
+            (
+                purple_gaussian_numbers,
+                purple_local_psnr,
+                purple_sampling_share,
+            ),
+            {
+                "colors": ("#C9B5DC", PURPLE_COLOR),
+                "arrow": "#76509A",
+                "arrow_curvature": 0.18,
+                "label_offsets": ((15, -20), (-12, 20)),
+                "base_value_offset": (20, -3),
+                "base_value_alignment": "left",
+                "value_offset": (20, 2),
+            },
+        ),
     )
+    for values, style in optional_regions:
+        if all(value is None for value in values):
+            continue
+        if any(value is None for value in values):
+            raise ValueError(
+                "each optional region requires counts, PSNR, and share"
+            )
+        regions.append(
+            {
+                "counts": np.asarray(values[0], dtype=np.float64),
+                "quality": np.asarray(values[1], dtype=np.float64),
+                "share": np.asarray(values[2], dtype=np.float64),
+                **style,
+            }
+        )
     for metrics in regions:
         counts = metrics["counts"]
         quality = metrics["quality"]
@@ -459,15 +660,29 @@ def save_combined_roi_efficiency_chart(
     all_quality = np.concatenate(
         [metrics["quality"] for metrics in regions]
     )
-    all_shares = np.concatenate(
-        [metrics["share"] for metrics in regions]
-    )
-    all_areas = sampling_share_bubble_areas(
-        all_shares,
-        maximum_area=SAMPLING_SHARE_BUBBLE_MAX_AREA,
-        contrast_exponent=SAMPLING_SHARE_BUBBLE_CONTRAST_EXPONENT,
-    )
-    area_offset = 0
+    if relative_share_area:
+        region_areas = [
+            relative_sampling_share_bubble_areas(metrics["share"])
+            for metrics in regions
+        ]
+        area_label = (
+            "Bubble area indicates relative ROI sampling share "
+            "(Base = 1)"
+        )
+    else:
+        all_shares = np.concatenate(
+            [metrics["share"] for metrics in regions]
+        )
+        all_areas = sampling_share_bubble_areas(
+            all_shares,
+            maximum_area=SAMPLING_SHARE_BUBBLE_MAX_AREA,
+            contrast_exponent=SAMPLING_SHARE_BUBBLE_CONTRAST_EXPONENT,
+        )
+        region_areas = [
+            all_areas[index : index + 2]
+            for index in range(0, all_areas.size, 2)
+        ]
+        area_label = "Bubble area indicates ROI sampling share (%)"
     x_limits = (
         float(np.min(all_counts)) - 18.0,
         float(np.max(all_counts)) + 38.0,
@@ -479,12 +694,9 @@ def save_combined_roi_efficiency_chart(
     axis.set_xlim(x_limits)
     axis.set_ylim(y_limits)
 
-    for metrics in regions:
+    for metrics, areas in zip(regions, region_areas):
         counts = metrics["counts"]
         quality = metrics["quality"]
-        share = metrics["share"]
-        areas = all_areas[area_offset : area_offset + share.size]
-        area_offset += share.size
         arrow_color = metrics["arrow"]
         base_radius = math.sqrt(float(areas[0]) / math.pi)
         ours_radius = math.sqrt(float(areas[1]) / math.pi)
@@ -580,7 +792,7 @@ def save_combined_roi_efficiency_chart(
     axis.text(
         0.985,
         0.965,
-        "Bubble area indicates ROI sampling share (%)",
+        area_label,
         transform=axis.transAxes,
         ha="right",
         va="top",
@@ -692,8 +904,15 @@ def _add_probability_roi_boxes(
     *,
     red_box: tuple[int, int, int, int],
     blue_box: tuple[int, int, int, int],
+    orange_box: tuple[int, int, int, int] | None = None,
+    purple_box: tuple[int, int, int, int] | None = None,
 ) -> None:
-    for box, color in ((red_box, RED_COLOR), (blue_box, BLUE_COLOR)):
+    regions = [(red_box, RED_COLOR), (blue_box, BLUE_COLOR)]
+    if orange_box is not None:
+        regions.append((orange_box, ORANGE_COLOR))
+    if purple_box is not None:
+        regions.append((purple_box, PURPLE_COLOR))
+    for box, color in regions:
         x0, y0, x1, y1 = box
         axis.add_patch(
             plt.Rectangle(
@@ -772,6 +991,9 @@ def save_global_probability_redistribution_maps(
     red_box: tuple[int, int, int, int],
     blue_box: tuple[int, int, int, int],
     output_dir: Path,
+    orange_box: tuple[int, int, int, int] | None = None,
+    purple_box: tuple[int, int, int, int] | None = None,
+    output_suffix: str = "",
     display_budget: int = 1000,
     dpi: int = 600,
 ) -> None:
@@ -839,6 +1061,8 @@ def save_global_probability_redistribution_maps(
             axis,
             red_box=red_box,
             blue_box=blue_box,
+            orange_box=orange_box,
+            purple_box=purple_box,
         )
         _style_probability_axis(
             axis,
@@ -874,7 +1098,8 @@ def save_global_probability_redistribution_maps(
     )
     _export_probability_figure(
         figure,
-        output_dir / "full_frame_sampling_probability_comparison",
+        output_dir
+        / f"full_frame_sampling_probability_comparison{output_suffix}",
         dpi=dpi,
     )
 
@@ -910,6 +1135,8 @@ def save_global_probability_redistribution_maps(
             panel_axis,
             red_box=red_box,
             blue_box=blue_box,
+            orange_box=orange_box,
+            purple_box=purple_box,
         )
         _style_probability_axis(
             panel_axis,
@@ -932,7 +1159,7 @@ def save_global_probability_redistribution_maps(
         )
         _export_probability_figure(
             panel_figure,
-            output_dir / name,
+            output_dir / f"{name}{output_suffix}",
             dpi=dpi,
         )
 
@@ -1173,13 +1400,20 @@ def box_image_with_rois(
     *,
     red_box: tuple[int, int, int, int],
     blue_box: tuple[int, int, int, int],
+    orange_box: tuple[int, int, int, int] | None = None,
+    purple_box: tuple[int, int, int, int] | None = None,
     width: int = 8,
 ) -> Image.Image:
     if width <= 0:
         raise ValueError("ROI box width must be positive")
     boxed = image.copy()
     drawing = ImageDraw.Draw(boxed)
-    for box, color in ((red_box, RED_COLOR), (blue_box, BLUE_COLOR)):
+    regions = [(red_box, RED_COLOR), (blue_box, BLUE_COLOR)]
+    if orange_box is not None:
+        regions.append((orange_box, ORANGE_COLOR))
+    if purple_box is not None:
+        regions.append((purple_box, PURPLE_COLOR))
+    for box, color in regions:
         x0, y0, x1, y1 = box
         if x0 < 0 or y0 < 0 or x1 > image.width or y1 > image.height:
             raise ValueError("ROI box must stay inside the image")
@@ -1217,6 +1451,22 @@ def main() -> int:
             args.minimum_lower_gaussian_repeats
         ),
     )
+    orange, purple = choose_additional_redistribution_rois(
+        candidates,
+        protected_boxes=(red["box"], blue["box"]),
+        minimum_center_distance=120.0,
+        minimum_psnr_gain=args.minimum_psnr_gain,
+        minimum_negative_psnr_gain=1.25,
+        minimum_positive_repeats=args.minimum_positive_repeats,
+        minimum_mu_change=args.minimum_mu_change,
+        minimum_sampling_share=2.0,
+        maximum_sampling_share=10.0,
+        maximum_positive_gaussian_change=50.0,
+        minimum_gaussian_reduction=args.minimum_gaussian_reduction,
+        minimum_lower_gaussian_repeats=(
+            args.minimum_lower_gaussian_repeats
+        ),
+    )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     image = Image.fromarray(arrays["ground_truth"].astype(np.uint8), mode="RGB")
@@ -1237,6 +1487,16 @@ def main() -> int:
     )
     boxed_render.save(
         args.output_dir / "xyz_002882_render_red_blue_boxes.png"
+    )
+    boxed_four_rois = box_image_with_rois(
+        selected_render,
+        red_box=red["box"],
+        blue_box=blue["box"],
+        orange_box=orange["box"],
+        purple_box=purple["box"],
+    )
+    boxed_four_rois.save(
+        args.output_dir / "xyz_002882_render_four_roi_boxes.png"
     )
     image.crop(red["box"]).save(args.output_dir / "red_roi_gt.png")
     image.crop(blue["box"]).save(args.output_dir / "blue_roi_gt.png")
@@ -1259,10 +1519,26 @@ def main() -> int:
         blue_box=blue["box"],
         output_dir=args.output_dir,
     )
+    save_global_probability_redistribution_maps(
+        base_probability=base_probability,
+        ours_probability=ours_probability,
+        valid_mask=arrays["valid_mask"].astype(bool),
+        red_box=red["box"],
+        blue_box=blue["box"],
+        orange_box=orange["box"],
+        purple_box=purple["box"],
+        output_dir=args.output_dir,
+        output_suffix="_four_rois",
+    )
 
     rows = []
     region_rows: dict[str, list[dict[str, object]]] = {}
-    for name, record in (("Red ROI", red), ("Blue ROI", blue)):
+    for name, record in (
+        ("Red ROI", red),
+        ("Blue ROI", blue),
+        ("Orange ROI", orange),
+        ("Purple ROI", purple),
+    ):
         selected_rows = _metric_summary(name, record)
         region_rows[name] = selected_rows
         rows.extend(selected_rows)
@@ -1287,52 +1563,74 @@ def main() -> int:
                 / f"{name.lower().replace(' ', '_')}_base_ours_bubble"
             ),
         )
+    def region_values(region_name: str, field: str) -> np.ndarray:
+        return np.array(
+            [row[field] for row in region_rows[region_name]],
+            dtype=np.float64,
+        )
+
+    combined_arguments = {
+        "red_gaussian_numbers": region_values(
+            "Red ROI",
+            "Gaussian Numbers",
+        ),
+        "red_local_psnr": region_values(
+            "Red ROI",
+            "Local PSNR (dB)",
+        ),
+        "red_sampling_share": region_values(
+            "Red ROI",
+            "Sampling Share (%)",
+        ),
+        "blue_gaussian_numbers": region_values(
+            "Blue ROI",
+            "Gaussian Numbers",
+        ),
+        "blue_local_psnr": region_values(
+            "Blue ROI",
+            "Local PSNR (dB)",
+        ),
+        "blue_sampling_share": region_values(
+            "Blue ROI",
+            "Sampling Share (%)",
+        ),
+    }
     save_combined_roi_efficiency_chart(
-        red_gaussian_numbers=np.array(
-            [
-                row["Gaussian Numbers"]
-                for row in region_rows["Red ROI"]
-            ],
-            dtype=np.float64,
-        ),
-        red_local_psnr=np.array(
-            [
-                row["Local PSNR (dB)"]
-                for row in region_rows["Red ROI"]
-            ],
-            dtype=np.float64,
-        ),
-        red_sampling_share=np.array(
-            [
-                row["Sampling Share (%)"]
-                for row in region_rows["Red ROI"]
-            ],
-            dtype=np.float64,
-        ),
-        blue_gaussian_numbers=np.array(
-            [
-                row["Gaussian Numbers"]
-                for row in region_rows["Blue ROI"]
-            ],
-            dtype=np.float64,
-        ),
-        blue_local_psnr=np.array(
-            [
-                row["Local PSNR (dB)"]
-                for row in region_rows["Blue ROI"]
-            ],
-            dtype=np.float64,
-        ),
-        blue_sampling_share=np.array(
-            [
-                row["Sampling Share (%)"]
-                for row in region_rows["Blue ROI"]
-            ],
-            dtype=np.float64,
-        ),
+        **combined_arguments,
         output_stem=(
             args.output_dir / "combined_red_blue_roi_efficiency"
         ),
+    )
+    save_combined_roi_efficiency_chart(
+        **combined_arguments,
+        orange_gaussian_numbers=region_values(
+            "Orange ROI",
+            "Gaussian Numbers",
+        ),
+        orange_local_psnr=region_values(
+            "Orange ROI",
+            "Local PSNR (dB)",
+        ),
+        orange_sampling_share=region_values(
+            "Orange ROI",
+            "Sampling Share (%)",
+        ),
+        purple_gaussian_numbers=region_values(
+            "Purple ROI",
+            "Gaussian Numbers",
+        ),
+        purple_local_psnr=region_values(
+            "Purple ROI",
+            "Local PSNR (dB)",
+        ),
+        purple_sampling_share=region_values(
+            "Purple ROI",
+            "Sampling Share (%)",
+        ),
+        output_stem=(
+            args.output_dir / "combined_four_roi_efficiency"
+        ),
+        relative_share_area=True,
     )
 
     csv_path = args.output_dir / "roi_metrics.csv"
@@ -1352,8 +1650,10 @@ def main() -> int:
                 "change are annotated"
             ),
             "combined_chart_encoding": (
-                "bubble area uses one global monotonic power mapping of "
-                "ROI sampling share (exponent 2.5; maximum area 760 pt^2)"
+                "red-blue chart uses one global monotonic power mapping; "
+                "the four-ROI chart encodes each Ours bubble relative to "
+                "its ROI-specific Base sampling share (Base area = 360 "
+                "pt^2; exponent 2.5)"
             ),
             "combined_chart_quantity": {
                 "name": "ROI Sampling Share",
@@ -1375,9 +1675,18 @@ def main() -> int:
                 args.minimum_lower_gaussian_repeats
             ),
             "minimum_center_distance": args.minimum_center_distance,
+            "additional_roi_rules": {
+                "minimum_center_distance": 120.0,
+                "minimum_negative_psnr_gain": 1.25,
+                "minimum_sampling_share": 2.0,
+                "maximum_sampling_share": 10.0,
+                "maximum_positive_gaussian_change": 50.0,
+            },
         },
         "red_roi": _json_ready(red),
         "blue_roi": _json_ready(blue),
+        "orange_roi": _json_ready(orange),
+        "purple_roi": _json_ready(purple),
         "full_frame_probability_change": {
             "normalized_sum": float(frame_probability_change.sum()),
             "positive_mass": float(
@@ -1403,7 +1712,16 @@ def main() -> int:
         json.dumps(audit, indent=2),
         encoding="utf-8",
     )
-    print(json.dumps({"red": red["box"], "blue": blue["box"]}))
+    print(
+        json.dumps(
+            {
+                "red": red["box"],
+                "blue": blue["box"],
+                "orange": orange["box"],
+                "purple": purple["box"],
+            }
+        )
+    )
     return 0
 
 

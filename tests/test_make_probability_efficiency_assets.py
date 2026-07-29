@@ -1,3 +1,4 @@
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -165,6 +166,138 @@ class ProbabilityEfficiencyAssetTests(unittest.TestCase):
         )
         self.assertEqual(red["box"], (30, 0, 40, 10))
         self.assertEqual(blue["box"], (80, 0, 90, 10))
+
+    def test_additional_roi_selection_keeps_complementary_local_evidence(self):
+        self.assertTrue(
+            hasattr(
+                probability_assets,
+                "choose_additional_redistribution_rois",
+            )
+        )
+        if not hasattr(
+            probability_assets,
+            "choose_additional_redistribution_rois",
+        ):
+            return
+
+        def candidate(
+            box,
+            *,
+            psnr_gain,
+            mu_delta,
+            mu_relative_change,
+            base_share,
+            ours_share,
+            base_gaussians,
+            ours_gaussians,
+            lower_repeats,
+        ):
+            return {
+                "box": box,
+                "psnr_gain": psnr_gain,
+                "positive_psnr_repeats": 3,
+                "mu_delta": mu_delta,
+                "mu_relative_change": mu_relative_change,
+                "redistribution_l1": 10.0,
+                "gaussian_reduction": (
+                    base_gaussians - ours_gaussians
+                ),
+                "lower_gaussian_repeats": lower_repeats,
+                "sampling_share": {
+                    "base": [base_share] * 3,
+                    "r_e_d": [ours_share] * 3,
+                },
+                "gaussian_numbers": {
+                    "base": [base_gaussians] * 3,
+                    "r_e_d": [ours_gaussians] * 3,
+                },
+            }
+
+        candidates = [
+            candidate(
+                (30, 0, 40, 10),
+                psnr_gain=0.5,
+                mu_delta=5.0,
+                mu_relative_change=0.08,
+                base_share=2.0,
+                ours_share=2.2,
+                base_gaussians=100,
+                ours_gaussians=101,
+                lower_repeats=0,
+            ),
+            candidate(
+                (60, 0, 70, 10),
+                psnr_gain=0.8,
+                mu_delta=12.0,
+                mu_relative_change=0.20,
+                base_share=7.0,
+                ours_share=8.0,
+                base_gaussians=100,
+                ours_gaussians=120,
+                lower_repeats=0,
+            ),
+            candidate(
+                (90, 0, 100, 10),
+                psnr_gain=1.0,
+                mu_delta=-8.0,
+                mu_relative_change=-0.25,
+                base_share=3.0,
+                ours_share=2.3,
+                base_gaussians=100,
+                ours_gaussians=82,
+                lower_repeats=3,
+            ),
+        ]
+        orange, purple = (
+            probability_assets.choose_additional_redistribution_rois(
+                candidates,
+                protected_boxes=((0, 0, 10, 10),),
+                minimum_center_distance=15.0,
+                minimum_psnr_gain=0.05,
+                minimum_negative_psnr_gain=0.5,
+                minimum_positive_repeats=2,
+                minimum_mu_change=3.0,
+                minimum_sampling_share=1.5,
+                maximum_sampling_share=4.0,
+                maximum_positive_gaussian_change=5.0,
+                minimum_gaussian_reduction=5.0,
+                minimum_lower_gaussian_repeats=2,
+            )
+        )
+        self.assertEqual(orange["box"], (30, 0, 40, 10))
+        self.assertEqual(purple["box"], (90, 0, 100, 10))
+
+    def test_combined_chart_accepts_two_additional_regions(self):
+        parameters = inspect.signature(
+            save_combined_roi_efficiency_chart
+        ).parameters
+        self.assertIn("orange_gaussian_numbers", parameters)
+        self.assertIn("purple_gaussian_numbers", parameters)
+        self.assertIn("relative_share_area", parameters)
+
+    def test_relative_share_bubble_areas_use_each_roi_base_as_reference(self):
+        self.assertTrue(
+            hasattr(
+                probability_assets,
+                "relative_sampling_share_bubble_areas",
+            )
+        )
+        if not hasattr(
+            probability_assets,
+            "relative_sampling_share_bubble_areas",
+        ):
+            return
+        areas = (
+            probability_assets.relative_sampling_share_bubble_areas(
+                np.array([2.0, 2.2], dtype=np.float64),
+                base_area=360.0,
+                contrast_exponent=2.5,
+            )
+        )
+        np.testing.assert_allclose(
+            areas,
+            np.array([360.0, 360.0 * 1.1**2.5]),
+        )
 
     def test_bubble_chart_uses_base_and_ours_labels(self):
         with tempfile.TemporaryDirectory() as directory:
