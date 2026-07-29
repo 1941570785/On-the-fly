@@ -349,6 +349,16 @@ class ProbabilityEfficiencyAssetTests(unittest.TestCase):
         self.assertLessEqual(curvatures["red"], -1.2)
         self.assertLessEqual(curvatures["orange"], -1.4)
 
+    def test_probability_roi_boxes_remain_visible_when_reduced(self):
+        self.assertGreaterEqual(
+            probability_assets.ROI_BOX_COLOR_LINEWIDTH,
+            4.0,
+        )
+        self.assertGreater(
+            probability_assets.ROI_BOX_HALO_LINEWIDTH,
+            probability_assets.ROI_BOX_COLOR_LINEWIDTH,
+        )
+
     def test_combined_chart_exports_both_regions(self):
         with tempfile.TemporaryDirectory() as directory:
             stem = Path(directory) / "combined"

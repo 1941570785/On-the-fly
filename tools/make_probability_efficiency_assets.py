@@ -36,6 +36,8 @@ ROI_ARROW_CURVATURES = {
     "orange": -2.45,
     "purple": 0.42,
 }
+ROI_BOX_HALO_LINEWIDTH = 6.2
+ROI_BOX_COLOR_LINEWIDTH = 4.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -946,7 +948,7 @@ def _add_probability_roi_boxes(
                 y1 - y0,
                 fill=False,
                 edgecolor="white",
-                linewidth=4.2,
+                linewidth=ROI_BOX_HALO_LINEWIDTH,
                 zorder=5,
             )
         )
@@ -957,7 +959,7 @@ def _add_probability_roi_boxes(
                 y1 - y0,
                 fill=False,
                 edgecolor=color,
-                linewidth=2.6,
+                linewidth=ROI_BOX_COLOR_LINEWIDTH,
                 zorder=6,
             )
         )
