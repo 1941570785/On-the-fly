@@ -177,13 +177,17 @@ class ProbabilityEfficiencyAssetTests(unittest.TestCase):
             np.array([1500.0, 1500.0 * 0.8**4]),
         )
 
-    def test_combined_bubble_area_is_linear_in_sampling_share(self):
+    def test_combined_bubble_area_contrast_enhances_sampling_share(self):
         shares = np.array([3.0, 1.5, 0.75], dtype=np.float64)
         areas = sampling_share_bubble_areas(
             shares,
             maximum_area=600.0,
+            contrast_exponent=2.5,
         )
-        np.testing.assert_allclose(areas, np.array([600.0, 300.0, 150.0]))
+        np.testing.assert_allclose(
+            areas,
+            600.0 * np.power(shares / shares.max(), 2.5),
+        )
 
     def test_combined_chart_exports_both_regions(self):
         with tempfile.TemporaryDirectory() as directory:

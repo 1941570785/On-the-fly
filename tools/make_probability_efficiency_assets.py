@@ -26,6 +26,8 @@ BLUE_COLOR = "#1F77B4"
 OURS_SAMPLING_COLOR = "#66A866"
 BUBBLE_BASE_AREA = 1700.0
 BUBBLE_CONTRAST_EXPONENT = 4.0
+SAMPLING_SHARE_BUBBLE_MAX_AREA = 480.0
+SAMPLING_SHARE_BUBBLE_CONTRAST_EXPONENT = 2.5
 
 
 def parse_args() -> argparse.Namespace:
@@ -231,6 +233,7 @@ def sampling_share_bubble_areas(
     sampling_share: np.ndarray,
     *,
     maximum_area: float = 620.0,
+    contrast_exponent: float = 1.0,
 ) -> np.ndarray:
     shares = np.asarray(sampling_share, dtype=np.float64)
     if shares.ndim != 1 or shares.size == 0 or np.any(shares <= 0):
@@ -239,7 +242,13 @@ def sampling_share_bubble_areas(
         raise ValueError("sampling shares must be finite")
     if not math.isfinite(maximum_area) or maximum_area <= 0:
         raise ValueError("maximum bubble area must be positive")
-    return maximum_area * shares / float(np.max(shares))
+    if (
+        not math.isfinite(contrast_exponent)
+        or contrast_exponent <= 0
+    ):
+        raise ValueError("bubble contrast exponent must be positive")
+    normalized = shares / float(np.max(shares))
+    return maximum_area * np.power(normalized, contrast_exponent)
 
 
 def save_efficiency_bubble_chart(
@@ -453,7 +462,8 @@ def save_combined_roi_efficiency_chart(
     )
     all_areas = sampling_share_bubble_areas(
         all_shares,
-        maximum_area=340.0,
+        maximum_area=SAMPLING_SHARE_BUBBLE_MAX_AREA,
+        contrast_exponent=SAMPLING_SHARE_BUBBLE_CONTRAST_EXPONENT,
     )
     area_offset = 0
     x_limits = (
@@ -1305,8 +1315,8 @@ def main() -> int:
                 "change are annotated"
             ),
             "combined_chart_encoding": (
-                "bubble area is proportional to ROI sampling share "
-                "(100 * ROI probability mass / full-frame probability mass)"
+                "bubble area uses one global monotonic power mapping of "
+                "ROI sampling share (exponent 2.5; maximum area 480 pt^2)"
             ),
             "combined_chart_quantity": {
                 "name": "ROI Sampling Share",
