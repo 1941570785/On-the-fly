@@ -2,7 +2,7 @@
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
 #
-# This software is free for non-commercial, research and evaluation use 
+# This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
@@ -50,18 +50,46 @@ from utils import (
     rotation_distance,
 )
 from dataloaders.read_write_model import write_model
+from asr_gs.config import resolve_runtime_config
+from asr_gs.diagnostics import should_track_render_response
+from asr_gs.refinement_policy import (
+    extra_refinement_decision,
+    updated_render_response,
+)
+from asr_gs.response_sampling import (
+    response_guided_sampling_probability,
+    sampling_response_verdict,
+    sampling_scene_guard,
+)
+from asr_gs.transaction import (
+    overwrite_selected_gaussian_value_snapshot,
+    refinement_candidate_acceptance,
+    refinement_reference_guard,
+    refinement_time_budget_seconds,
+    rendering_response_gap,
+    restore_selected_gaussian_state,
+    scale_gaussian_gradients,
+    select_refinement_reference_indices,
+    snapshot_selected_gaussian_state,
+)
+
+
+def _metric_float(value) -> float:
+    if torch.is_tensor(value):
+        return float(value.detach().cpu().item())
+    return float(value)
 
 
 class SceneModel:
     """
     【场景表示模块】场景模型类
-    
+
     这是整个3D重建系统的核心类，负责管理：
     1. 3D高斯点云（Gaussians）：场景的几何和外观表示
     2. 关键帧（Keyframes）：包含图像、位姿、深度等信息
     3. 锚点（Anchors）：用于大尺度场景的分块管理
     4. 渲染和优化：从任意视角渲染场景，并优化高斯参数
-    
+
     主要功能：
     - 添加新关键帧并初始化高斯点
     - 渲染场景（支持多分辨率）
@@ -79,7 +107,7 @@ class SceneModel:
     ):
         """
         【场景表示模块】初始化场景模型
-        
+
         Args:
             width: 图像宽度（像素）
             height: 图像高度（像素）
@@ -91,6 +119,37 @@ class SceneModel:
         self.width = width
         self.height = height
         self.matcher = matcher
+        self.asr_gs_config = resolve_runtime_config(
+            args,
+            inference_mode=inference_mode,
+        )
+        self.sampling_config = self.asr_gs_config.sampling
+        self.refinement_config = self.asr_gs_config.refinement
+        self.response_sampling_stats = {
+            "events": 0,
+            "applied": 0,
+            "clipped_pixels": 0,
+            "mass_before": 0.0,
+            "mass_after": 0.0,
+            "coverage_deficit_sum": 0.0,
+            "response_pending": 0,
+            "response_evaluated": 0,
+            "response_good": 0,
+            "response_bad": 0,
+            "response_degraded": 0,
+            "response_low": 0,
+        }
+        self.refinement_stats = {
+            "events": 0,
+            "requested": 0,
+            "attempted": 0,
+            "committed": 0,
+            "rolled_back": 0,
+            "requested_iterations": 0,
+            "realized_iterations": 0,
+            "base_runtime_seconds": 0.0,
+            "runtime_seconds": 0.0,
+        }
         self.centre = torch.tensor([(width - 1) / 2, (height - 1) / 2], device="cuda")  # 图像中心点
         self.anchor_overlap = args.anchor_overlap  # 锚点重叠区域大小（用于平滑融合）
         self.optimization_thread = None  # 异步优化线程（流式模式下使用）
@@ -119,7 +178,7 @@ class SceneModel:
             self.active_frames_cpu = []  # CPU上的关键帧索引
             self.active_frames_gpu = []  # GPU上的关键帧索引
             self.guided_mvs = GuidedMVS(args)  # 【场景表示模块】引导多视图立体匹配（用于深度估计）
-            
+
             # 学习率配置（位置参数使用衰减学习率）
             self.lr_dict = {
                 "xyz": {
@@ -214,7 +273,7 @@ class SceneModel:
     def reset_optimizer(self):
         """
         【优化模块】重置优化器
-        
+
         重新初始化Adam优化器，确保所有高斯参数都启用梯度计算。
         用于在锚点切换或优化器重置时调用。
         """
@@ -232,7 +291,7 @@ class SceneModel:
     def xyz(self):
         """
         【属性】获取高斯点的3D位置 [N, 3]
-        
+
         Returns:
             torch.Tensor: 高斯点的世界坐标系位置
         """
@@ -242,7 +301,7 @@ class SceneModel:
     def f_dc(self):
         """
         【属性】获取球谐函数DC项（基础颜色）[N, 1, 3]
-        
+
         Returns:
             torch.Tensor: 球谐函数的基础颜色系数
         """
@@ -252,7 +311,7 @@ class SceneModel:
     def f_rest(self):
         """
         【属性】获取球谐函数高阶项（视角相关颜色）[N, SH_rest, 3]
-        
+
         Returns:
             torch.Tensor: 球谐函数的高阶系数（控制视角相关的外观变化）
         """
@@ -262,7 +321,7 @@ class SceneModel:
     def scaling(self):
         """
         【属性】获取高斯点的尺度 [N, 3]（从log空间转换）
-        
+
         Returns:
             torch.Tensor: 高斯点在三个轴上的尺度（指数空间）
         """
@@ -272,7 +331,7 @@ class SceneModel:
     def rotation(self):
         """
         【属性】获取高斯点的旋转四元数 [N, 4]（归一化）
-        
+
         Returns:
             torch.Tensor: 归一化的四元数旋转
         """
@@ -282,7 +341,7 @@ class SceneModel:
     def opacity(self):
         """
         【属性】获取高斯点的不透明度 [N, 1]（从logit空间转换）
-        
+
         Returns:
             torch.Tensor: 不透明度值 [0, 1]
         """
@@ -292,7 +351,7 @@ class SceneModel:
     def n_active_gaussians(self):
         """
         【属性】获取当前活跃的高斯点数量
-        
+
         Returns:
             int: 高斯点数量
         """
@@ -302,14 +361,14 @@ class SceneModel:
     def from_scene(cls, scene_dir: str, args):
         """
         【场景表示模块】从保存的场景目录加载场景模型
-        
+
         从场景目录读取元数据和锚点，重建场景模型。
         用于推理模式下的场景加载。
-        
+
         Args:
             scene_dir: 场景目录路径（包含metadata.json和point_clouds/）
             args: 配置参数
-            
+
         Returns:
             SceneModel: 加载的场景模型实例
         """
@@ -352,7 +411,7 @@ class SceneModel:
     def first_active_frame(self):
         """
         【属性】获取活跃锚点中第一个关键帧的索引
-        
+
         Returns:
             int: 第一个关键帧的索引
         """
@@ -362,7 +421,7 @@ class SceneModel:
     def last_active_frame(self):
         """
         【属性】获取活跃锚点中最后一个关键帧的索引
-        
+
         Returns:
             int: 最后一个关键帧的索引
         """
@@ -372,32 +431,40 @@ class SceneModel:
     def n_active_keyframes(self):
         """
         【属性】获取活跃关键帧的数量
-        
+
         Returns:
             int: 活跃关键帧数量
         """
         return self.last_active_frame - self.first_active_frame + 1
 
-    def optimization_step(self, finetuning=False):
+    def optimization_step(
+        self,
+        finetuning=False,
+        *,
+        keyframe_id_override=None,
+        update_pose=True,
+    ):
         """
         【优化模块】执行一步优化
-        
+
         这是训练的核心函数，执行以下步骤：
         1. 选择要优化的关键帧
         2. 从该关键帧视角渲染场景
         3. 计算损失（L1 + DSSIM + 深度损失）
         4. 反向传播并更新参数（高斯参数 + 关键帧位姿）
-        
+
         Args:
             finetuning: 是否为微调模式（微调时随机选择关键帧）
         """
         if len(self.xyz) == 0:
             return
-        
+
         # ========== 关键帧选择策略 ==========
         # 训练策略：以一定概率使用最新关键帧，否则随机选择
         # 这样可以平衡新区域的学习和旧区域的细化
-        if (
+        if keyframe_id_override is not None:
+            keyframe_id = int(keyframe_id_override)
+        elif (
             np.random.rand() > self.use_last_frame_proba
             or self.last_trained_id == -1
             or finetuning
@@ -442,12 +509,48 @@ class SceneModel:
             + (1 - self.lambda_dssim) * l1_loss
             + keyframe.depth_loss_weight * depth_loss
         )
+        if should_track_render_response(
+            sampling_enabled=self.sampling_config.enabled,
+            refinement_enabled=self.refinement_config.enabled,
+            is_latest_keyframe=keyframe is self.keyframes[-1],
+            is_test=bool(keyframe.info["is_test"]),
+        ):
+            valid_mask = (
+                keyframe.mask_pyr[lvl]
+                if keyframe.mask_pyr is not None
+                else None
+            )
+            gap = (
+                rendering_response_gap(
+                    image.detach() - gt_image.detach(),
+                    valid_mask,
+                )
+                if self.refinement_config.enabled
+                else {"coverage_deficit": 0.0, "selectivity": 0.0}
+            )
+            previous = keyframe.info.get("asr_gs_render_response")
+            keyframe.info["asr_gs_render_response"] = updated_render_response(
+                previous,
+                _metric_float((image.detach() - gt_image.detach()).square().mean()),
+                projection_coverage_deficit=float(
+                    keyframe.info.get(
+                        "asr_gs_projection_coverage",
+                        {},
+                    ).get("coverage_deficit", 0.0)
+                ),
+                representation_coverage_deficit=float(
+                    gap["coverage_deficit"]
+                ),
+                representation_gap_selectivity=float(gap["selectivity"]),
+            )
+            self._update_response_sampling_guard(keyframe)
         loss.backward()
 
         # ========== 参数更新 ==========
         with torch.no_grad():
             # 【优化模块】更新关键帧位姿（6D表示 + 曝光 + 深度缩放/偏移）
-            keyframe.step()
+            if update_pose:
+                keyframe.step()
 
             # 测试关键帧不参与场景优化（仅用于评估）
             if not keyframe.info["is_test"]:
@@ -462,17 +565,383 @@ class SceneModel:
             keyframe.latest_invdepth = render_pkg["invdepth"].detach()
 
         # 标记位姿缓存失效（需要重新计算）
-        self.valid_Rt_cache[keyframe_id] = False
+        if update_pose:
+            self.valid_Rt_cache[keyframe_id] = False
         self.last_trained_id = keyframe_id
+
+    def _transactional_refinement_forward(
+        self,
+        keyframe_id: int,
+        background: torch.Tensor,
+    ):
+        keyframe = self.keyframes[keyframe_id]
+        level = int(keyframe.pyr_lvl)
+        package = self.render_from_id(
+            keyframe_id,
+            pyr_lvl=level,
+            bg=background,
+        )
+        image = package["render"]
+        inverse_depth = package["invdepth"]
+        target = keyframe.image_pyr[level]
+        mono_inverse_depth = keyframe.get_mono_idepth(level)
+        if keyframe.mask_pyr is not None:
+            mask = keyframe.mask_pyr[level]
+            image = image * mask
+            target = target * mask
+            inverse_depth = inverse_depth * mask
+            mono_inverse_depth = mono_inverse_depth * mask
+
+        l1_loss = (image - target).abs().mean()
+        dssim_loss = 1 - fused_ssim(image[None], target[None])
+        depth_loss = (inverse_depth - mono_inverse_depth).abs().mean()
+        total_loss = (
+            self.lambda_dssim * dssim_loss
+            + (1 - self.lambda_dssim) * l1_loss
+            + keyframe.depth_loss_weight * depth_loss
+        )
+        metrics = {
+            "total_loss": _metric_float(total_loss),
+            "rgb_mse": _metric_float((image - target).square().mean()),
+            "dssim": _metric_float(dssim_loss),
+            "depth": _metric_float(depth_loss),
+            "l1": _metric_float(l1_loss),
+        }
+        return (
+            total_loss,
+            metrics,
+            package["visibility_filter"].detach().bool(),
+            int(package["radii"].shape[0]),
+        )
+
+    def _record_refinement(self, result: dict[str, object]) -> None:
+        stats = self.refinement_stats
+        stats["events"] += 1
+        if int(result.get("requested_extra_iterations", 0)) > 0:
+            stats["requested"] += 1
+        if bool(result.get("transaction_attempted", False)):
+            stats["attempted"] += 1
+        if bool(result.get("committed", False)):
+            stats["committed"] += 1
+        if bool(result.get("rolled_back", False)):
+            stats["rolled_back"] += 1
+        stats["requested_iterations"] += int(
+            result.get("requested_extra_iterations", 0)
+        )
+        stats["realized_iterations"] += int(
+            result.get("realized_iterations", 0)
+        )
+        stats["runtime_seconds"] += float(
+            result.get("refinement_runtime_seconds", 0.0)
+        )
+
+    def _update_response_sampling_guard(self, keyframe: Keyframe) -> None:
+        sampling = keyframe.info.get("asr_gs_response_sampling")
+        if not isinstance(sampling, dict) or not sampling.get("applied"):
+            return
+        if keyframe.info.get("asr_gs_sampling_response_evaluated"):
+            return
+        response = keyframe.info.get("asr_gs_render_response")
+        if not isinstance(response, dict):
+            return
+        verdict = sampling_response_verdict(
+            response,
+            self.sampling_config,
+        )
+        if verdict is None:
+            self.response_sampling_stats["response_pending"] += 1
+            return
+        stats = self.response_sampling_stats
+        stats["response_evaluated"] += 1
+        if verdict["verdict"] == "good":
+            stats["response_good"] += 1
+        else:
+            stats["response_bad"] += 1
+            if verdict["degraded"]:
+                stats["response_degraded"] += 1
+            if verdict["low_improvement"]:
+                stats["response_low"] += 1
+        keyframe.info["asr_gs_sampling_response_evaluated"] = verdict
+
+    def _run_transactional_refinement(
+        self,
+        decision: dict[str, object],
+    ) -> dict[str, object]:
+        result = dict(decision)
+        requested = min(
+            int(result.get("extra_iterations", 0)),
+            int(self.refinement_config.max_extra_iterations),
+        )
+        result.update(
+            {
+                "requested_extra_iterations": requested,
+                "transaction_attempted": False,
+                "committed": False,
+                "rolled_back": False,
+                "realized_iterations": 0,
+                "best_iteration": 0,
+                "early_stopped": False,
+                "time_budget_exhausted": False,
+                "refinement_runtime_seconds": 0.0,
+            }
+        )
+        if not bool(result.get("applied", False)) or requested <= 0:
+            result["applied"] = False
+            return result
+        if not self.keyframes or int(self.xyz.shape[0]) == 0:
+            result.update({"applied": False, "reason": "empty_scene"})
+            return result
+
+        current_id = len(self.keyframes) - 1
+        keyframe = self.keyframes[current_id]
+        if keyframe.info["is_test"]:
+            result.update({"applied": False, "reason": "test_frame"})
+            return result
+
+        reference_ids = select_refinement_reference_indices(
+            [bool(frame.info["is_test"]) for frame in self.keyframes],
+            current_index=current_id,
+            max_references=self.refinement_config.max_reference_views,
+        )
+        result["reference_keyframe_ids"] = reference_ids
+        if not reference_ids:
+            result.update(
+                {
+                    "applied": False,
+                    "reason": "no_historical_training_reference",
+                }
+            )
+            return result
+
+        available_seconds = refinement_time_budget_seconds(
+            self.refinement_stats["base_runtime_seconds"],
+            self.refinement_stats["runtime_seconds"],
+            target_ratio=self.refinement_config.runtime_target_ratio,
+        )
+        result["refinement_time_budget_seconds"] = available_seconds
+        if available_seconds <= 0:
+            result.update(
+                {
+                    "applied": False,
+                    "reason": "time_budget_exhausted",
+                    "time_budget_exhausted": True,
+                }
+            )
+            return result
+
+        background = keyframe.image_pyr[keyframe.pyr_lvl].new_zeros(3)
+        previous_trained_id = self.last_trained_id
+        cpu_rng_state = torch.random.get_rng_state()
+        numpy_rng_state = np.random.get_state()
+        cuda_rng_state = (
+            torch.cuda.get_rng_state(self.xyz.device)
+            if self.xyz.is_cuda
+            else None
+        )
+        snapshot = None
+        initial_visibility = None
+        initial_metrics = None
+        reference_metrics = None
+        best_metrics = None
+        best_reference_metrics = None
+        best_iteration = 0
+        completed = 0
+        consecutive_rejections = 0
+
+        if self.xyz.is_cuda:
+            torch.cuda.synchronize(self.xyz.device)
+        started = time.perf_counter()
+        result["transaction_attempted"] = True
+        try:
+            keyframe.zero_grad()
+            self.optimizer.zero_grad()
+            (
+                current_loss,
+                initial_metrics,
+                current_visibility,
+                gaussian_count,
+            ) = self._transactional_refinement_forward(
+                current_id,
+                background,
+            )
+            with torch.no_grad():
+                reference_metrics = [
+                    self._transactional_refinement_forward(
+                        reference_id,
+                        background,
+                    )[1]
+                    for reference_id in reference_ids
+                ]
+            initial_visibility = current_visibility.clone()
+            if not bool(initial_visibility.any()):
+                result.update(
+                    {
+                        "applied": False,
+                        "reason": "no_visible_gaussians",
+                        "rolled_back": True,
+                    }
+                )
+            else:
+                snapshot = snapshot_selected_gaussian_state(
+                    self.gaussian_params,
+                    initial_visibility,
+                )
+                for iteration in range(1, requested + 1):
+                    current_loss.backward()
+                    scale_gaussian_gradients(self.gaussian_params)
+                    with torch.no_grad():
+                        visibility = (
+                            current_visibility.bool() & initial_visibility
+                        )
+                        if bool(visibility.any()):
+                            self.optimizer.step(visibility, gaussian_count)
+                    self.optimizer.zero_grad()
+                    keyframe.zero_grad()
+                    completed = iteration
+
+                    (
+                        current_loss,
+                        candidate_metrics,
+                        current_visibility,
+                        gaussian_count,
+                    ) = self._transactional_refinement_forward(
+                        current_id,
+                        background,
+                    )
+                    acceptance = refinement_candidate_acceptance(
+                        initial_metrics,
+                        candidate_metrics,
+                        dssim_relative_tolerance=(
+                            self.refinement_config.dssim_relative_tolerance
+                        ),
+                        depth_relative_tolerance=(
+                            self.refinement_config.depth_relative_tolerance
+                        ),
+                    )
+                    with torch.no_grad():
+                        candidate_reference_metrics = [
+                            self._transactional_refinement_forward(
+                                reference_id,
+                                background,
+                            )[1]
+                            for reference_id in reference_ids
+                        ]
+                    reference_acceptance = refinement_reference_guard(
+                        reference_metrics,
+                        candidate_reference_metrics,
+                        relative_tolerance=(
+                            self.refinement_config.reference_relative_tolerance
+                        ),
+                    )
+                    candidate_is_best = (
+                        bool(acceptance["accepted"])
+                        and bool(reference_acceptance["accepted"])
+                        and (
+                            best_metrics is None
+                            or candidate_metrics["total_loss"]
+                            < best_metrics["total_loss"]
+                        )
+                    )
+                    if candidate_is_best:
+                        overwrite_selected_gaussian_value_snapshot(
+                            self.gaussian_params,
+                            initial_visibility,
+                            snapshot,
+                        )
+                        best_metrics = dict(candidate_metrics)
+                        best_reference_metrics = [
+                            dict(metrics)
+                            for metrics in candidate_reference_metrics
+                        ]
+                        best_iteration = iteration
+                        consecutive_rejections = 0
+                    else:
+                        consecutive_rejections += 1
+
+                    if time.perf_counter() - started >= available_seconds:
+                        result["time_budget_exhausted"] = True
+                        break
+                    if (
+                        consecutive_rejections
+                        >= self.refinement_config.consecutive_rejection_limit
+                    ):
+                        result["early_stopped"] = True
+                        break
+
+                restore_selected_gaussian_state(
+                    self.gaussian_params,
+                    initial_visibility,
+                    snapshot,
+                )
+                committed = best_metrics is not None
+                result.update(
+                    {
+                        "applied": committed,
+                        "committed": committed,
+                        "rolled_back": not committed,
+                        "reason": (
+                            "transaction_committed"
+                            if committed
+                            else "transaction_no_safe_candidate"
+                        ),
+                        "extra_iterations": best_iteration if committed else 0,
+                        "realized_iterations": completed,
+                        "best_iteration": best_iteration,
+                        "pre_refinement_metrics": dict(initial_metrics),
+                        "post_refinement_metrics": (
+                            dict(best_metrics)
+                            if best_metrics is not None
+                            else dict(initial_metrics)
+                        ),
+                        "pre_refinement_reference_metrics": [
+                            dict(metrics) for metrics in reference_metrics
+                        ],
+                        "post_refinement_reference_metrics": (
+                            best_reference_metrics
+                            if best_reference_metrics is not None
+                            else [
+                                dict(metrics)
+                                for metrics in reference_metrics
+                            ]
+                        ),
+                    }
+                )
+        finally:
+            if (
+                snapshot is not None
+                and initial_visibility is not None
+                and not bool(result.get("committed", False))
+                and result.get("reason")
+                != "transaction_no_safe_candidate"
+            ):
+                restore_selected_gaussian_state(
+                    self.gaussian_params,
+                    initial_visibility,
+                    snapshot,
+                )
+            self.optimizer.zero_grad()
+            keyframe.zero_grad()
+            torch.random.set_rng_state(cpu_rng_state)
+            np.random.set_state(numpy_rng_state)
+            if cuda_rng_state is not None:
+                torch.cuda.set_rng_state(cuda_rng_state, self.xyz.device)
+            self.last_trained_id = previous_trained_id
+
+        if self.xyz.is_cuda:
+            torch.cuda.synchronize(self.xyz.device)
+        result["refinement_runtime_seconds"] = (
+            time.perf_counter() - started
+        )
+        return result
 
     def optimization_loop(self, n_iters: int, run_until_interupt: bool = False):
         """
         【优化模块】优化循环
-        
+
         执行至少n_iters次优化步骤。
         如果run_until_interupt为True，会持续运行直到join_optimization_thread被调用
         （用于流式模式下持续优化直到添加下一个关键帧）。
-        
+
         Args:
             n_iters: 最小优化迭代次数
             run_until_interupt: 是否持续运行直到中断信号
@@ -480,15 +949,40 @@ class SceneModel:
         # 重置中断标志
         self.interupt_optimization = False
         i = 0
+        if self.xyz.is_cuda:
+            torch.cuda.synchronize(self.xyz.device)
+        base_started = time.perf_counter()
         # 持续优化直到达到最小迭代次数，或收到中断信号
-        while i < n_iters or (run_until_interupt and not self.interupt_optimization): 
+        while i < n_iters or (run_until_interupt and not self.interupt_optimization):
             self.optimization_step()
             i += 1
-        
+        if self.xyz.is_cuda:
+            torch.cuda.synchronize(self.xyz.device)
+        self.refinement_stats["base_runtime_seconds"] += (
+            time.perf_counter() - base_started
+        )
+
+        if not run_until_interupt and self.keyframes:
+            keyframe = self.keyframes[-1]
+            already_finalized = bool(
+                keyframe.info.get("asr_gs_refinement_finalized", False)
+            )
+            decision = extra_refinement_decision(
+                response=keyframe.info.get("asr_gs_render_response"),
+                base_iterations=int(n_iters),
+                is_test=bool(keyframe.info["is_test"]),
+                already_finalized=already_finalized,
+                config=self.refinement_config,
+            )
+            result = self._run_transactional_refinement(decision)
+            keyframe.info["asr_gs_refinement_finalized"] = True
+            keyframe.info["asr_gs_refinement"] = result
+            self._record_refinement(result)
+
     def join_optimization_thread(self):
         """
         【优化模块】中断优化循环并等待线程结束
-        
+
         发送中断信号给优化线程，并等待其完成当前迭代后退出。
         用于在添加新关键帧前确保优化线程已停止。
         """
@@ -498,14 +992,14 @@ class SceneModel:
             # 等待线程结束
             self.optimization_thread.join()
             self.optimization_thread = None
-    
+
     def optimize_async(self, n_iters: int):
         """
         【优化模块】异步启动优化线程
-        
+
         在后台线程中运行优化循环，至少执行n_iters次优化步骤。
         用于流式模式下在不阻塞主线程的情况下持续优化场景。
-        
+
         Args:
             n_iters: 最小优化迭代次数
         """
@@ -521,7 +1015,7 @@ class SceneModel:
     def harmonize_test_exposure(self):
         """
         【渲染模块】统一测试关键帧的曝光矩阵
-        
+
         通过平均相邻关键帧的曝光值来统一测试关键帧的曝光。
         这样可以确保测试帧的渲染质量不受曝光差异影响。
         """
@@ -543,14 +1037,14 @@ class SceneModel:
     def evaluate(self, eval_poses=False, with_LPIPS=False, all=False):
         """
         【评估模块】评估场景质量
-        
+
         计算渲染质量和位姿误差指标。
-        
+
         Args:
             eval_poses: 是否计算位姿误差
             with_LPIPS: 是否计算LPIPS感知损失
             all: 是否评估所有关键帧（False时只评估活跃锚点的关键帧）
-            
+
         Returns:
             dict: 包含PSNR、SSIM、LPIPS（可选）、位姿误差（可选）的字典
         """
@@ -566,7 +1060,7 @@ class SceneModel:
         n_test_frames = 0
         # 确定评估的关键帧范围
         start_index = 0 if all else self.active_anchor.keyframe_ids[0]
-        
+
         # 遍历测试关键帧并计算指标
         for index, keyframe in enumerate(self.keyframes[start_index:]):
             if keyframe.info["is_test"]:
@@ -575,7 +1069,7 @@ class SceneModel:
                 # 渲染当前视角
                 render_pkg = self.render_from_id(keyframe.index, pyr_lvl=0)
                 image = render_pkg["render"]
-                
+
                 # 应用掩码（如果有）
                 mask = (
                     keyframe.mask_pyr[0].cuda()
@@ -585,7 +1079,7 @@ class SceneModel:
                 mask = mask.expand_as(image)
                 image = image * mask
                 gt_image = gt_image * mask
-                
+
                 # 计算PSNR（峰值信噪比）
                 metrics["PSNR"] += psnr(image[mask], gt_image[mask])
                 # 计算SSIM（结构相似性）
@@ -628,17 +1122,17 @@ class SceneModel:
     def save_test_frames(self, out_dir):
         """
         【评估模块】保存测试关键帧的渲染图像
-        
+
         为所有测试关键帧渲染图像并保存到指定目录。
         用于生成评估结果的可视化。
-        
+
         Args:
             out_dir: 输出目录路径
         """
         # 统一测试关键帧曝光，确保渲染质量
         self.harmonize_test_exposure()
         os.makedirs(out_dir, exist_ok=True)
-        
+
         # 遍历所有关键帧，渲染并保存测试帧
         for keyframe in self.keyframes:
             if keyframe.info["is_test"]:
@@ -669,29 +1163,29 @@ class SceneModel:
     ):
         """
         【渲染模块】从指定关键帧ID渲染场景
-        
+
         从给定关键帧视角渲染场景，支持多分辨率（金字塔层级）和曝光校正。
-        
+
         Args:
             keyframe_id: 关键帧索引
             pyr_lvl: 金字塔层级（0=全分辨率，1=半分辨率，...）
             scaling_modifier: 高斯尺度缩放因子（用于可视化）
             bg: 背景颜色 [3]
-            
+
         Returns:
             dict: 包含渲染图像、逆深度、主要高斯ID、半径等信息的字典
         """
         # 获取关键帧和视图矩阵
         keyframe = self.keyframes[keyframe_id]
         view_matrix = keyframe.get_Rt().transpose(0, 1)
-        
+
         # 根据金字塔层级计算分辨率
         scale = 2**pyr_lvl
         width, height = self.width // scale, self.height // scale
-        
+
         # 调用底层渲染函数
         render_pkg = self.render(width, height, view_matrix, scaling_modifier, bg)
-        
+
         # ========== 应用曝光校正 ==========
         # 曝光矩阵：[3x4]，包含颜色变换和平移
         # 将渲染图像从原始颜色空间转换到关键帧的曝光空间
@@ -715,10 +1209,10 @@ class SceneModel:
     ):
         """
         【渲染模块】底层渲染函数
-        
+
         使用3D高斯光栅化渲染图像和深度。支持自定义分辨率和视场角。
         这是所有渲染功能的底层实现。
-        
+
         Args:
             width: 渲染图像宽度
             height: 渲染图像高度
@@ -728,7 +1222,7 @@ class SceneModel:
             top_view: 是否为顶视图模式（用于可视化高斯位置）
             fov_x: 水平视场角（弧度，可选，默认使用场景内参）
             fov_y: 垂直视场角（弧度，可选，默认使用场景内参）
-            
+
         Returns:
             dict: 包含渲染图像、逆深度、主要高斯ID、半径等信息的字典
         """
@@ -768,7 +1262,7 @@ class SceneModel:
             False,  # 其他选项
         )
         rasterizer = GaussianRasterizer(raster_settings)
-        
+
         # ========== 多线程安全的高斯参数访问 ==========
         with self.lock:
             # 【场景表示模块】推理模式下混合多个锚点的高斯参数
@@ -777,10 +1271,10 @@ class SceneModel:
                 self.gaussian_params, self.anchor_weights = Anchor.blend(
                     cam_centre, self.anchors, self.anchor_overlap
                 )
-            
+
             # 屏幕空间点（用于计算2D位置，需要梯度用于优化）
             screenspace_points = torch.zeros_like(self.xyz, requires_grad=True)
-            
+
             if self.xyz.shape[0] > 0:
                 # ========== 顶视图模式 ==========
                 # 顶视图：使用固定尺度和不透明度，便于可视化高斯点位置
@@ -791,7 +1285,7 @@ class SceneModel:
                     # 正常渲染：使用优化后的高斯参数
                     scaling = self.scaling
                     opacity = self.opacity
-                
+
                 # ========== 执行光栅化 ==========
                 # 【渲染模块】调用底层CUDA光栅化器进行渲染
                 color, invdepth, mainGaussID, radii = rasterizer(
@@ -813,7 +1307,7 @@ class SceneModel:
                     1, height, width, device="cuda", dtype=torch.int32
                 )
                 radii = torch.zeros(1, height, width, device="cuda")
-        
+
         # 返回渲染结果字典
         return {
             "render": color,  # RGB图像 [3, H, W]
@@ -827,13 +1321,13 @@ class SceneModel:
     def get_closest_by_cam(self, cam_centre, k=3):
         """
         【场景表示模块】根据相机中心获取最近的k个锚点
-        
+
         用于推理模式下选择需要混合的锚点。根据相机中心到锚点的距离排序。
-        
+
         Args:
             cam_centre: 相机中心位置 [3]
             k: 返回的锚点数量
-            
+
         Returns:
             tuple: (最近锚点列表, 锚点ID列表)
         """
@@ -842,7 +1336,7 @@ class SceneModel:
         offset = 0
         # 克隆相机中心列表（用于标记已选中的锚点）
         approx_cam_centres = self.approx_cam_centres.clone()
-        
+
         # 迭代选择k个最近的锚点
         for l in range(min(k, len(self.anchors))):
             if approx_cam_centres.shape[0] == 0:
@@ -870,15 +1364,15 @@ class SceneModel:
     def get_prev_keyframes(self, n: int, update_3dpts: bool, desc_kpts: DescribedKeypoints = None):
         """
         【场景表示模块】获取最近的n个关键帧
-        
+
         用于深度估计和匹配。如果提供了特征点描述符，会基于特征匹配数量选择关键帧；
         否则基于空间距离选择。
-        
+
         Args:
             n: 要返回的关键帧数量
             update_3dpts: 是否更新关键帧的3D点（重新三角化）
             desc_kpts: 特征点描述符（可选，用于基于匹配选择关键帧）
-            
+
         Returns:
             list[Keyframe]: 最近的n个关键帧列表
         """
@@ -916,10 +1410,10 @@ class SceneModel:
     def get_Rts(self):
         """
         【场景表示模块】获取所有关键帧的位姿矩阵（带缓存）
-        
+
         返回缓存的位姿矩阵，如果缓存失效则重新计算。
         用于提高渲染和评估时的性能。
-        
+
         Returns:
             torch.Tensor: 所有关键帧的位姿矩阵 [N, 4, 4]
         """
@@ -935,10 +1429,10 @@ class SceneModel:
     def get_gt_Rts(self, align):
         """
         【评估模块】获取真实位姿矩阵
-        
+
         Args:
             align: 是否对齐到优化后的位姿（用于计算误差）
-            
+
         Returns:
             torch.Tensor: 真实位姿矩阵 [N, 4, 4]
         """
@@ -953,9 +1447,9 @@ class SceneModel:
     def make_dummy_ext_tensor(self):
         """
         【优化模块】创建空的高斯参数张量字典
-        
+
         用于剪枝操作（只移除高斯点，不添加新点）。
-        
+
         Returns:
             dict: 空的高斯参数字典（所有张量的第一维为0）
         """
@@ -971,9 +1465,9 @@ class SceneModel:
     def reset(self, keyframe_id: int = -1):
         """
         【优化模块】移除指定关键帧中可见的高斯点
-        
+
         用于重置场景的特定区域（例如，当关键帧位姿发生大幅变化时）。
-        
+
         Args:
             keyframe_id: 关键帧索引（-1表示最新关键帧）
         """
@@ -990,19 +1484,19 @@ class SceneModel:
     def add_new_gaussians(self, keyframe_id: int = -1):
         """
         【场景表示模块】为新关键帧初始化3D高斯点
-        
+
         这是高斯点云增长的核心函数，执行以下步骤：
         1. 对齐关键帧的单目深度到三角化深度
         2. 基于Laplacian概率采样候选像素位置
         3. 使用引导MVS估计深度
         4. 初始化高斯参数（位置、颜色、尺度、不透明度等）
         5. 剪枝遮挡和过大的高斯点
-        
+
         Args:
             keyframe_id: 关键帧索引（-1表示最新关键帧）
         """
         keyframe = self.keyframes[keyframe_id]
-        
+
         # ========== 深度对齐 ==========
         # 如果关键点还没有3D点，先进行三角化
         if keyframe.desc_kpts.has_pt3d.sum() == 0:
@@ -1039,22 +1533,82 @@ class SceneModel:
         # 这避免了在已有良好表示的区域重复添加高斯点
         penalty = 0
         rendered_depth = None
+        residual_edge_response = None
         if self.xyz.shape[0] > 0:
             render_pkg = self.render_from_id(keyframe_id)
             render = render_pkg["render"]
             rendered_depth = 1 / render_pkg["invdepth"][0].clamp_min(1e-8)
+            render_support = render_pkg["mainGaussID"][0] >= 0
+            if keyframe.mask_pyr is not None:
+                keyframe_mask = keyframe.mask_pyr[0]
+                if keyframe_mask.ndim == 3:
+                    keyframe_mask = keyframe_mask[0]
+                render_support = render_support & keyframe_mask.bool()
+            coverage = float(
+                render_support.float().mean().detach().cpu().item()
+            )
+            keyframe.info["asr_gs_projection_coverage"] = {
+                "coverage": coverage,
+                "coverage_deficit": max(0.0, 1.0 - coverage),
+            }
             penalty = get_lapla_norm(render, self.disc_kernel)  # 渲染图像的Laplacian作为惩罚
+            residual = (render.detach() - img).abs().mean(dim=0)
+            residual_edge_response = (
+                0.65 * residual
+                + 0.35 * get_lapla_norm(
+                    residual[None],
+                    self.disc_kernel,
+                )
+            )
 
         # ========== 采样掩码生成 ==========
         # 公式3：最终采样概率 = init_proba - penalty
         # 在纹理丰富且渲染质量差的区域添加新高斯点
         init_proba *= self.init_proba_scaler
         penalty *= self.init_proba_scaler
-        sample_mask = torch.rand_like(init_proba) < init_proba - penalty
+        sample_probability = (init_proba - penalty).clamp_min(0.0)
+        if residual_edge_response is not None:
+            sample_probability, sampling_debug = (
+                response_guided_sampling_probability(
+                    sample_probability,
+                    residual_edge_response,
+                    self.sampling_config,
+                    coverage_deficit=float(
+                        keyframe.info["asr_gs_projection_coverage"][
+                            "coverage_deficit"
+                        ]
+                    ),
+                    scene_guard=sampling_scene_guard(
+                        self.response_sampling_stats,
+                        self.sampling_config,
+                    ),
+                )
+            )
+            keyframe.info["asr_gs_response_sampling"] = sampling_debug
+            stats = self.response_sampling_stats
+            stats["events"] += 1
+            if sampling_debug["applied"]:
+                stats["applied"] += 1
+            stats["clipped_pixels"] += int(
+                sampling_debug.get("clipped_pixels", 0)
+            )
+            stats["mass_before"] += float(
+                sampling_debug.get("mass_before", 0.0)
+            )
+            stats["mass_after"] += float(
+                sampling_debug.get(
+                    "mass_after_clipping",
+                    sampling_debug.get("mass_before", 0.0),
+                )
+            )
+            stats["coverage_deficit_sum"] += float(
+                sampling_debug.get("coverage_deficit", 0.0)
+            )
+        sample_mask = torch.rand_like(init_proba) < sample_probability
 
         # ========== 深度估计 ==========
         sampled_uv = self.uv[sample_mask]  # 采样像素坐标
-        
+
         # 【场景表示模块】使用引导多视图立体匹配（Guided MVS）估计深度
         # 策略：利用历史关键帧的密集特征进行立体匹配
         prev_KFs = self.get_prev_keyframes(
@@ -1065,7 +1619,7 @@ class SceneModel:
                 prev_KFs.pop(i)
                 break
         depth, accurate_mask = self.guided_mvs(sampled_uv, keyframe, prev_KFs)
-        
+
         # 过滤：保留置信度高且深度有效的点
         valid_mask = (keyframe.sample_conf(sampled_uv) > 0.5) * (depth > 1e-6)
         sample_mask[sample_mask.clone()] = valid_mask
@@ -1107,7 +1661,7 @@ class SceneModel:
         # 【场景表示模块】将像素坐标+深度转换为世界坐标系3D点
         new_pts = depth2points(sampled_uv, depth.unsqueeze(-1), self.f, self.centre)
         new_pts = (new_pts - keyframe.get_t()) @ keyframe.get_R()  # 转换到世界坐标系
-        
+
         # 添加从特征匹配三角化得到的3D点（这些点通常更准确）
         match_pts = keyframe.desc_kpts.pts3d[keyframe.desc_kpts.has_pt3d]
         new_pts = torch.cat([new_pts, match_pts], dim=0)
@@ -1201,7 +1755,7 @@ class SceneModel:
     def init_intrinsics(self):
         """
         【渲染模块】初始化相机内参
-        
+
         根据焦距和图像尺寸计算视场角（FoV）和投影矩阵。
         用于光栅化渲染时的坐标变换。
         """
@@ -1221,7 +1775,7 @@ class SceneModel:
     def move_rand_keyframe_to_cpu(self):
         """
         【内存管理模块】将随机关键帧移动到CPU内存
-        
+
         当活跃关键帧数量超过限制时，将部分关键帧移到CPU以节省GPU内存。
         保留最后n_kept_frames个关键帧始终在GPU上。
         """
@@ -1229,31 +1783,31 @@ class SceneModel:
         frame_id = np.random.choice(self.active_frames_gpu[:-self.n_kept_frames])
         self.keyframes[frame_id].to("cpu")
         self.active_frames_cpu.append(frame_id)
-        self.active_frames_gpu.remove(frame_id) 
+        self.active_frames_gpu.remove(frame_id)
 
     def move_rand_keyframe_to_gpu(self):
         """
         【内存管理模块】将随机关键帧移动到GPU内存
-        
+
         当需要更多关键帧参与训练时，从CPU加载关键帧到GPU。
         """
         if len(self.active_frames_cpu) > 0:
             frame_id = np.random.choice(self.active_frames_cpu)
             self.keyframes[frame_id].to("cuda")
             self.active_frames_gpu.insert(0, frame_id)  # 插入到列表开头（优先使用）
-            self.active_frames_cpu.remove(frame_id) 
+            self.active_frames_cpu.remove(frame_id)
 
     def add_keyframe(self, keyframe: Keyframe, f=None):
         """
         【场景表示模块】添加新关键帧到场景
-        
+
         这是场景增长的核心函数，执行以下操作：
         1. 将关键帧添加到列表并更新索引
         2. 更新相机内参（如果提供新的焦距）
         3. 更新位姿缓存
         4. 将关键帧添加到活跃锚点
         5. 管理GPU/CPU内存（当关键帧过多时）
-        
+
         Args:
             keyframe: 要添加的关键帧对象
             f: 新的焦距值（可选，如果提供则更新内参）
@@ -1327,7 +1881,7 @@ class SceneModel:
     def enable_inference_mode(self):
         """
         【场景表示模块】启用推理模式
-        
+
         切换到推理模式（停止训练），并更新锚点位置为活跃关键帧的平均位置。
         用于完成训练后的场景渲染。
         """
@@ -1337,10 +1891,10 @@ class SceneModel:
     def update_anchor(self, n_left_frames: int = 0):
         """
         【场景表示模块】更新锚点位置
-        
+
         将锚点位置设置为活跃关键帧相机中心的平均值，并可选地移除最后n_left_frames个关键帧。
         用于锚点固定（在创建新锚点前）。
-        
+
         Args:
             n_left_frames: 要从活跃锚点移除的关键帧数量（从末尾移除）
         """
@@ -1359,10 +1913,10 @@ class SceneModel:
     def place_anchor_if_needed(self):
         """
         【场景表示模块】根据高斯点大小判断是否需要创建新锚点
-        
+
         当大部分高斯点在屏幕上显示很小时（大尺度场景），创建新锚点并合并细小的高斯点。
         这是大尺度场景管理的关键函数。
-        
+
         策略：
         1. 检查屏幕空间大小<1的高斯点比例
         2. 如果超过阈值，固定当前锚点并创建新锚点
@@ -1470,18 +2024,18 @@ class SceneModel:
     def save(self, path: str, reconstruction_time: float = 0, n_frames: int = 0):
         """
         【评估模块】保存场景模型到磁盘
-        
+
         将完整的场景模型保存到指定路径，包括：
         1. 所有锚点的高斯点云（PLY格式）
         2. 场景元数据（JSON格式：配置、锚点位置、关键帧信息）
         3. 测试关键帧的渲染图像
         4. COLMAP格式的相机参数和图像信息
-        
+
         Args:
             path: 保存路径（如果为空字符串则跳过保存，仅返回指标）
             reconstruction_time: 重建耗时（秒），用于计算FPS
             n_frames: 处理的关键帧数量，用于计算FPS
-            
+
         Returns:
             dict: 包含场景统计信息（锚点数量、关键帧数量、时间、FPS、质量指标）的字典
         """
@@ -1528,6 +2082,13 @@ class SceneModel:
             ],
             "keyframes": [keyframe.to_json() for keyframe in self.keyframes],  # 关键帧信息（位姿、曝光等）
         }
+        metadata["asr_gs"] = {
+            "method": self.asr_gs_config.method,
+            "fingerprint": self.asr_gs_config.fingerprint,
+            "config": self.asr_gs_config.to_dict(),
+            "response_sampling": dict(self.response_sampling_stats),
+            "transactional_refinement": dict(self.refinement_stats),
+        }
         # 合并指标到元数据
         metadata = {**metrics, **metadata}
 
@@ -1560,14 +2121,14 @@ class SceneModel:
     ) -> list[Keyframe]:
         """
         【场景表示模块】根据位置获取最近的关键帧
-        
+
         计算给定位置到所有关键帧相机中心的距离，返回最近的count个关键帧。
         用于基于空间位置的关键帧查询（例如，查找特定区域的关键帧）。
-        
+
         Args:
             position: 查询位置（世界坐标系）[3]
             count: 要返回的关键帧数量（默认为1）
-            
+
         Returns:
             list[Keyframe]: 最近的关键帧列表（按距离从近到远排序）
         """
@@ -1582,21 +2143,21 @@ class SceneModel:
     def finetune_epoch(self):
         """
         【优化模块】遍历所有锚点并逐个优化
-        
+
         这是微调阶段的核心函数，用于在初始训练完成后进一步细化场景质量。
         逐个加载每个锚点到GPU，对其关键帧进行一轮优化，然后保存并卸载。
-        
+
         策略：
         1. 按顺序处理每个锚点
         2. 将锚点加载到GPU并设置为活跃锚点
         3. 遍历锚点的所有关键帧，对每个关键帧执行一次优化步骤
         4. 更新锚点参数并卸载到CPU（节省内存）
-        
+
         注意：这是微调模式（finetuning=True），优化时会随机选择关键帧，而不是优先选择最新帧。
         """
         # 初始化锚点混合权重（全部设为0，优化时只激活当前锚点）
         self.anchor_weights = np.zeros(len(self.anchors))
-        
+
         # 遍历所有锚点
         for anchor_id, anchor in enumerate(self.anchors):
             # ========== 激活当前锚点 ==========

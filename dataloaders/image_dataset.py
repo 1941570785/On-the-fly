@@ -20,6 +20,7 @@ from queue import Queue
 import logging
 from argparse import Namespace
 
+from dataloaders.baseline_eval import baseline_eval_metadata
 from dataloaders.read_write_model import read_model, qvec2rotmat
 from utils import get_image_names
 
@@ -59,7 +60,6 @@ class ImageDataset:
         # 【数据加载模块】收集并排序所有图像路径
         self.images_dir = os.path.join(args.source_path, args.images_dir)
         self.image_name_list = get_image_names(self.images_dir)
-        self.image_name_list.sort()  # 按文件名排序
         # 从指定索引开始（支持跳过前面的图像）
         self.image_name_list = self.image_name_list[args.start_at :]
         self.image_paths = [
@@ -98,10 +98,12 @@ class ImageDataset:
         # 【数据加载模块】为每张图像创建元信息字典
         # 包含：是否测试帧、图像名称等（位姿和内参后续从COLMAP加载）
         self.infos = {
-            name: {
-                "is_test": (args.test_hold > 0) and (i % args.test_hold == 0),  # 测试帧：每隔test_hold帧取一帧
-                "name": name,
-            }
+            name: baseline_eval_metadata(
+                sequence_index=i,
+                image_name=name,
+                test_hold=args.test_hold,
+                start_at=args.start_at,
+            )
             for i, name in enumerate(self.image_name_list)
         }
 

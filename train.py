@@ -2,7 +2,7 @@
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
 #
-# This software is free for non-commercial, research and evaluation use 
+# This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
@@ -11,6 +11,7 @@
 # 参考：https://github.com/graphdeco-inria/gaussian-splatting/blob/main/train.py
 
 
+import json
 import os
 import time
 
@@ -18,6 +19,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from asr_gs.diagnostics import summarize_pose_reliability
 from socketserver import TCPServer
 from http.server import SimpleHTTPRequestHandler
 from args import get_args
@@ -40,7 +42,7 @@ from utils import align_mean_up_fwd, increment_runtime
 if __name__ == "__main__":
     """
     主训练脚本：实现基于3D高斯点云的实时场景重建流程
-    
+
     整体流程：
     1. 初始化阶段：加载数据、初始化模块、启动可视化
     2. Bootstrap阶段：累积前N帧，进行初始姿态和焦距估计
@@ -49,13 +51,14 @@ if __name__ == "__main__":
     """
     # ========== 初始化阶段 ==========
     # 固定随机种子，保证实验结果可复现
-    torch.random.manual_seed(0)
-    torch.cuda.manual_seed(0)
-    np.random.seed(0)
+    args = get_args()
+    torch.random.manual_seed(args.experiment_seed)
+    torch.cuda.manual_seed(args.experiment_seed)
+    np.random.seed(args.experiment_seed)
+    if args.deterministic:
+        torch.use_deterministic_algorithms(True, warn_only=True)
 
     # 解析命令行参数（数据路径、训练超参、可视化选项等）
-    args = get_args()
-
     # 根据输入路径类型选择数据集加载器
     # - 流式数据集：URL格式（如rtsp://），用于实时视频流
     # - 本地数据集：本地图像文件夹，用于离线处理
@@ -70,34 +73,34 @@ if __name__ == "__main__":
     # ========== 核心模块初始化 ==========
     # 初始化所有核心模块并完成JIT编译（首次运行较慢，后续会缓存）
     print("Initializing modules and running just in time compilation, may take a while...")
-    
+
     # 计算匹配误差阈值（基于图像宽度，确保尺度不变性）
     max_error = max(args.match_max_error * width, 1.5)
     min_displacement = max(args.min_displacement * width, 30)
-    
+
     # 【姿态估计模块】特征匹配器：用于两帧间的特征点匹配和基础矩阵估计
     matcher = Matcher(args.fundmat_samples, max_error)
-    
+
     # 【姿态估计模块】三角化器：将匹配点对三角化为3D点
     triangulator = Triangulator(
         args.num_kpts, args.num_prev_keyframes_miniba_incr, max_error
     )
-    
+
     # 【姿态估计模块】姿态初始化器：负责初始化和增量姿态估计
     pose_initializer = PoseInitializer(
         width, height, triangulator, matcher, 2 * max_error, args
     )
     focal = pose_initializer.f_init
-    
+
     # 【场景表示模块】密集特征提取器：提取图像的密集特征图，用于后续的MVS
     dense_extractor = DenseExtractor(width, height)
-    
+
     # 【场景表示模块】单目深度估计器：使用Depth-Anything-V2模型估计单目深度
     depth_estimator = MonoDepthEstimator(width, height)
-    
+
     # 【场景表示模块】场景模型：管理3D高斯点云、关键帧、锚点等，负责渲染和优化
     scene_model = SceneModel(width, height, args, matcher)
-    
+
     # 【特征提取模块】特征检测器：使用XFeat提取稀疏关键点和描述子
     detector = Detector(args.num_kpts, width, height)
 
@@ -129,6 +132,7 @@ if __name__ == "__main__":
     # Dict of runtimes for each step
     runtimes = ["Load", "BAB", "tri", "BAI", "Add", "Init", "Opt", "anc"]
     metrics = {}
+    pose_diagnostics = []
 
     runtimes = {key: [0, 0] for key in runtimes}
     ## 场景重建主循环
@@ -148,12 +152,12 @@ if __name__ == "__main__":
                     "\033[31mPaused. Press the Start button in the webviewer\033[0m"
                 )
                 time.sleep(0.1)
-            
+
             # 支持网页端提前结束训练
             if viewer.state == "finish":
                 viewer.trainer_state = "finish"
                 break
-        
+
         # ========== 第一帧处理 ==========
         # 第一帧仅用于引导初始化，提取特征但不进行三角化
         if n_keyframes == 0:
@@ -168,10 +172,10 @@ if __name__ == "__main__":
         # 读取下一帧图像并提取特征
         image, info = dataset.getnext()
         desc_kpts = detector(image)  # 【特征提取模块】提取稀疏关键点和描述子
-        
+
         # 【姿态估计模块】当前帧与上一帧做特征匹配
         curr_prev_matches = matcher(desc_kpts, prev_desc_kpts)
-        
+
         # 基于匹配点位移判断是否生成新关键帧
         # 关键帧选择策略：当相机运动足够大时才添加关键帧，避免冗余
         dist = torch.norm(curr_prev_matches.kpts - curr_prev_matches.kpts_other, dim=-1)
@@ -197,7 +201,7 @@ if __name__ == "__main__":
                 Rts, f, _ = pose_initializer.initialize_bootstrap(bootstrap_desc_kpts)
                 focal = f.cpu().item()
                 increment_runtime(runtimes["BAB"], start_time)
-                
+
                 # 为每个Bootstrap关键帧创建Keyframe对象并添加到场景
                 for index, (keyframe_dict, desc_kpts, Rt) in enumerate(
                     zip(bootstrap_keyframe_dicts, bootstrap_desc_kpts, Rts)
@@ -222,17 +226,17 @@ if __name__ == "__main__":
                     )
                     scene_model.add_keyframe(keyframe, f)
                     increment_runtime(runtimes["Add"], start_time)
-                
+
                 if args.viewer_mode not in ["none", "web"]:
                     viewer.reset_intrinsics("point_view")
                 prev_keyframe = keyframe
-                
+
                 # 【场景表示模块】为每个Bootstrap关键帧初始化3D高斯点
                 for index in range(args.num_keyframes_miniba_bootstrap):
                     start_time = time.time()
                     scene_model.add_new_gaussians(index)
                     increment_runtime(runtimes["Init"], start_time)
-                
+
                 start_time = time.time()
                 # 【优化模块】初始优化：流式用异步优化（不阻塞主线程），离线直接同步优化
                 if is_stream:
@@ -258,7 +262,7 @@ if __name__ == "__main__":
                 needs_reboot = (
                     rel_dist > 0.1 * 5 or rel_dist < 0.1 / 3  # 运动模式异常
                 ) and n_keyframes - last_reboot > 50  # 距离上次重启足够远
-            
+
             if needs_reboot:
                 # 【姿态估计模块】重启：对末尾8个关键帧重新做Bootstrap BA
                 bs_kfs = scene_model.keyframes[-8:]
@@ -292,14 +296,21 @@ if __name__ == "__main__":
                     args.num_prev_keyframes_miniba_incr, True, desc_kpts
                 )
                 increment_runtime(runtimes["tri"], start_time)
-                
+
                 start_time = time.time()
                 # 【姿态估计模块】增量姿态初始化：使用PnP-RANSAC和Mini-BA估计新帧位姿
                 Rt = pose_initializer.initialize_incremental(
                     prev_keyframes, desc_kpts, n_keyframes, info["is_test"], image
                 )
+                pose_diagnostics.append(
+                    {
+                        **pose_initializer.last_incremental_debug,
+                        "dataset_frame_id": int(frameID),
+                        "registered": Rt is not None,
+                    }
+                )
                 increment_runtime(runtimes["BAI"], start_time)
-                
+
                 start_time = time.time()
                 if Rt is not None:  # 姿态估计成功
                     # 如果使用COLMAP位姿，则覆盖估计的位姿
@@ -321,13 +332,13 @@ if __name__ == "__main__":
                     scene_model.add_keyframe(keyframe)
                     prev_keyframe = keyframe
                     increment_runtime(runtimes["Add"], start_time)
-                    
+
                     # 【场景表示模块】为新关键帧初始化3D高斯点
                     # 使用Laplacian概率采样 + 引导MVS深度估计
                     start_time = time.time()
                     scene_model.add_new_gaussians()
                     increment_runtime(runtimes["Init"], start_time)
-                    
+
                     start_time = time.time()
                     # 【优化模块】优化场景：流式使用异步优化，离线直接循环优化
                     if is_stream:
@@ -399,6 +410,29 @@ if __name__ == "__main__":
     # 【保存模块】保存最终模型与评估指标
     print("Saving the reconstruction to:", args.model_path)
     metrics = scene_model.save(args.model_path, reconstruction_time, len(dataset))
+    os.makedirs(args.model_path, exist_ok=True)
+    pose_summary = summarize_pose_reliability(pose_diagnostics)
+    with open(
+        os.path.join(args.model_path, "pose_reliability_trace.json"),
+        "w",
+        encoding="utf-8",
+    ) as output:
+        json.dump(
+            {
+                "method": args.method,
+                "config_fingerprint": args.asr_gs_config.fingerprint,
+                "summary": pose_summary,
+                "events": pose_diagnostics,
+            },
+            output,
+            indent=2,
+        )
+    metadata_path = os.path.join(args.model_path, "metadata.json")
+    with open(metadata_path, "r", encoding="utf-8") as source:
+        metadata = json.load(source)
+    metadata["asr_gs"]["pose_reliability"] = pose_summary
+    with open(metadata_path, "w", encoding="utf-8") as output:
+        json.dump(metadata, output, indent=2)
     print(
         ", ".join(
             f"{metric}: {value:.3f}"
@@ -434,7 +468,7 @@ if __name__ == "__main__":
                 pbar.set_postfix_str(",".join(bar_postfix))
                 scene_model.inference_mode = False
                 torch.cuda.empty_cache()
-                
+
         # 设置为推理模式以便正确渲染
         scene_model.inference_mode = True
 

@@ -2,7 +2,7 @@
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
 #
-# This software is free for non-commercial, research and evaluation use 
+# This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
@@ -14,26 +14,34 @@
 import torch
 import math
 
+from asr_gs.pose_reliability import (
+    POLICY_NAME,
+    pose_candidate_improves,
+    pose_candidate_score,
+    should_retry_failed_pose,
+    should_review_weak_pose,
+)
 from poses.feature_detector import DescribedKeypoints
 from poses.mini_ba import MiniBA
 from utils import fov2focal, depth2points, sixD2mtx
 from scene.keyframe import Keyframe
 from poses.ransac import RANSACEstimator, EstimatorType
 
+
 class PoseInitializer():
     """
     【位姿估计模块】位姿初始化器
-    
+
     负责两种姿态初始化模式：
     1. Bootstrap模式：同时估计多个关键帧的初始位姿和焦距
     2. 增量模式：使用PnP-RANSAC和Mini-BA估计新关键帧的位姿
-    
+
     使用Mini-BA（小规模Bundle Adjustment）进行快速优化。
     """
     def __init__(self, width, height, triangulator, matcher, max_pnp_error, args):
         """
         【位姿估计模块】初始化位姿初始化器
-        
+
         Args:
             width: 图像宽度
             height: 图像高度
@@ -56,6 +64,8 @@ class PoseInitializer():
         self.num_pts_pnpransac = 2 * args.num_pts_miniba_incr
         self.num_pts_miniba_incr = args.num_pts_miniba_incr
         self.min_num_inliers = args.min_num_inliers
+        self.pose_config = args.asr_gs_config.pose
+        self.last_incremental_debug: dict[str, object] = {}
 
         # Initialize the focal length
         # 选择初始焦距：优先用户给定，其次 FOV，最后默认 0.7*width
@@ -76,8 +86,240 @@ class PoseInitializer():
         self.miniBA_incr = MiniBA(
             1, 1, 0, args.num_pts_miniba_incr, optimize_focal=False, optimize_3Dpts=False,
             make_cuda_graph=True, iters=args.iters_miniba_incr)
-        
+
         self.PnPRANSAC = RANSACEstimator(args.pnpransac_samples, self.max_pnp_error, EstimatorType.P4P)
+
+    def _motion_diagnostics(
+        self,
+        pose: torch.Tensor,
+        reference_pose: torch.Tensor,
+    ) -> dict[str, float]:
+        relative_rotation = (
+            pose[:3, :3] @ reference_pose[:3, :3].transpose(0, 1)
+        )
+        trace = torch.trace(relative_rotation).clamp(-1.0, 3.0)
+        cosine = ((trace - 1.0) * 0.5).clamp(-1.0, 1.0)
+        return {
+            "direct_pose_motion_rotation_deg": float(
+                torch.rad2deg(torch.arccos(cosine)).item()
+            ),
+            "direct_pose_motion_translation": float(
+                torch.linalg.vector_norm(
+                    pose[:3, 3] - reference_pose[:3, 3]
+                ).item()
+            ),
+        }
+
+    def _run_pose_attempt(
+        self,
+        *,
+        xyz_all: torch.Tensor,
+        uvs_all: torch.Tensor,
+        confs_all: torch.Tensor,
+        reference_pose: torch.Tensor,
+        attempt_id: int,
+    ) -> tuple[torch.Tensor | None, dict[str, object]]:
+        diagnostics: dict[str, object] = {
+            "attempt_id": int(attempt_id),
+            "num_2d3d_correspondences": int(len(xyz_all)),
+            "failure_reason": "",
+        }
+        if len(xyz_all) > self.num_pts_pnpransac:
+            selected = torch.multinomial(
+                confs_all,
+                self.num_pts_miniba_incr,
+                replacement=False,
+            )
+            xyz = xyz_all[selected]
+            uvs = uvs_all[selected]
+            confs = confs_all[selected]
+        else:
+            xyz = xyz_all
+            uvs = uvs_all
+            confs = confs_all
+        diagnostics["num_pnp_candidate_correspondences"] = int(len(xyz))
+
+        try:
+            pose_pnp, inliers = self.PnPRANSAC(
+                uvs,
+                xyz,
+                self.f,
+                self.centre,
+                reference_pose[:3, :2],
+                reference_pose[:3, 3],
+                confs,
+            )
+        except Exception as error:
+            diagnostics.update(
+                {
+                    "failure_reason": "pnp_ransac_exception",
+                    "exception_type": type(error).__name__,
+                }
+            )
+            return None, diagnostics
+
+        inliers = inliers.bool()
+        xyz = xyz[inliers]
+        uvs = uvs[inliers]
+        diagnostics["num_pnp_inliers"] = int(len(xyz))
+        if len(xyz) < 4:
+            diagnostics["failure_reason"] = "pnp_inliers_too_few"
+            return None, diagnostics
+
+        if len(xyz) >= self.num_pts_miniba_incr:
+            selected = torch.topk(
+                torch.rand_like(xyz[..., 0]),
+                self.num_pts_miniba_incr,
+                dim=0,
+                largest=False,
+            )[1]
+            xyz_ba = xyz[selected]
+            uvs_ba = uvs[selected]
+        else:
+            padding = self.num_pts_miniba_incr - len(xyz)
+            xyz_ba = torch.cat(
+                [xyz, torch.zeros(padding, 3, device=xyz.device)],
+                dim=0,
+            )
+            uvs_ba = torch.cat(
+                [uvs, -torch.ones(padding, 2, device=uvs.device)],
+                dim=0,
+            )
+
+        rotations = pose_pnp[:3, :2][None]
+        translations = pose_pnp[:3, 3][None]
+        (
+            rotations,
+            translations,
+            _,
+            _,
+            residuals,
+            _,
+            mask,
+        ) = self.miniBA_incr(
+            rotations,
+            translations,
+            self.f,
+            xyz_ba,
+            self.centre,
+            uvs_ba.view(-1),
+        )
+        inlier_count = int(mask.sum().item())
+        diagnostics["num_miniba_inliers"] = inlier_count
+        mask_sum = mask.sum()
+        diagnostics["direct_pose_miniba_residual"] = (
+            float(
+                ((residuals * mask).abs().sum() / mask_sum)
+                .detach()
+                .cpu()
+                .item()
+            )
+            if int(mask_sum.item()) > 0
+            else float("inf")
+        )
+
+        pose = torch.eye(4, device=pose_pnp.device, dtype=pose_pnp.dtype)
+        pose[:3, :3] = sixD2mtx(rotations)[0]
+        pose[:3, 3] = translations[0]
+        diagnostics.update(self._motion_diagnostics(pose, reference_pose))
+        diagnostics["candidate_score"] = pose_candidate_score(diagnostics)
+        if inlier_count > self.min_num_inliers:
+            return pose, diagnostics
+        diagnostics["failure_reason"] = "miniba_inliers_too_few"
+        return None, diagnostics
+
+    def _initialize_incremental_with_secondary_review(
+        self,
+        *,
+        xyz: torch.Tensor,
+        uvs: torch.Tensor,
+        confs: torch.Tensor,
+        reference_pose: torch.Tensor,
+        is_test: bool,
+    ) -> torch.Tensor | None:
+        config = self.pose_config
+        pose, initial = self._run_pose_attempt(
+            xyz_all=xyz,
+            uvs_all=uvs,
+            confs_all=confs,
+            reference_pose=reference_pose,
+            attempt_id=0,
+        )
+        attempts = [dict(initial)]
+
+        if pose is not None and should_review_weak_pose(initial, config):
+            best_pose = pose
+            best = dict(initial)
+            replacement_selected = False
+            for attempt_id in range(1, config.multi_hypothesis_attempts + 1):
+                candidate_pose, candidate = self._run_pose_attempt(
+                    xyz_all=xyz,
+                    uvs_all=uvs,
+                    confs_all=confs,
+                    reference_pose=reference_pose,
+                    attempt_id=attempt_id,
+                )
+                attempts.append(dict(candidate))
+                if (
+                    candidate_pose is not None
+                    and pose_candidate_improves(best, candidate, config)
+                ):
+                    best_pose = candidate_pose
+                    best = dict(candidate)
+                    replacement_selected = True
+            self.last_incremental_debug = {
+                **best,
+                "secondary_review": POLICY_NAME,
+                "review_reason": "weak_success",
+                "review_attempted": True,
+                "review_success": replacement_selected,
+                "attempts": attempts,
+            }
+            return best_pose
+
+        if pose is not None:
+            self.last_incremental_debug = {
+                **initial,
+                "secondary_review": POLICY_NAME,
+                "review_reason": "initial_pose_reliable",
+                "review_attempted": False,
+                "review_success": False,
+                "attempts": attempts,
+            }
+            return pose
+
+        if should_retry_failed_pose(initial, config):
+            for attempt_id in range(1, config.retry_attempts + 1):
+                candidate_pose, candidate = self._run_pose_attempt(
+                    xyz_all=xyz,
+                    uvs_all=uvs,
+                    confs_all=confs,
+                    reference_pose=reference_pose,
+                    attempt_id=attempt_id,
+                )
+                attempts.append(dict(candidate))
+                if candidate_pose is not None:
+                    self.last_incremental_debug = {
+                        **candidate,
+                        "secondary_review": POLICY_NAME,
+                        "review_reason": "supported_miniba_failure",
+                        "review_attempted": True,
+                        "review_success": True,
+                        "attempts": attempts,
+                    }
+                    return candidate_pose
+                if not should_retry_failed_pose(candidate, config):
+                    break
+
+        self.last_incremental_debug = {
+            **initial,
+            "secondary_review": POLICY_NAME,
+            "review_reason": "unrecoverable_initialization",
+            "review_attempted": len(attempts) > 1,
+            "review_success": False,
+            "attempts": attempts,
+        }
+        return None
 
     def build_problem(self,
                       desc_kpts_list: list[DescribedKeypoints],
@@ -124,7 +366,7 @@ class PoseInitializer():
                         idxk = desc_kpts_list[k].matches[lId].idx
                         idxl = desc_kpts_list[k].matches[lId].idx_other
 
-                        mask = selected_mask[idxk] 
+                        mask = selected_mask[idxk]
                         idxk = idxk[mask]
                         idxl = idxl[mask]
 
@@ -146,7 +388,7 @@ class PoseInitializer():
                                 idxl = desc_kpts_list[l].matches[mId].idx
                                 idxm = desc_kpts_list[l].matches[mId].idx_other
 
-                                mask = selected_mask_l[idxl] 
+                                mask = selected_mask_l[idxl]
                                 idxl = idxl[mask]
                                 idxm = idxm[mask]
 
@@ -166,14 +408,14 @@ class PoseInitializer():
     def initialize_bootstrap(self, desc_kpts_list: list[DescribedKeypoints], rebooting=False):
         """
         【位姿估计模块】Bootstrap位姿初始化
-        
+
         同时估计多个关键帧的初始位姿和焦距。
         使用Mini-BA进行联合优化，确保所有位姿和焦距的一致性。
-        
+
         Args:
             desc_kpts_list: 关键帧的描述关键点列表
             rebooting: 是否为重启模式（重启时不优化焦距）
-        
+
         Returns:
             Rts: 估计的位姿矩阵列表 [N, 4, 4]
             f: 估计的焦距
@@ -187,7 +429,7 @@ class PoseInitializer():
         for i in range(n_cams):
             for j in range(i + 1, n_cams):
                 _ = self.matcher(desc_kpts_list[i], desc_kpts_list[j], remove_outliers=True, update_kpts_flag="inliers", kID=i, kID_other=j)
-        
+
         ## Build the problem by organizing matches
         uvs, xyz_indices = self.build_problem(desc_kpts_list, npts, n_cams, n_cams, 2, list(range(n_cams)))
 
@@ -232,24 +474,32 @@ class PoseInitializer():
     def initialize_incremental(self, keyframes: list[Keyframe], curr_desc_kpts: DescribedKeypoints, index: int, is_test: bool, curr_img):
         """
         【位姿估计模块】增量位姿初始化
-        
+
         使用历史关键帧估计新关键帧的位姿。
         流程：
         1. 匹配当前帧与历史关键帧
         2. 使用PnP-RANSAC估计初始位姿
         3. 使用Mini-BA优化位姿
-        
+
         Args:
             keyframes: 历史关键帧列表
             curr_desc_kpts: 当前帧的描述关键点
             index: 当前帧索引
             is_test: 是否为测试帧
             curr_img: 当前图像（未使用，保留接口）
-        
+
         Returns:
             Rt: 估计的位姿矩阵 [4, 4]，如果失败返回None
         """
-        
+
+        self.last_incremental_debug = {
+            "frame_id": int(index),
+            "is_test": bool(is_test),
+            "secondary_review": (
+                POLICY_NAME if self.pose_config.enabled else "disabled"
+            ),
+        }
+
         # Match the current frame with previous keyframes
         # 收集可用于 PnP 的 2D-3D 对应
         xyz = []
@@ -270,6 +520,29 @@ class PoseInitializer():
         uvs = torch.cat(uvs, dim=0)
         confs = torch.cat(confs, dim=0)
         match_indices = torch.cat(match_indices, dim=0)
+
+        if self.pose_config.enabled:
+            pose = self._initialize_incremental_with_secondary_review(
+                xyz=xyz,
+                uvs=uvs,
+                confs=confs,
+                reference_pose=keyframes[0].get_Rt(),
+                is_test=is_test,
+            )
+            self.last_incremental_debug.update(
+                {
+                    "frame_id": int(index),
+                    "is_test": bool(is_test),
+                    "num_reference_frames": len(keyframes),
+                    "num_2d3d_correspondences": int(len(xyz)),
+                }
+            )
+            if pose is not None:
+                return pose
+            print("Too few inliers for pose initialization")
+            for keyframe in keyframes:
+                keyframe.desc_kpts.matches.pop(index, None)
+            return None
 
         # Subsample the points if there are too many
         # 先按置信度采样控制 PnP 输入规模
